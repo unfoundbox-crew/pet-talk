@@ -193,30 +193,23 @@ class TestUnknownProviderFailsClosed(unittest.TestCase):
 
 
 class TestNoSilentHostSwap(unittest.TestCase):
-    def test_unreachable_lenovo_host_raises_provider_unreachable(self):
-        llm = OpenAICompatibleLLM(base_url="http://100.99.50.84:8000/v1", model="x", api_key="k")
+    def test_unreachable_host_raises_provider_unreachable(self):
+        # A closed local port: httpx fails to connect, the provider reports a
+        # named provider_unreachable and never rewrites the base_url.
+        llm = OpenAICompatibleLLM(base_url="http://127.0.0.1:9/v1", model="x", api_key="k")
 
         async def run():
-            with patch("socket.socket") as mock_socket_cls:
-                mock_sock = MagicMock()
-                mock_sock.connect.side_effect = OSError("connection refused")
-                mock_socket_cls.return_value = mock_sock
-                sentences = []
-                async for s in llm.stream([{"role": "user", "content": "hi"}]):
-                    sentences.append(s)
-                return sentences
+            async for _ in llm.stream([{"role": "user", "content": "hi"}]):
+                pass
 
         with self.assertRaises(ProviderError) as cm:
             asyncio.run(run())
         self.assertEqual(cm.exception.reason, "provider_unreachable")
-        # Never silently rewritten to localhost.
-        self.assertIn("100.99.50.84", llm.base_url)
+        self.assertEqual(llm.base_url, "http://127.0.0.1:9/v1")
 
-    def test_non_lenovo_host_skips_reachability_probe(self):
-        llm = OpenAICompatibleLLM(base_url="http://127.0.0.1:9999/v1", model="x", api_key="k")
-        # Should not raise from _check_reachable (only the Tailscale fleet
-        # IP is probed); any failure here would come from the real request.
-        llm._check_reachable()
+    def test_no_fleet_host_in_defaults(self):
+        llm = OpenAICompatibleLLM(model="x", api_key="k")
+        self.assertNotIn("100.99.", llm.base_url)
 
 
 class _FakeChunk:
