@@ -98,11 +98,12 @@ Uses native macOS Carbon `RegisterEventHotKey` (works globally with **zero** inv
 |   `-- TECH-DESIGN.md           # Core wire protocol & duplex pipeline
 +-- personas/                    # Persona prompt specifications (donna.md, zuck.md)
 +-- qa/                          # TDD test suites & benchmarks
-|   +-- run_all.sh               # Master verification gate (runs all 12 test suites)
+|   +-- run_all.sh               # Master verification gate (runs all 13 test suites)
 |   +-- test_hotkey.py           # Carbon hotkey, kill switch & lifecycle tests
 |   +-- test_hud.py              # HUD nonactivating window & geometry tests
 |   +-- test_earcons.py          # Acoustic earcon latency assertions
 |   +-- test_dictation_matrix.py # Universal STT router & CleanProse tests
+|   +-- test_new_tyres.py        # Smallest.ai TTS & OpenAI gpt-5-nano reasoning tests
 |   `-- benchmarks/              # Voice forensics & wire latency probes
 +-- server/                      # FastAPI WebSocket duplex server
 |   +-- app.py                   # Duplex connection loop, router, stall cache
@@ -125,7 +126,7 @@ Uses native macOS Carbon `RegisterEventHotKey` (works globally with **zero** inv
 
 ## Verification & QA Gate
 
-To verify all 12 test suites:
+To verify all 13 test suites:
 
 ```bash
 bash qa/run_all.sh

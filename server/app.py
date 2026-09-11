@@ -109,6 +109,7 @@ RUNTIME_SETTINGS = {
     "deepgram_api_key": os.environ.get("DEEPGRAM_API_KEY", ""),
     "groq_api_key": os.environ.get("GROQ_API_KEY", ""),
     "openai_api_key": os.environ.get("OPENAI_API_KEY", ""),
+    "smallest_api_key": os.environ.get("SMALLEST_API_KEY", ""),
     "sensevoice_base_url": os.environ.get("SENSEVOICE_BASE_URL", "http://100.99.50.84:8086"),
     "llm_provider": os.environ.get(
         "LLM_PROVIDER",
@@ -153,6 +154,7 @@ llm = make_llm(
 tts = make_tts(
     provider=RUNTIME_SETTINGS["tts_provider"],
     base_url=RUNTIME_SETTINGS["kokoro_base_url"],
+    api_key=RUNTIME_SETTINGS["smallest_api_key"],
 )
 memory = Hippocampus(ledger_path=os.path.join(SERVER_DIR, "ledger.jsonl"))
 persona = load_persona(os.environ.get("DEFAULT_PERSONA", "donna"))
@@ -364,6 +366,8 @@ async def settings_post(req: dict) -> Response:
             RUNTIME_SETTINGS["tts_provider"] = str(req["tts_provider"]).lower()
         if "kokoro_base_url" in req:
             RUNTIME_SETTINGS["kokoro_base_url"] = str(req["kokoro_base_url"])
+        if "smallest_api_key" in req:
+            RUNTIME_SETTINGS["smallest_api_key"] = str(req["smallest_api_key"])
         if "vad_silence_ms" in req:
             try:
                 RUNTIME_SETTINGS["vad_silence_ms"] = int(req["vad_silence_ms"])
@@ -377,6 +381,10 @@ async def settings_post(req: dict) -> Response:
             stt_key = req.get("groq_api_key") or RUNTIME_SETTINGS.get("groq_api_key")
         elif RUNTIME_SETTINGS["stt_provider"] in ("openai", "openai-whisper", "whisper-openai"):
             stt_key = req.get("openai_api_key") or RUNTIME_SETTINGS.get("openai_api_key")
+
+        tts_key = None
+        if RUNTIME_SETTINGS["tts_provider"] in ("smallest", "smallest-ai", "smallest_ai", "waves"):
+            tts_key = req.get("smallest_api_key") or RUNTIME_SETTINGS.get("smallest_api_key")
 
         stt = make_stt(
             provider=RUNTIME_SETTINGS["stt_provider"],
@@ -392,6 +400,7 @@ async def settings_post(req: dict) -> Response:
         tts = make_tts(
             provider=RUNTIME_SETTINGS["tts_provider"],
             base_url=RUNTIME_SETTINGS["kokoro_base_url"],
+            api_key=tts_key,
         )
         settings_copy = dict(RUNTIME_SETTINGS)
 

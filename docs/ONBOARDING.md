@@ -133,16 +133,17 @@ All model choices are runtime configurable via environment variables or `POST /s
 | **Stub** | `stub` | <1ms | Deterministic test stub for offline QA. |
 
 ### 2. Large Language Model (LLM)
-| Provider | Identifier | Model | Latency (TTFT) |
-| :--- | :--- | :--- | :--- |
-| **Groq LPU** (Default) | `groq` | `groq/compound-mini` | ~210ms |
-| **SpacePilot / LiteLLM Proxy** | `litellm` | `claude-sonnet-4-6` | ~450ms |
-| **OpenAI Direct** | `openai` | `gpt-4o-mini` | ~380ms |
-| **Local Fleet** | `fleet` | `llama-3.3-70b` | ~290ms |
+| Provider | Identifier | Model | Latency (TTFT) | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| **Groq LPU** (Default) | `groq` | `groq/compound-mini` | ~210ms | Ultra-fast spoken responses. |
+| **OpenAI Reasoning** | `openai` | `gpt-5-nano` | ~380ms | Indian AI Grants key, automated `max_completion_tokens: 300` & reasoning handling. |
+| **SpacePilot / LiteLLM Proxy** | `litellm` | `claude-sonnet-4-6` | ~450ms | Heavy reasoning via LiteLLM fleet proxy (`:8000`). |
+| **Local Fleet** | `fleet` | `llama-3.3-70b` | ~290ms | Local sovereign fleet inference. |
 
 ### 3. Text-to-Speech (TTS)
 | Provider | Identifier | Model / Endpoint | Quality |
 | :--- | :--- | :--- | :--- |
+| **Smallest.ai Waves** (Lightning) | `smallest` | `lightning_v3.1_pro` (voice `meher`) | Ultra-low latency natural Indian English & Hindi voice, 24kHz. |
 | **Kokoro Local** (Default) | `kokoro` | Kokoro-v0.19 82M (`:8088`) | Warm, natural American female voice (`af_heart`), 24kHz. |
 | **Deepgram Aura** | `deepgram` | `aura-asteria-en` | Fast cloud fallback. |
 | **Stub** | `stub` | Synthetic sine WAV | <1ms offline test stub. |
@@ -171,11 +172,12 @@ pet-talk/
 |   `-- DICTATION-SPEC.md        # Universal STT router and clean prose engine
 +-- personas/                    # Persona prompt specifications (donna.md, zuck.md)
 +-- qa/                          # TDD test suites & benchmarks
-|   +-- run_all.sh               # Master verification gate (runs all 12 test suites)
+|   +-- run_all.sh               # Master verification gate (runs all 13 test suites)
 |   +-- test_hotkey.py           # Carbon hotkey, kill switch & lifecycle tests
 |   +-- test_hud.py              # HUD nonactivating window & geometry tests
 |   +-- test_earcons.py          # Acoustic earcon latency assertions
 |   +-- test_dictation_matrix.py # Universal STT router & CleanProse tests
+|   +-- test_new_tyres.py        # Smallest.ai TTS & OpenAI gpt-5-nano reasoning tests
 |   `-- benchmarks/              # Voice forensics & wire latency probes
 +-- server/                      # FastAPI WebSocket duplex server
 |   +-- app.py                   # Duplex connection loop, router, stall cache
@@ -194,7 +196,7 @@ Before submitting any Pull Request or pushing commits, you **must** run the mast
 bash qa/run_all.sh
 ```
 
-Ensure all 12 test suites pass with `RESULT: OK`:
+Ensure all 13 test suites pass with `RESULT: OK`:
 1. Protocol schema compliance (`qa/test_protocol.py`)
 2. Persona instruction spec validity (`qa/test_persona.py`)
 3. Humanizer filler & pace determinism (`qa/test_humanize.py`)
@@ -207,3 +209,4 @@ Ensure all 12 test suites pass with `RESULT: OK`:
 10. Hardware Notch Dynamic Island HUD (`qa/test_hud.py`)
 11. Acoustic earcons sub-2ms engine (`qa/test_earcons.py`)
 12. WebSocket resilience & dead socket safety (`qa/test_ws_resilience.py`)
+13. Smallest.ai Lightning TTS & OpenAI reasoning tyres (`qa/test_new_tyres.py`)

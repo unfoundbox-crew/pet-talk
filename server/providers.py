@@ -191,6 +191,36 @@ class OpenAICompatibleLLM(LLMProvider):
                 sock.close()
         return target
 
+    def _build_payload(self, messages: Any, system_prompt: str = "") -> dict[str, Any]:
+        """Format request payload with model-specific parameters.
+        Reasoning models (gpt-5, o1, o3) use max_completion_tokens and omit temperature.
+        Standard models use max_tokens and temperature.
+        """
+        formatted_messages = []
+        if system_prompt:
+            formatted_messages.append({"role": "system", "content": system_prompt})
+        if isinstance(messages, list):
+            for m in messages:
+                if isinstance(m, tuple) and len(m) == 2:
+                    formatted_messages.append({"role": m[0], "content": m[1]})
+                elif isinstance(m, dict):
+                    formatted_messages.append(m)
+        elif isinstance(messages, str):
+            formatted_messages.append({"role": "user", "content": messages})
+
+        is_reasoning = any(x in self.model for x in ("gpt-5", "o1", "o3"))
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": formatted_messages,
+            "stream": True,
+        }
+        if is_reasoning:
+            payload["max_completion_tokens"] = 300
+        else:
+            payload["max_tokens"] = 50
+            payload["temperature"] = 0.7
+        return payload
+
     async def stream(self, messages: list[dict]) -> AsyncIterator[str]:
         import json as _json
 
@@ -205,13 +235,7 @@ class OpenAICompatibleLLM(LLMProvider):
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key or 'x'}",
         }
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "stream": True,
-            "max_tokens": 50,
-            "temperature": 0.7,
-        }
+        payload = self._build_payload(messages)
 
         if httpx is not None:
             buf = ""
@@ -278,13 +302,17 @@ class OpenAICompatibleLLM(LLMProvider):
                 from openai import AsyncOpenAI  # type: ignore
 
                 client = AsyncOpenAI(base_url=endpoint, api_key=self.api_key or "x")
-                resp = await client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    stream=True,
-                    max_tokens=50,
-                    temperature=0.7,
-                )
+                create_params = {
+                    "model": self.model,
+                    "messages": messages,
+                    "stream": True,
+                }
+                if is_reasoning:
+                    create_params["max_completion_tokens"] = 300
+                else:
+                    create_params["max_tokens"] = 50
+                    create_params["temperature"] = 0.7
+                resp = await client.chat.completions.create(**create_params)
                 buf = ""
                 async for chunk in resp:
                     delta = chunk.choices[0].delta.content if chunk.choices else None
@@ -524,6 +552,73 @@ class ElevenLabsTTS(TTSProvider):
         if len(audio) < 1000:
             raise ProviderError("tts_empty_audio", f"elevenlabs returned {len(audio)} bytes")
         return audio, []
+
+
+# -------------------------------------------------- Smallest.ai (Lightning TTS) ---
+
+
+class SmallestAITTS(TTSProvider):
+    """Cloud tyre: Smallest AI Lightning TTS (https://api.smallest.ai/waves/v1/tts).
+    Ultra-low latency Indian English & Hindi natural voice synthesis.
+    Model: lightning_v3.1_pro, Voice: meher (or emily, radha, etc.).
+    Uses stdlib (urllib).
+    """
+
+    API_URL = "https://api.smallest.ai/waves/v1/tts"
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        voice_id: str = "meher",
+        model: str = "lightning_v3.1_pro",
+        sample_rate: int = 24000,
+    ) -> None:
+        self.api_key = (
+            api_key
+            or os.environ.get("SMALLEST_API_KEY", "")
+        )
+        self.voice_id = voice_id
+        self.model = model
+        self.sample_rate = sample_rate
+
+    def synth(self, text: str, voice: str = "meher", speed: float = 1.0) -> tuple[bytes, list]:
+        if not text or not text.strip():
+            raise ProviderError("tts_empty_text", "nothing to synthesize")
+        if not self.api_key:
+            raise ProviderError("tts_no_key", "SMALLEST_API_KEY env or key not provided")
+
+        chosen_voice = voice if voice and voice not in ("af_heart", "default", "") else self.voice_id
+        payload = {
+            "text": text.strip(),
+            "voice_id": chosen_voice,
+            "model": self.model,
+            "sample_rate": self.sample_rate,
+            "speed": speed,
+            "output_format": "wav",
+        }
+        data = json_dumps(payload).encode()
+        req = urllib.request.Request(
+            self.API_URL,
+            data=data,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+                "Accept": "audio/wav",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                if resp.status != 200:
+                    raise ProviderError("tts_request_failed", f"HTTP {resp.status}")
+                body = resp.read()
+                if not body:
+                    raise ProviderError("tts_empty_audio", "Smallest AI returned 0 bytes")
+                return body, []
+        except ProviderError:
+            raise
+        except Exception as e:
+            raise ProviderError("tts_request_failed", f"smallest.ai: {e}")
 
 
 # -------------------------------------------------- STT Helpers & Providers ---
@@ -980,9 +1075,19 @@ def json_dumps(payload: dict) -> str:
     return _json.dumps(payload)
 
 
-def make_tts(provider: Optional[str] = None, base_url: Optional[str] = None) -> TTSProvider:
-    """Tyre switch: TTS_PROVIDER=kokoro|deepgram|elevenlabs|stub (default: kokoro)."""
+def make_tts(
+    provider: Optional[str] = None,
+    base_url: Optional[str] = None,
+    api_key: Optional[str] = None,
+    voice: Optional[str] = None,
+) -> TTSProvider:
+    """Tyre switch: TTS_PROVIDER=kokoro|smallest|deepgram|elevenlabs|stub (default: kokoro)."""
     which = (provider or os.environ.get("TTS_PROVIDER", "kokoro")).lower()
+    if which in ("smallest", "smallest-ai", "smallest_ai", "waves"):
+        return SmallestAITTS(
+            api_key=api_key or os.environ.get("SMALLEST_API_KEY"),
+            voice_id=voice or "meher",
+        )
     if which == "kokoro":
         return KokoroSpacePilotTTS(base_url=base_url or os.environ.get("KOKORO_BASE_URL", "http://127.0.0.1:8088"))
     if which == "elevenlabs":
@@ -1051,14 +1156,22 @@ def make_llm(
     model: Optional[str] = None,
     api_key: Optional[str] = None,
 ) -> LLMProvider:
-    """Tyre switch: LLM_PROVIDER=groq|litellm|openai|fleet|local|stub."""
+    """Tyre switch: LLM_PROVIDER=groq|openai|litellm|fleet|local|stub."""
     which = (provider or os.environ.get("LLM_PROVIDER", "litellm")).lower()
     if which == "groq":
         b_url = base_url or "https://api.groq.com/openai/v1"
         m = model or "groq/compound-mini"
         key = api_key or os.environ.get("GROQ_API_KEY", "")
         return OpenAICompatibleLLM(base_url=b_url, model=m, api_key=key)
-    if which in ("openai", "litellm", "fleet", "local"):
+    if which in ("openai", "gpt"):
+        b_url = base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
+        m = model or os.environ.get("OPENAI_MODEL", "gpt-5-nano")
+        key = (
+            api_key
+            or os.environ.get("OPENAI_API_KEY", "")
+        )
+        return OpenAICompatibleLLM(base_url=b_url, model=m, api_key=key)
+    if which in ("litellm", "fleet", "local"):
         b_url = base_url or os.environ.get("LLM_BASE_URL", "http://100.99.50.84:8000/v1")
         m = model or os.environ.get("LLM_MODEL", "claude-sonnet-4-6")
         key = (
