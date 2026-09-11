@@ -430,8 +430,8 @@ async def settings_post(req: dict) -> Response:
         if RUNTIME_SETTINGS["tts_provider"] in ("smallest", "smallest-ai", "smallest_ai", "waves"):
             tts_key = req.get("smallest_api_key") or RUNTIME_SETTINGS.get("smallest_api_key")
 
-        llm_key = req.get("llm_api_key") or RUNTIME_SETTINGS.get("llm_api_key")
-        if not llm_key:
+        llm_key = req.get("llm_api_key")
+        if not llm_key or (RUNTIME_SETTINGS["llm_provider"] == "groq" and not str(llm_key).startswith("gsk_")):
             if RUNTIME_SETTINGS["llm_provider"] in ("haiku", "claude-haiku", "claude"):
                 llm_key = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("LITELLM_MASTER_KEY", "sk-3340dc7a5732b32c09a08a86da68b7400a9778d3bbbc574a")
             elif RUNTIME_SETTINGS["llm_provider"] in ("opencode", "zen", "opencode-zen"):
@@ -442,6 +442,8 @@ async def settings_post(req: dict) -> Response:
                 llm_key = RUNTIME_SETTINGS.get("groq_api_key") or os.environ.get("GROQ_API_KEY", "")
             elif RUNTIME_SETTINGS["llm_provider"] in ("openai", "gpt"):
                 llm_key = RUNTIME_SETTINGS.get("openai_api_key") or os.environ.get("OPENAI_API_KEY", "")
+            else:
+                llm_key = RUNTIME_SETTINGS.get("llm_api_key")
 
         stt = make_stt(
             provider=RUNTIME_SETTINGS["stt_provider"],
