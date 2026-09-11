@@ -484,11 +484,11 @@ def json_dumps(payload: dict) -> str:
     return _json.dumps(payload)
 
 
-def make_tts() -> TTSProvider:
+def make_tts(provider: Optional[str] = None, base_url: Optional[str] = None) -> TTSProvider:
     """Tyre switch: TTS_PROVIDER=stub|kokoro|elevenlabs|deepgram (default: stub)."""
-    which = os.environ.get("TTS_PROVIDER", "stub").lower()
+    which = (provider or os.environ.get("TTS_PROVIDER", "stub")).lower()
     if which == "kokoro":
-        return KokoroSpacePilotTTS()
+        return KokoroSpacePilotTTS(base_url=base_url or os.environ.get("KOKORO_BASE_URL", "http://127.0.0.1:8088"))
     if which == "elevenlabs":
         return ElevenLabsTTS()
     if which == "deepgram":
@@ -496,27 +496,32 @@ def make_tts() -> TTSProvider:
     return StubTTS()
 
 
-def make_stt() -> STTProvider:
+def make_stt(provider: Optional[str] = None, api_key: Optional[str] = None) -> STTProvider:
     """Tyre switch: STT_PROVIDER=stub|deepgram (default: stub).
 
     whisper-local is not wired yet — fail-closed, never silent fallback.
     """
-    which = os.environ.get("STT_PROVIDER", "stub").lower()
+    which = (provider or os.environ.get("STT_PROVIDER", "stub")).lower()
     if which == "deepgram":
-        return DeepgramSTT()
+        return DeepgramSTT(api_key=api_key or os.environ.get("DEEPGRAM_API_KEY", ""))
     if which in ("whisper-local", "whisper_local", "whisper", "local"):
         raise ProviderError("stt_not_wired", "whisper-local not wired")
     return StubSTT()
 
 
-def make_llm() -> LLMProvider:
+def make_llm(
+    provider: Optional[str] = None,
+    base_url: Optional[str] = None,
+    model: Optional[str] = None,
+    api_key: Optional[str] = None,
+) -> LLMProvider:
     """Tyre switch: LLM_PROVIDER=stub|openai|litellm|fleet (default: stub)."""
-    which = os.environ.get("LLM_PROVIDER", "stub").lower()
+    which = (provider or os.environ.get("LLM_PROVIDER", "stub")).lower()
     if which in ("openai", "litellm", "fleet", "local"):
-        base_url = os.environ.get("LLM_BASE_URL", "http://100.99.50.84:8000/v1")
-        model = os.environ.get("LLM_MODEL", "claude-3-7-sonnet")
-        api_key = os.environ.get("LLM_API_KEY", "x")
-        return OpenAICompatibleLLM(base_url=base_url, model=model, api_key=api_key)
+        b_url = base_url or os.environ.get("LLM_BASE_URL", "http://100.99.50.84:8000/v1")
+        m = model or os.environ.get("LLM_MODEL", "claude-3-7-sonnet")
+        key = api_key or os.environ.get("LLM_API_KEY", "x")
+        return OpenAICompatibleLLM(base_url=b_url, model=m, api_key=key)
     return StubLLM()
 
 

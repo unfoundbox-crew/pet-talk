@@ -20,6 +20,9 @@ if python3 "$ROOT/qa/test_persona.py" -v; then :; else FAIL=1; fi
 say "2b/4 persona studio API & persistence (stdlib unittest)"
 if python3 "$ROOT/qa/test_persona_api.py" -v; then :; else FAIL=1; fi
 
+say "2b2/4 runtime tire switching & settings API (stdlib unittest)"
+if python3 "$ROOT/qa/test_settings_api.py" -v; then :; else FAIL=1; fi
+
 say "2c/4 hippocampus memory ledger (stdlib unittest)"
 if python3 "$ROOT/qa/test_memory.py" -v; then :; else FAIL=1; fi
 

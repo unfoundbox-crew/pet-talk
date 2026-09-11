@@ -19,5 +19,6 @@
   "telemetry": "Telemetry",
   "hands-free": "Hands-Free (VAD)",
   "push-to-talk-mode": "Push-to-Talk",
-  "preview-voice": "Preview Voice"
+  "preview-voice": "Preview Voice",
+  "settings": "Settings"
 }

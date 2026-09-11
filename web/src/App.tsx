@@ -14,6 +14,7 @@ import { AcousticOrb } from "./components/AcousticOrb";
 import { LatencyMetrics, TelemetryHud } from "./components/TelemetryHud";
 import { PersonaData, PersonaStudio } from "./components/PersonaStudio";
 import { MemoryDrawer, MemoryTurn } from "./components/MemoryDrawer";
+import { ActiveProviders, RuntimeSettings, SettingsModal } from "./components/SettingsModal";
 
 type Strings = typeof en;
 const STRINGS: Record<"en" | "hi", Strings> = { en, hi };
@@ -103,6 +104,23 @@ export default function App() {
   const [showStudio, setShowStudio] = useState(false);
   const [showMemory, setShowMemory] = useState(false);
   const [showTelemetry, setShowTelemetry] = useState(true);
+  const [showSettings, setShowSettings] = useState(false);
+
+  // Runtime Settings & Swappable Tires
+  const [settings, setSettings] = useState<RuntimeSettings>({
+    stt_provider: "stub",
+    llm_provider: "stub",
+    llm_base_url: "http://100.99.50.84:8000/v1",
+    llm_model: "claude-3-7-sonnet",
+    tts_provider: "stub",
+    kokoro_base_url: "http://127.0.0.1:8088",
+    vad_silence_ms: 600,
+  });
+  const [activeProviders, setActiveProviders] = useState<ActiveProviders>({
+    stt: "StubSTT",
+    llm: "StubLLM",
+    tts: "StubTTS",
+  });
 
   // Telemetry Waterfall
   const [metrics, setMetrics] = useState<LatencyMetrics>({
@@ -440,7 +458,33 @@ export default function App() {
         }
       })
       .catch(() => {});
+
+    // 4. Fetch Runtime Settings & Active Providers
+    fetch(`${base}/settings`)
+      .then((r) => (r.ok ? r.json() : Promise.reject()))
+      .then((d) => {
+        if (d && d.settings) setSettings(d.settings);
+        if (d && d.active) setActiveProviders(d.active);
+      })
+      .catch(() => {});
   }, [currentPersona]);
+
+  // Handle Runtime Tire Switching
+  const handleApplySettings = async (
+    newSettings: Partial<RuntimeSettings> & { deepgram_api_key?: string; llm_api_key?: string },
+  ) => {
+    const base = httpBaseFromWs(WS_URL);
+    const res = await fetch(`${base}/settings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(newSettings),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.settings) setSettings(data.settings);
+      if (data.active) setActiveProviders(data.active);
+    }
+  };
 
   // Handle Persona Selection
   const handleSelectPersona = (name: string) => {
@@ -631,6 +675,24 @@ export default function App() {
             }}
           >
             Memory ({memoryTurns.length})
+          </button>
+
+          {/* Settings / Tires Button */}
+          <button
+            type="button"
+            onClick={() => setShowSettings(true)}
+            style={{
+              background: showSettings ? "#24c1e0" : "#191c26",
+              color: showSettings ? "#090a0f" : "#f1f3f9",
+              border: "1px solid #282c3f",
+              borderRadius: "999px",
+              padding: "0.25rem 0.75rem",
+              fontSize: "0.75rem",
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            ⚙️ {t["settings"] || "Settings"} ({activeProviders.llm === "StubLLM" ? "Mocks" : "Live"})
           </button>
 
           {/* Connection Status Pill */}
@@ -939,6 +1001,16 @@ export default function App() {
         onClose={() => setShowMemory(false)}
         turns={memoryTurns}
         onClearMemory={handleClearMemory}
+        t={t}
+      />
+
+      {/* Settings / Swappable Tires Modal */}
+      <SettingsModal
+        isOpen={showSettings}
+        onClose={() => setShowSettings(false)}
+        settings={settings}
+        activeProviders={activeProviders}
+        onApplySettings={handleApplySettings}
         t={t}
       />
 

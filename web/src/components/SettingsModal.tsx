@@ -1,0 +1,446 @@
+import React, { useState } from "react";
+
+export interface RuntimeSettings {
+  stt_provider: string;
+  llm_provider: string;
+  llm_base_url: string;
+  llm_model: string;
+  tts_provider: string;
+  kokoro_base_url: string;
+  vad_silence_ms: number;
+}
+
+export interface ActiveProviders {
+  stt: string;
+  llm: string;
+  tts: string;
+}
+
+interface SettingsModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  settings: RuntimeSettings;
+  activeProviders: ActiveProviders;
+  onApplySettings: (newSettings: Partial<RuntimeSettings> & { deepgram_api_key?: string; llm_api_key?: string }) => Promise<void>;
+  t: Record<string, string>;
+}
+
+export const SettingsModal: React.FC<SettingsModalProps> = ({
+  isOpen,
+  onClose,
+  settings,
+  activeProviders,
+  onApplySettings,
+  t,
+}) => {
+  const [sttProvider, setSttProvider] = useState(settings.stt_provider || "stub");
+  const [deepgramKey, setDeepgramKey] = useState("");
+  const [llmProvider, setLlmProvider] = useState(settings.llm_provider || "stub");
+  const [llmBaseUrl, setLlmBaseUrl] = useState(settings.llm_base_url || "http://100.99.50.84:8000/v1");
+  const [llmModel, setLlmModel] = useState(settings.llm_model || "claude-3-7-sonnet");
+  const [llmApiKey, setLlmApiKey] = useState("");
+  const [ttsProvider, setTtsProvider] = useState(settings.tts_provider || "stub");
+  const [kokoroUrl, setKokoroUrl] = useState(settings.kokoro_base_url || "http://127.0.0.1:8088");
+  const [vadSilenceMs, setVadSilenceMs] = useState(settings.vad_silence_ms || 600);
+  const [saving, setSaving] = useState(false);
+  const [statusMsg, setStatusMsg] = useState("");
+
+  if (!isOpen) return null;
+
+  const applyPreset = (preset: "mocks" | "fleet" | "cloud") => {
+    if (preset === "mocks") {
+      setSttProvider("stub");
+      setLlmProvider("stub");
+      setTtsProvider("stub");
+    } else if (preset === "fleet") {
+      setSttProvider("deepgram");
+      setLlmProvider("litellm");
+      setLlmBaseUrl("http://100.99.50.84:8000/v1");
+      setLlmModel("claude-3-7-sonnet");
+      setTtsProvider("kokoro");
+      setKokoroUrl("http://127.0.0.1:8088");
+    } else if (preset === "cloud") {
+      setSttProvider("deepgram");
+      setLlmProvider("openai");
+      setLlmBaseUrl("https://api.openai.com/v1");
+      setLlmModel("gpt-4o");
+      setTtsProvider("elevenlabs");
+    }
+  };
+
+  const handleSave = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSaving(true);
+    setStatusMsg("");
+    try {
+      await onApplySettings({
+        stt_provider: sttProvider,
+        deepgram_api_key: deepgramKey || undefined,
+        llm_provider: llmProvider,
+        llm_base_url: llmBaseUrl,
+        llm_model: llmModel,
+        llm_api_key: llmApiKey || undefined,
+        tts_provider: ttsProvider,
+        kokoro_base_url: kokoroUrl,
+        vad_silence_ms: vadSilenceMs,
+      });
+      setStatusMsg("✓ Tires hot-swapped live");
+      setTimeout(() => {
+        setStatusMsg("");
+        onClose();
+      }, 900);
+    } catch {
+      setStatusMsg("Failed to update settings");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        backgroundColor: "rgba(9, 10, 15, 0.75)",
+        backdropFilter: "blur(8px)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 200,
+        padding: "1rem",
+      }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        style={{
+          width: "100%",
+          maxWidth: 540,
+          maxHeight: "90vh",
+          overflowY: "auto",
+          background: "#12141c",
+          border: "1px solid #282c3f",
+          borderRadius: "16px",
+          padding: "1.5rem",
+          color: "#f1f3f9",
+          boxShadow: "0 12px 32px rgba(0,0,0,0.7)",
+          fontFamily: "system-ui, -apple-system, sans-serif",
+        }}
+      >
+        {/* Header */}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1.25rem" }}>
+          <div>
+            <h3 style={{ margin: 0, fontSize: "1.15rem", fontWeight: 600 }}>
+              {t["settings"] || "Settings"} & Swappable Tires
+            </h3>
+            <span style={{ fontSize: "0.75rem", color: "#636c84" }}>
+              Hot-swap models without restarting the duplex server
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            style={{ background: "none", border: "none", color: "#9ba3b8", fontSize: "1.2rem", cursor: "pointer" }}
+          >
+            ✕
+          </button>
+        </div>
+
+        {/* Active Providers Pill */}
+        <div
+          style={{
+            display: "flex",
+            gap: "0.5rem",
+            background: "#191c26",
+            border: "1px solid #282c3f",
+            borderRadius: "8px",
+            padding: "0.5rem 0.75rem",
+            fontSize: "0.75rem",
+            marginBottom: "1.25rem",
+            fontFamily: "monospace",
+          }}
+        >
+          <span style={{ color: "#636c84" }}>Active:</span>
+          <span>STT: <b style={{ color: activeProviders.stt === "StubSTT" ? "#ffb300" : "#00c853" }}>{activeProviders.stt}</b></span>
+          <span>•</span>
+          <span>LLM: <b style={{ color: activeProviders.llm === "StubLLM" ? "#ffb300" : "#24c1e0" }}>{activeProviders.llm}</b></span>
+          <span>•</span>
+          <span>TTS: <b style={{ color: activeProviders.tts === "StubTTS" ? "#ffb300" : "#a142f4" }}>{activeProviders.tts}</b></span>
+        </div>
+
+        {/* 1-Click Presets */}
+        <div style={{ marginBottom: "1.25rem" }}>
+          <label style={{ display: "block", fontSize: "0.75rem", color: "#9ba3b8", marginBottom: "0.4rem", fontWeight: 600 }}>
+            Quick Tire Presets
+          </label>
+          <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+            <button
+              type="button"
+              onClick={() => applyPreset("mocks")}
+              style={{
+                background: "#191c26",
+                border: "1px solid #282c3f",
+                color: "#ffb300",
+                borderRadius: "6px",
+                padding: "0.35rem 0.65rem",
+                fontSize: "0.75rem",
+                cursor: "pointer",
+                fontWeight: 500,
+              }}
+            >
+              ⚡ Local Mocks ($0)
+            </button>
+            <button
+              type="button"
+              onClick={() => applyPreset("fleet")}
+              style={{
+                background: "#191c26",
+                border: "1px solid #282c3f",
+                color: "#24c1e0",
+                borderRadius: "6px",
+                padding: "0.35rem 0.65rem",
+                fontSize: "0.75rem",
+                cursor: "pointer",
+                fontWeight: 500,
+              }}
+            >
+              🚀 SpacePilot Fleet + Kokoro
+            </button>
+            <button
+              type="button"
+              onClick={() => applyPreset("cloud")}
+              style={{
+                background: "#191c26",
+                border: "1px solid #282c3f",
+                color: "#00c853",
+                borderRadius: "6px",
+                padding: "0.35rem 0.65rem",
+                fontSize: "0.75rem",
+                cursor: "pointer",
+                fontWeight: 500,
+              }}
+            >
+              ☁️ Cloud (OpenAI + ElevenLabs)
+            </button>
+          </div>
+        </div>
+
+        {/* Detailed Form */}
+        <form onSubmit={handleSave}>
+          {/* STT Settings */}
+          <div style={{ marginBottom: "1rem", padding: "0.75rem", background: "#191c26", borderRadius: 8 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "0.4rem" }}>
+              <label style={{ fontSize: "0.8rem", fontWeight: 600, color: "#f1f3f9" }}>STT (Speech to Text)</label>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem" }}>
+              <select
+                value={sttProvider}
+                onChange={(e) => setSttProvider(e.target.value)}
+                style={{
+                  padding: "0.4rem 0.6rem",
+                  borderRadius: 6,
+                  border: "1px solid #282c3f",
+                  background: "#090a0f",
+                  color: "#f1f3f9",
+                  fontSize: "0.8rem",
+                }}
+              >
+                <option value="stub">StubSTT (Zero download)</option>
+                <option value="deepgram">Deepgram Nova-2 (Live)</option>
+              </select>
+              {sttProvider === "deepgram" && (
+                <input
+                  type="password"
+                  placeholder="Deepgram API Key"
+                  value={deepgramKey}
+                  onChange={(e) => setDeepgramKey(e.target.value)}
+                  style={{
+                    padding: "0.4rem 0.6rem",
+                    borderRadius: 6,
+                    border: "1px solid #282c3f",
+                    background: "#090a0f",
+                    color: "#f1f3f9",
+                    fontSize: "0.8rem",
+                  }}
+                />
+              )}
+            </div>
+          </div>
+
+          {/* LLM Settings */}
+          <div style={{ marginBottom: "1rem", padding: "0.75rem", background: "#191c26", borderRadius: 8 }}>
+            <div style={{ marginBottom: "0.4rem" }}>
+              <label style={{ fontSize: "0.8rem", fontWeight: 600, color: "#f1f3f9" }}>LLM (Language & Reasoning)</label>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem", marginBottom: "0.5rem" }}>
+              <select
+                value={llmProvider}
+                onChange={(e) => setLlmProvider(e.target.value)}
+                style={{
+                  padding: "0.4rem 0.6rem",
+                  borderRadius: 6,
+                  border: "1px solid #282c3f",
+                  background: "#090a0f",
+                  color: "#f1f3f9",
+                  fontSize: "0.8rem",
+                }}
+              >
+                <option value="stub">StubLLM (3 canned clauses)</option>
+                <option value="litellm">LiteLLM Fleet (SpacePilot proxy)</option>
+                <option value="openai">OpenAI Compatible (Live)</option>
+              </select>
+              <input
+                type="text"
+                placeholder="Model (e.g. claude-3-7-sonnet)"
+                value={llmModel}
+                onChange={(e) => setLlmModel(e.target.value)}
+                disabled={llmProvider === "stub"}
+                style={{
+                  padding: "0.4rem 0.6rem",
+                  borderRadius: 6,
+                  border: "1px solid #282c3f",
+                  background: "#090a0f",
+                  color: "#f1f3f9",
+                  fontSize: "0.8rem",
+                  opacity: llmProvider === "stub" ? 0.5 : 1,
+                }}
+              />
+            </div>
+            {llmProvider !== "stub" && (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem" }}>
+                <input
+                  type="text"
+                  placeholder="Base URL (e.g. http://100.99.50.84:8000/v1)"
+                  value={llmBaseUrl}
+                  onChange={(e) => setLlmBaseUrl(e.target.value)}
+                  style={{
+                    padding: "0.4rem 0.6rem",
+                    borderRadius: 6,
+                    border: "1px solid #282c3f",
+                    background: "#090a0f",
+                    color: "#f1f3f9",
+                    fontSize: "0.75rem",
+                  }}
+                />
+                <input
+                  type="password"
+                  placeholder="API Key (optional if proxy)"
+                  value={llmApiKey}
+                  onChange={(e) => setLlmApiKey(e.target.value)}
+                  style={{
+                    padding: "0.4rem 0.6rem",
+                    borderRadius: 6,
+                    border: "1px solid #282c3f",
+                    background: "#090a0f",
+                    color: "#f1f3f9",
+                    fontSize: "0.75rem",
+                  }}
+                />
+              </div>
+            )}
+          </div>
+
+          {/* TTS Settings */}
+          <div style={{ marginBottom: "1rem", padding: "0.75rem", background: "#191c26", borderRadius: 8 }}>
+            <div style={{ marginBottom: "0.4rem" }}>
+              <label style={{ fontSize: "0.8rem", fontWeight: 600, color: "#f1f3f9" }}>TTS (Voice Synthesis)</label>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem" }}>
+              <select
+                value={ttsProvider}
+                onChange={(e) => setTtsProvider(e.target.value)}
+                style={{
+                  padding: "0.4rem 0.6rem",
+                  borderRadius: 6,
+                  border: "1px solid #282c3f",
+                  background: "#090a0f",
+                  color: "#f1f3f9",
+                  fontSize: "0.8rem",
+                }}
+              >
+                <option value="stub">StubTTS (440Hz Sine WAV)</option>
+                <option value="kokoro">Kokoro SpacePilot (:8088)</option>
+                <option value="elevenlabs">ElevenLabs (Live)</option>
+                <option value="deepgram">Deepgram Aura (Live)</option>
+              </select>
+              {ttsProvider === "kokoro" && (
+                <input
+                  type="text"
+                  placeholder="Kokoro URL (:8088)"
+                  value={kokoroUrl}
+                  onChange={(e) => setKokoroUrl(e.target.value)}
+                  style={{
+                    padding: "0.4rem 0.6rem",
+                    borderRadius: 6,
+                    border: "1px solid #282c3f",
+                    background: "#090a0f",
+                    color: "#f1f3f9",
+                    fontSize: "0.8rem",
+                  }}
+                />
+              )}
+            </div>
+          </div>
+
+          {/* VAD Settings */}
+          <div style={{ marginBottom: "1.25rem", padding: "0.75rem", background: "#191c26", borderRadius: 8 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.8rem", marginBottom: "0.35rem" }}>
+              <span style={{ fontWeight: 600 }}>Hands-Free Silence Cutoff</span>
+              <span style={{ color: "#24c1e0", fontFamily: "monospace" }}>{vadSilenceMs}ms</span>
+            </div>
+            <input
+              type="range"
+              min="300"
+              max="1500"
+              step="50"
+              value={vadSilenceMs}
+              onChange={(e) => setVadSilenceMs(parseInt(e.target.value, 10))}
+              style={{ width: "100%", accentColor: "#24c1e0", cursor: "pointer" }}
+            />
+          </div>
+
+          {/* Footer Actions */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ fontSize: "0.8rem", color: statusMsg.startsWith("✓") ? "#00c853" : "#ff3d00" }}>
+              {statusMsg}
+            </span>
+            <div style={{ display: "flex", gap: "0.5rem" }}>
+              <button
+                type="button"
+                onClick={onClose}
+                style={{
+                  background: "#191c26",
+                  border: "1px solid #282c3f",
+                  color: "#f1f3f9",
+                  borderRadius: "6px",
+                  padding: "0.45rem 0.85rem",
+                  fontSize: "0.8rem",
+                  cursor: "pointer",
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={saving}
+                style={{
+                  background: "#4285f4",
+                  color: "#ffffff",
+                  border: "none",
+                  borderRadius: "6px",
+                  padding: "0.45rem 1.25rem",
+                  fontSize: "0.8rem",
+                  fontWeight: 600,
+                  cursor: "pointer",
+                }}
+              >
+                {saving ? "Applying..." : "Apply Tires Live"}
+              </button>
+            </div>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+};

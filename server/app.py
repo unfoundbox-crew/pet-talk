@@ -90,9 +90,26 @@ SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
 VOICES_PATH = os.path.join(os.path.dirname(SERVER_DIR), "personas", "voices.yaml")
 TURNS_PATH = os.path.join(SERVER_DIR, "turns.jsonl")
 
-stt = make_stt()
-llm = make_llm()
-tts = make_tts()
+RUNTIME_SETTINGS = {
+    "stt_provider": os.environ.get("STT_PROVIDER", "stub").lower(),
+    "llm_provider": os.environ.get("LLM_PROVIDER", "stub").lower(),
+    "llm_base_url": os.environ.get("LLM_BASE_URL", "http://100.99.50.84:8000/v1"),
+    "llm_model": os.environ.get("LLM_MODEL", "claude-3-7-sonnet"),
+    "tts_provider": os.environ.get("TTS_PROVIDER", "stub").lower(),
+    "kokoro_base_url": os.environ.get("KOKORO_BASE_URL", "http://127.0.0.1:8088"),
+    "vad_silence_ms": int(os.environ.get("VAD_SILENCE_MS", "600")),
+}
+
+stt = make_stt(provider=RUNTIME_SETTINGS["stt_provider"])
+llm = make_llm(
+    provider=RUNTIME_SETTINGS["llm_provider"],
+    base_url=RUNTIME_SETTINGS["llm_base_url"],
+    model=RUNTIME_SETTINGS["llm_model"],
+)
+tts = make_tts(
+    provider=RUNTIME_SETTINGS["tts_provider"],
+    base_url=RUNTIME_SETTINGS["kokoro_base_url"],
+)
 memory = Hippocampus(ledger_path=os.path.join(SERVER_DIR, "ledger.jsonl"))
 persona = load_persona()  # built-in default until personas/ exists
 
@@ -260,6 +277,65 @@ def persona_delete(name: str) -> Response:
         return JSONResponse({"error": "not_found"}, status_code=404)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@app.get("/settings")
+def settings_get() -> Response:
+    return JSONResponse({
+        "ok": True,
+        "settings": RUNTIME_SETTINGS,
+        "active": {
+            "stt": type(stt).__name__,
+            "llm": type(llm).__name__,
+            "tts": type(tts).__name__,
+        },
+    })
+
+
+@app.post("/settings")
+async def settings_post(req: dict) -> Response:
+    global stt, llm, tts
+    if "stt_provider" in req:
+        RUNTIME_SETTINGS["stt_provider"] = str(req["stt_provider"]).lower()
+    if "llm_provider" in req:
+        RUNTIME_SETTINGS["llm_provider"] = str(req["llm_provider"]).lower()
+    if "llm_base_url" in req:
+        RUNTIME_SETTINGS["llm_base_url"] = str(req["llm_base_url"])
+    if "llm_model" in req:
+        RUNTIME_SETTINGS["llm_model"] = str(req["llm_model"])
+    if "tts_provider" in req:
+        RUNTIME_SETTINGS["tts_provider"] = str(req["tts_provider"]).lower()
+    if "kokoro_base_url" in req:
+        RUNTIME_SETTINGS["kokoro_base_url"] = str(req["kokoro_base_url"])
+    if "vad_silence_ms" in req:
+        try:
+            RUNTIME_SETTINGS["vad_silence_ms"] = int(req["vad_silence_ms"])
+        except (ValueError, TypeError):
+            pass
+
+    stt = make_stt(
+        provider=RUNTIME_SETTINGS["stt_provider"],
+        api_key=req.get("deepgram_api_key"),
+    )
+    llm = make_llm(
+        provider=RUNTIME_SETTINGS["llm_provider"],
+        base_url=RUNTIME_SETTINGS["llm_base_url"],
+        model=RUNTIME_SETTINGS["llm_model"],
+        api_key=req.get("llm_api_key"),
+    )
+    tts = make_tts(
+        provider=RUNTIME_SETTINGS["tts_provider"],
+        base_url=RUNTIME_SETTINGS["kokoro_base_url"],
+    )
+    return JSONResponse({
+        "ok": True,
+        "settings": RUNTIME_SETTINGS,
+        "active": {
+            "stt": type(stt).__name__,
+            "llm": type(llm).__name__,
+            "tts": type(tts).__name__,
+        },
+    })
 
 
 @app.get("/ledger")
