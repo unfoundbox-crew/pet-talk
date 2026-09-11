@@ -9,6 +9,21 @@ export type AgentState = "idle" | "listening" | "thinking" | "speaking";
 
 export type PersonaId = string;
 
+// ---- Eyes (WAVE3 §1 / TECH-DESIGN Phase 4) ----
+export type EyesKind = "screenshot" | "image" | "pdf";
+export type EyesTask = "transcribe" | "describe";
+
+/** Server-side cap; the client refuses oversize files before it ever sends. */
+export const EYES_MAX_BYTES = 8 * 1024 * 1024;
+
+/** Optional AX grounding the server may staple onto state.thinking. */
+export interface ScreenGrounding {
+  app?: string;
+  window?: string;
+  selection?: string | null;
+  path?: string | null;
+}
+
 // ---- Frames: client -> server ----
 export type ClientFrame =
   | {
@@ -48,6 +63,16 @@ export type ClientFrame =
       custom_stalls?: string[];
       system_prompt?: string;
     }
+  | {
+      type: "user.attach";
+      turn_id: string;
+      ref: string;
+      kind: EyesKind;
+      mime: string;
+      b64: string;
+      filename?: string;
+      task?: EyesTask;
+    }
   | { type: "barge"; turn_id: string };
 
 // ---- Frames: server -> client ----
@@ -55,12 +80,31 @@ export type ServerFrame =
   | { type: "agent.stall"; turn_id: string; phrase_id: string; text?: string; audio_url?: string }
   | { type: "agent.sentence"; turn_id: string; index?: number; seq?: number; text: string; audio_url: string }
   | { type: "agent.done"; turn_id: string; path?: string; sentences?: number }
-  | { type: "agent.error"; turn_id: string; reason: string; detail?: string }
+  | { type: "agent.error"; turn_id: string; reason: string; detail?: string; ref?: string }
   | { type: "state.idle"; turn_id: string }
   | { type: "state.listening"; turn_id: string }
-  | { type: "state.thinking"; turn_id: string }
+  | { type: "state.thinking"; turn_id: string; screen?: ScreenGrounding }
   | { type: "state.speaking"; turn_id: string }
-  | { type: "transcript.user"; turn_id: string; text: string };
+  | { type: "transcript.user"; turn_id: string; text: string }
+  | {
+      type: "eyes.received";
+      turn_id: string;
+      ref: string;
+      kind?: EyesKind;
+      task?: EyesTask;
+      bytes?: number;
+    }
+  | {
+      type: "eyes.text";
+      turn_id: string;
+      ref: string;
+      text: string;
+      source?: string;
+      kind?: EyesKind;
+      task?: EyesTask;
+      engine?: string;
+      truncated?: boolean;
+    };
 
 export type ServerHandler = (frame: ServerFrame) => void;
 
@@ -82,6 +126,66 @@ export function float32ToBase64Pcm16(samples: Float32Array): string {
     bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
   }
   return btoa(bin);
+}
+
+/** Map a File/Blob mime onto the three kinds the server accepts. */
+export function eyesKindForMime(mime: string, hint?: "screenshot"): EyesKind | null {
+  const m = (mime || "").toLowerCase();
+  if (m === "application/pdf") return "pdf";
+  if (!m.startsWith("image/")) return null;
+  return hint === "screenshot" ? "screenshot" : "image";
+}
+
+export interface EyesAttachment {
+  ref: string;
+  kind: EyesKind;
+  mime: string;
+  b64: string;
+  filename: string;
+  bytes: number;
+}
+
+/** ArrayBuffer -> base64 without blowing the call stack on a big image. */
+function bytesToBase64(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf);
+  let bin = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(bin);
+}
+
+/**
+ * Read a picked / dropped / pasted file into a `user.attach` payload.
+ * Fails closed with the same reason strings the server uses, so the UI shows
+ * one vocabulary whether the client or the server rejected the file.
+ */
+export async function fileToAttachment(
+  file: File | Blob,
+  ref: string,
+  hint?: "screenshot",
+): Promise<EyesAttachment> {
+  const filename = (file as File).name ?? "pasted";
+  const kind = eyesKindForMime(file.type, hint);
+  if (!kind) throw new Error("eyes_bad_kind");
+  if (file.size > EYES_MAX_BYTES) throw new Error("eyes_too_large");
+  const buf = await file.arrayBuffer();
+  if (buf.byteLength > EYES_MAX_BYTES) throw new Error("eyes_too_large");
+  return {
+    ref,
+    kind,
+    mime: file.type,
+    b64: bytesToBase64(buf),
+    filename,
+    bytes: buf.byteLength,
+  };
+}
+
+let attachSeq = 0;
+export function newAttachRef(): string {
+  attachSeq += 1;
+  return `att-${attachSeq}`;
 }
 
 export class PetTalkSocket {
