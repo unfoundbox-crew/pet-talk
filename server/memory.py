@@ -71,3 +71,24 @@ class Hippocampus:
             if t.get("agent"):
                 messages.append({"role": "assistant", "content": t["agent"]})
         return messages
+
+    def recent_turns(self, limit: int = 50) -> list[dict]:
+        """Read raw recent conversation turns from the ledger."""
+        if not os.path.exists(self.ledger_path):
+            return []
+        turns: list[dict] = []
+        try:
+            with open(self.ledger_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                        turns.append(data)
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            return []
+        return turns[-limit:]
+

@@ -25,7 +25,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
 from .memory import Hippocampus
-from .persona import load_persona
+from .persona import (
+    Persona,
+    delete_persona,
+    list_personas,
+    load_persona,
+    save_persona,
+)
 from .providers import ProviderError, make_llm, make_stt, make_tts, route_text
 from .telemetry import TurnLog
 
@@ -186,6 +192,92 @@ def voices() -> Response:
         return JSONResponse({"reason": e.reason, "detail": e.detail}, status_code=404)
 
 
+@app.get("/personas")
+def personas_list() -> Response:
+    personas = list_personas()
+    return JSONResponse([
+        {
+            "name": p.name,
+            "voice": p.voice,
+            "speed": p.speed,
+            "stalls": p.stalls,
+            "tone": p.tone,
+        }
+        for p in personas
+    ])
+
+
+@app.get("/personas/{name}")
+def persona_get(name: str) -> Response:
+    try:
+        p = load_persona(name)
+        return JSONResponse({
+            "name": p.name,
+            "voice": p.voice,
+            "speed": p.speed,
+            "stalls": p.stalls,
+            "tone": p.tone,
+        })
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+
+
+@app.post("/personas")
+async def persona_post(req: dict) -> Response:
+    name = req.get("name", "").strip().lower()
+    if not name:
+        return JSONResponse({"error": "name is required"}, status_code=400)
+    voice = req.get("voice", "af_heart")
+    try:
+        speed = float(req.get("speed", 1.0))
+    except (ValueError, TypeError):
+        speed = 1.0
+    stalls = req.get("stalls") or ["One moment.", "Looking that up."]
+    tone = req.get("tone") or req.get("system_prompt") or "Direct and helpful."
+    p = Persona(name=name, voice=voice, speed=speed, stalls=stalls, tone=tone)
+    try:
+        save_persona(p)
+        return JSONResponse({
+            "ok": True,
+            "persona": {
+                "name": p.name,
+                "voice": p.voice,
+                "speed": p.speed,
+                "stalls": p.stalls,
+                "tone": p.tone,
+            },
+        })
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@app.delete("/personas/{name}")
+def persona_delete(name: str) -> Response:
+    try:
+        deleted = delete_persona(name)
+        if deleted:
+            return JSONResponse({"ok": True, "deleted": name})
+        return JSONResponse({"error": "not_found"}, status_code=404)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@app.get("/ledger")
+def ledger_get(limit: int = 50) -> Response:
+    turns = memory.recent_turns(limit=limit)
+    return JSONResponse({"ok": True, "turns": turns})
+
+
+@app.delete("/ledger")
+def ledger_clear() -> Response:
+    try:
+        with open(memory.ledger_path, "w", encoding="utf-8") as f:
+            f.write("")
+        return JSONResponse({"ok": True, "cleared": True})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.get("/audio/{audio_id}")
 def get_audio(audio_id: str) -> Response:
     wav = _audio_store.get(audio_id)
@@ -194,9 +286,12 @@ def get_audio(audio_id: str) -> Response:
     return Response(content=wav, media_type="audio/wav")
 
 
-async def _speak_sentence(ws: WebSocket, turn_id: str, sentence: str, seq: int) -> None:
+async def _speak_sentence(
+    ws: WebSocket, turn_id: str, sentence: str, seq: int, active_persona: Optional[Persona] = None
+) -> None:
+    p = active_persona or persona
     try:
-        wav, _word_times = tts.synth(sentence, voice=persona.voice, speed=persona.speed)
+        wav, _word_times = tts.synth(sentence, voice=p.voice, speed=p.speed)
     except ProviderError as e:
         await ws.send_json(frame("agent.error", turn_id, reason=e.reason, seq=seq))
         return
@@ -222,13 +317,13 @@ def _provider_names() -> dict[str, str]:
 
 async def handle_turn_task(
     ws: WebSocket, turn_id: str, text: str, queue: SpeakQueue,
-    turn_tasks: dict,
+    turn_tasks: dict, active_persona: Optional[Persona] = None,
 ) -> None:
     """Run handle_turn as a cancellable task so barge can kill it mid-turn."""
     # Fired from user.stop: TurnLog starts here, ends on done/interrupt.
     log = TurnLog(path=TURNS_PATH)
     log.start(turn_id, _provider_names())
-    task = asyncio.ensure_future(handle_turn(ws, turn_id, text, queue, log))
+    task = asyncio.ensure_future(handle_turn(ws, turn_id, text, queue, log, active_persona=active_persona))
     turn_tasks[turn_id] = task
     try:
         await task
@@ -242,7 +337,7 @@ async def handle_turn_task(
 
 async def handle_turn(
     ws: WebSocket, turn_id: str, text: str, queue: SpeakQueue,
-    log: Optional[TurnLog] = None,
+    log: Optional[TurnLog] = None, active_persona: Optional[Persona] = None,
 ) -> None:
     """Router stub: stall+worker path vs direct answer path."""
     if not text or not text.strip():
@@ -251,22 +346,23 @@ async def handle_turn(
         if log is not None:
             log.end(path="empty", chars=0, sentences=0)
         return
+    p = active_persona or persona
     path = llm.route(text) if hasattr(llm, "route") else route_text(text)
     chars = 0
     first = True
     spoken_sentences: list[str] = []
 
-    pname = getattr(persona, "name", "donna")
+    pname = getattr(p, "name", "donna")
     history = memory.get_history_messages(pname, limit=6)
     instruction = (
-        getattr(persona, "instruction_spec", "")
-        or f"You are {pname}. Respond concisely in 1 to 2 spoken sentences."
+        getattr(p, "instruction_spec", "")
+        or f"You are {pname}. {p.tone}\nRespond concisely in 1 to 2 spoken sentences."
     )
     messages = [{"role": "system", "content": instruction}, *history, {"role": "user", "content": text}]
 
     async def _speak_tracked(sentence: str, seq: int) -> None:
         nonlocal chars, first
-        await _speak_sentence(ws, turn_id, sentence, seq=seq)
+        await _speak_sentence(ws, turn_id, sentence, seq=seq, active_persona=p)
         chars += len(sentence)
         spoken_sentences.append(sentence)
         if first and log is not None:
@@ -274,7 +370,7 @@ async def handle_turn(
         first = False
 
     if path == "stall":
-        stall_text = persona.stall_for(0)
+        stall_text = p.stall_for(0)
         await ws.send_json(frame("agent.stall", turn_id, phrase_id="stall-0", text=stall_text))
         if log is not None:
             log.mark("stall")
@@ -328,6 +424,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
     await ws.accept()
     queue = SpeakQueue()
     turn_tasks: dict = {}
+    turn_persona: dict = {}
     turn_id = new_turn_id()
     chunks: list[bytes] = []
     try:
@@ -338,6 +435,23 @@ async def ws_endpoint(ws: WebSocket) -> None:
             if mtype == "user.start":
                 chunks = []
                 turn_id = msg.get("turn_id") or new_turn_id()
+                pname = msg.get("persona") or "donna"
+                try:
+                    current_p = load_persona(pname)
+                except Exception:
+                    current_p = Persona(name=pname)
+                if msg.get("custom_voice") or msg.get("voice"):
+                    current_p.voice = str(msg.get("custom_voice") or msg.get("voice"))
+                if msg.get("custom_speed") or msg.get("speed"):
+                    try:
+                        current_p.speed = float(msg.get("custom_speed") or msg.get("speed"))
+                    except (ValueError, TypeError):
+                        pass
+                if msg.get("custom_tone") or msg.get("system_prompt"):
+                    current_p.tone = str(msg.get("custom_tone") or msg.get("system_prompt"))
+                if isinstance(msg.get("custom_stalls"), list) and msg["custom_stalls"]:
+                    current_p.stalls = [str(s) for s in msg["custom_stalls"] if str(s).strip()]
+                turn_persona[turn_id] = current_p
                 await ws.send_json(frame("state.listening", turn_id))
             elif mtype == "user.stop":
                 turn_id = msg.get("turn_id") or turn_id
@@ -355,7 +469,10 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     continue
                 # Fire-and-forget: the receive loop MUST stay open so a
                 # mid-turn barge can land. Wrapper tracks + cleans up.
-                asyncio.ensure_future(handle_turn_task(ws, turn_id, text, queue, turn_tasks))
+                active_p = turn_persona.get(turn_id)
+                asyncio.ensure_future(
+                    handle_turn_task(ws, turn_id, text, queue, turn_tasks, active_persona=active_p)
+                )
                 chunks = []
             elif mtype == "barge":
                 # Kill playback: cancel the live turn FIRST, then flush + re-route.

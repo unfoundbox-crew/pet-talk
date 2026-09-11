@@ -7,19 +7,32 @@ export const WS_URL =
 
 export type AgentState = "idle" | "listening" | "thinking" | "speaking";
 
-export type PersonaId = "donna" | "zuck" | "jarvis";
+export type PersonaId = string;
 
 // ---- Frames: client -> server ----
 export type ClientFrame =
-  | { type: "user.start"; turn_id: string; chunk: string; persona: PersonaId; voice: string; speed: number }
+  | {
+      type: "user.start";
+      turn_id: string;
+      chunk: string;
+      persona: PersonaId;
+      voice: string;
+      speed: number;
+      custom_voice?: string;
+      custom_speed?: number;
+      custom_tone?: string;
+      custom_stalls?: string[];
+      system_prompt?: string;
+    }
   | { type: "user.stop"; turn_id: string }
   | { type: "barge"; turn_id: string };
 
 // ---- Frames: server -> client ----
 export type ServerFrame =
-  | { type: "agent.stall"; turn_id: string; phrase_id: string; audio_url?: string }
-  | { type: "agent.sentence"; turn_id: string; index: number; text: string; audio_url: string }
-  | { type: "agent.done"; turn_id: string }
+  | { type: "agent.stall"; turn_id: string; phrase_id: string; text?: string; audio_url?: string }
+  | { type: "agent.sentence"; turn_id: string; index?: number; seq?: number; text: string; audio_url: string }
+  | { type: "agent.done"; turn_id: string; path?: string; sentences?: number }
+  | { type: "agent.error"; turn_id: string; reason: string; detail?: string }
   | { type: "state.idle"; turn_id: string }
   | { type: "state.listening"; turn_id: string }
   | { type: "state.thinking"; turn_id: string }

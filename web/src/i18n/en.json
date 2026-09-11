@@ -8,5 +8,16 @@
   "voice": "Voice",
   "speed": "Speed",
   "connect": "Connect",
-  "muted": "Muted"
+  "muted": "Muted",
+  "custom-persona": "Persona Studio",
+  "system-prompt": "System Prompt & Tone",
+  "save": "Save",
+  "delete": "Delete",
+  "new-persona": "New Persona",
+  "memory-ledger": "Memory Ledger",
+  "clear-memory": "Clear Memory",
+  "telemetry": "Telemetry",
+  "hands-free": "Hands-Free (VAD)",
+  "push-to-talk-mode": "Push-to-Talk",
+  "preview-voice": "Preview Voice"
 }
