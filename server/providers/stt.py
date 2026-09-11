@@ -16,7 +16,7 @@ import urllib.request
 import wave
 from typing import Optional
 
-from ._shared import ProviderError, encode_multipart_formdata, logger, pcm16_to_wav_bytes
+from ._shared import ProviderError, encode_multipart_formdata, logger, pcm16_to_wav_bytes, redacted_repr
 
 
 class STTProvider(abc.ABC):
@@ -94,8 +94,6 @@ class DeepgramSTT(STTProvider):
         self.api_key = api_key
 
     def __repr__(self) -> str:
-        from ._shared import redacted_repr
-
         return redacted_repr(self, secret_attrs=("api_key",))
 
     def _key(self) -> str:
@@ -161,8 +159,6 @@ class GroqSTT(STTProvider):
         self.base_url = (base_url or os.environ.get("GROQ_BASE_URL", self.DEFAULT_URL)).strip()
 
     def __repr__(self) -> str:
-        from ._shared import redacted_repr
-
         return redacted_repr(self, secret_attrs=("api_key",))
 
     def _key(self) -> str:
@@ -223,8 +219,6 @@ class OpenAIWhisperSTT(STTProvider):
         self.base_url = (base_url or os.environ.get("OPENAI_BASE_URL", self.DEFAULT_URL)).strip()
 
     def __repr__(self) -> str:
-        from ._shared import redacted_repr
-
         return redacted_repr(self, secret_attrs=("api_key",))
 
     def _key(self) -> str:
