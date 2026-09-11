@@ -215,7 +215,7 @@ class OpenAICompatibleLLM(LLMProvider):
             "stream": True,
         }
         if is_reasoning:
-            payload["max_completion_tokens"] = 300
+            payload["max_completion_tokens"] = 800
         else:
             payload["max_tokens"] = 50
             payload["temperature"] = 0.7

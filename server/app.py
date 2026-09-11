@@ -355,7 +355,30 @@ async def settings_post(req: dict) -> Response:
         if "sensevoice_base_url" in req:
             RUNTIME_SETTINGS["sensevoice_base_url"] = str(req["sensevoice_base_url"])
         if "llm_provider" in req:
-            RUNTIME_SETTINGS["llm_provider"] = str(req["llm_provider"]).lower()
+            new_llm = str(req["llm_provider"]).lower()
+            old_llm = RUNTIME_SETTINGS.get("llm_provider")
+            RUNTIME_SETTINGS["llm_provider"] = new_llm
+            if new_llm != old_llm:
+                if "llm_base_url" not in req:
+                    if new_llm == "groq":
+                        RUNTIME_SETTINGS["llm_base_url"] = "https://api.groq.com/openai/v1"
+                    elif new_llm in ("openai", "gpt"):
+                        RUNTIME_SETTINGS["llm_base_url"] = "https://api.openai.com/v1"
+                    elif new_llm == "litellm":
+                        RUNTIME_SETTINGS["llm_base_url"] = "http://100.99.50.84:8000/v1"
+                if "llm_model" not in req:
+                    if new_llm == "groq":
+                        RUNTIME_SETTINGS["llm_model"] = "groq/compound-mini"
+                    elif new_llm in ("openai", "gpt"):
+                        RUNTIME_SETTINGS["llm_model"] = "gpt-5-nano"
+                    elif new_llm == "litellm":
+                        RUNTIME_SETTINGS["llm_model"] = "claude-sonnet-4-6"
+                if "llm_api_key" not in req:
+                    if new_llm == "groq":
+                        RUNTIME_SETTINGS["llm_api_key"] = RUNTIME_SETTINGS.get("groq_api_key") or os.environ.get("GROQ_API_KEY", "")
+                    elif new_llm in ("openai", "gpt"):
+                        RUNTIME_SETTINGS["llm_api_key"] = RUNTIME_SETTINGS.get("openai_api_key") or os.environ.get("OPENAI_API_KEY", "")
+
         if "llm_base_url" in req:
             RUNTIME_SETTINGS["llm_base_url"] = str(req["llm_base_url"])
         if "llm_model" in req:
@@ -386,6 +409,13 @@ async def settings_post(req: dict) -> Response:
         if RUNTIME_SETTINGS["tts_provider"] in ("smallest", "smallest-ai", "smallest_ai", "waves"):
             tts_key = req.get("smallest_api_key") or RUNTIME_SETTINGS.get("smallest_api_key")
 
+        llm_key = req.get("llm_api_key") or RUNTIME_SETTINGS.get("llm_api_key")
+        if not llm_key:
+            if RUNTIME_SETTINGS["llm_provider"] == "groq":
+                llm_key = RUNTIME_SETTINGS.get("groq_api_key") or os.environ.get("GROQ_API_KEY", "")
+            elif RUNTIME_SETTINGS["llm_provider"] in ("openai", "gpt"):
+                llm_key = RUNTIME_SETTINGS.get("openai_api_key") or os.environ.get("OPENAI_API_KEY", "")
+
         stt = make_stt(
             provider=RUNTIME_SETTINGS["stt_provider"],
             api_key=stt_key,
@@ -395,7 +425,7 @@ async def settings_post(req: dict) -> Response:
             provider=RUNTIME_SETTINGS["llm_provider"],
             base_url=RUNTIME_SETTINGS["llm_base_url"],
             model=RUNTIME_SETTINGS["llm_model"],
-            api_key=req.get("llm_api_key") or RUNTIME_SETTINGS.get("llm_api_key"),
+            api_key=llm_key,
         )
         tts = make_tts(
             provider=RUNTIME_SETTINGS["tts_provider"],
