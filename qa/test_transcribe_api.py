@@ -27,16 +27,22 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from fastapi.testclient import TestClient
+from server import app as server_module
 from server.app import app
-from server.providers import ProviderError
+from server.providers import ProviderError, StubSTT
 
 
 class TestTranscribeApi(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)
+        self.old_stt = server_module.stt
+        server_module.stt = StubSTT()
         # 320ms PCM16 mono @16kHz fixture
         self.pcm_bytes = bytes(320 * 2)
         self.pcm_b64 = base64.b64encode(self.pcm_bytes).decode("ascii")
+
+    def tearDown(self):
+        server_module.stt = self.old_stt
 
     def test_transcribe_valid_audio(self):
         r = self.client.post("/transcribe", json={"pcm_b64": self.pcm_b64, "sample_rate": 16000})

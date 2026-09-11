@@ -77,7 +77,7 @@ class PetTalkClient:
         self,
         ws_url: str = "ws://127.0.0.1:8089/ws",
         persona: str = "donna",
-        vad_silence_ms: int = 600,
+        vad_silence_ms: int = 800,
         vad_threshold: float = 350.0,
         quiet: bool = False,
     ) -> None:
@@ -249,6 +249,12 @@ class PetTalkClient:
                     break
                 await asyncio.sleep(0.01)
 
+            if not self.vad.speech_started:
+                self.recorder.stop()
+                self._log("-> [VAD] No speech detected (ambient silence).")
+                await self.send_frame({"type": "barge", "turn_id": self.current_turn_id})
+                return 0
+
             # Stop recording and send user.stop
             await self.stop_recording_turn()
 
@@ -259,7 +265,12 @@ class PetTalkClient:
                     break
 
                 ftype = frame.get("type")
-                if ftype == "agent.stall":
+                if ftype == "transcript.user":
+                    user_text = frame.get("text", "")
+                    if user_text:
+                        persona_name = self.persona.capitalize()
+                        self._log(f"-> [HEARD] [{persona_name} heard]: \"{user_text}\"")
+                elif ftype == "agent.stall":
                     stall_text = frame.get("text", "")
                     if stall_text and not self.quiet:
                         self._log(f"-> [STALL] {stall_text}")
@@ -323,6 +334,11 @@ class PetTalkClient:
                         self.state = "thinking"
                     elif ftype == "state.speaking":
                         self.state = "speaking"
+                    elif ftype == "transcript.user":
+                        user_text = frame.get("text", "")
+                        if user_text:
+                            persona_name = self.persona.capitalize()
+                            self._log(f"-> [HEARD] [{persona_name} heard]: \"{user_text}\"")
                     elif ftype == "agent.stall":
                         stall_text = frame.get("text", "")
                         if stall_text and not self.quiet:
@@ -390,7 +406,13 @@ class PetTalkClient:
                         if enable_vad:
                             _speech, turn_done = self.vad.process_chunk(chunk)
                             if turn_done:
-                                await self.stop_recording_turn()
+                                if self.vad.speech_started:
+                                    await self.stop_recording_turn()
+                                else:
+                                    self.recorder.stop()
+                                    self._log("-> [VAD] No speech detected (silence cutoff). Returning to idle.")
+                                    await self.send_frame({"type": "barge", "turn_id": self.current_turn_id})
+                                    self.state = "idle"
 
                 await asyncio.sleep(0.01)
 
@@ -442,8 +464,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument(
         "--silence",
         type=int,
-        default=int(os.environ.get("PET_TALK_VAD_SILENCE_MS", "600")),
-        help="VAD silence duration cutoff in ms (default: 600)",
+        default=int(os.environ.get("PET_TALK_VAD_SILENCE_MS", "800")),
+        help="VAD silence duration cutoff in ms (default: 800)",
     )
     parser.add_argument(
         "--threshold",

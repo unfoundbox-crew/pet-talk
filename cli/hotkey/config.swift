@@ -25,13 +25,38 @@ public struct AudioConfig {
     }
 }
 
+public struct PasteConfig {
+    public var enabled: Bool = false
+    public var mode: String = "paste" // "paste" | "keystroke"
+    public var restoreClipboard: Bool = false
+    public var delayMs: Int = 30
+
+    public init(
+        enabled: Bool = false,
+        mode: String = "paste",
+        restoreClipboard: Bool = false,
+        delayMs: Int = 30
+    ) {
+        self.enabled = enabled
+        self.mode = mode
+        self.restoreClipboard = restoreClipboard
+        self.delayMs = max(5, delayMs)
+    }
+}
+
 public struct PetTalkConfig {
     public var version: String = "1.0"
     public var audio: AudioConfig = AudioConfig()
+    public var paste: PasteConfig = PasteConfig()
 
-    public init(version: String = "1.0", audio: AudioConfig = AudioConfig()) {
+    public init(
+        version: String = "1.0",
+        audio: AudioConfig = AudioConfig(),
+        paste: PasteConfig = PasteConfig()
+    ) {
         self.version = version
         self.audio = audio
+        self.paste = paste
     }
 
     public static var defaultConfigPath: String {
@@ -89,6 +114,24 @@ public struct PetTalkConfig {
         case "audio.sound_pack", "audio.soundpack":
             audio.soundPack = cleanVal
             return true
+        case "paste.enabled":
+            if let b = PetTalkConfig.parseBool(cleanVal) {
+                paste.enabled = b
+                return true
+            }
+        case "paste.mode":
+            paste.mode = cleanVal
+            return true
+        case "paste.restore_clipboard", "paste.restoreclipboard":
+            if let b = PetTalkConfig.parseBool(cleanVal) {
+                paste.restoreClipboard = b
+                return true
+            }
+        case "paste.delay_ms", "paste.delay":
+            if let i = Int(cleanVal) {
+                paste.delayMs = max(5, i)
+                return true
+            }
         default:
             if key.lowercased().starts(with: "audio.custom_sounds.") {
                 let soundKey = String(key.dropFirst("audio.custom_sounds.".count))
@@ -117,6 +160,13 @@ public struct PetTalkConfig {
         } else {
             lines.append("  custom_sounds: {}")
         }
+        lines.append("")
+        lines.append("# Cursor Paste Injection (Wispr Flow style)")
+        lines.append("paste:")
+        lines.append("  enabled: \(paste.enabled ? "true" : "false")")
+        lines.append("  mode: \"\(paste.mode)\"")
+        lines.append("  restore_clipboard: \(paste.restoreClipboard ? "true" : "false")")
+        lines.append("  delay_ms: \(paste.delayMs)")
         lines.append("")
         return lines.joined(separator: "\n")
     }
@@ -179,6 +229,20 @@ public struct PetTalkConfig {
                         default:
                             break
                         }
+                    }
+                } else if currentSection == "paste" {
+                    currentSubSection = nil
+                    switch key {
+                    case "enabled":
+                        if let b = parseBool(val) { config.paste.enabled = b }
+                    case "mode":
+                        config.paste.mode = val
+                    case "restore_clipboard", "restoreclipboard":
+                        if let b = parseBool(val) { config.paste.restoreClipboard = b }
+                    case "delay_ms", "delay":
+                        if let i = Int(val) { config.paste.delayMs = max(5, i) }
+                    default:
+                        break
                     }
                 }
             } else if leadingSpaces >= 4 {

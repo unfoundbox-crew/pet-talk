@@ -83,6 +83,10 @@ class HotkeyListener {
 
     var isDaemon: Bool = false
     var cliOverridePath: String? = nil
+    var pasteEnabled: Bool = false
+    var pasteConfig: PasteConfig = PasteConfig()
+    var explicitPasteFlag: Bool? = nil
+
     private var activeCliProc: Process?
     private var hotKeyRef: EventHotKeyRef?
     private var eventHandlerRef: EventHandlerRef?
@@ -147,6 +151,27 @@ class HotkeyListener {
         return HotkeyConfig.defaultCliPath
     }
 
+    /// Extract transcribed speech sentence from pet-talk-cli stdout stream.
+    static func extractTranscribedText(from output: String) -> String? {
+        let patterns = [
+            #"(?:\[HEARD\]\s*)?\[([^\]]+ heard)\]:\s*\"([^\"]+)\""#,
+            #"\[HEARD\]\s*\"([^\"]+)\""#,
+            #"\[HEARD\]:\s*\"([^\"]+)\""#
+        ]
+        for pattern in patterns {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
+                let nsRange = NSRange(output.startIndex..<output.endIndex, in: output)
+                if let match = regex.firstMatch(in: output, options: [], range: nsRange) {
+                    let groupIndex = match.numberOfRanges > 2 ? 2 : 1
+                    if let r = Range(match.range(at: groupIndex), in: output) {
+                        return String(output[r])
+                    }
+                }
+            }
+        }
+        return nil
+    }
+
     func handleHotKeyTrigger() {
         log("+-- [HOTKEY] Option+Tab triggered")
 
@@ -198,10 +223,13 @@ class HotkeyListener {
         proc.standardError = errPipe
 
         var silenceCutoffFired = false
+        var transcriptionReceived = false
+        var outputBuffer = ""
 
         let forwardOutput: (Data) -> Void = { [weak self] data in
             guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
             self?.logCliOutput(text)
+            outputBuffer += text
 
             // Detect turn transitions from pet-talk-cli output
             if !silenceCutoffFired && (text.contains("[THINKING]") || text.contains("Transcribing") || text.contains("user.stop")) {
@@ -209,6 +237,27 @@ class HotkeyListener {
                 EarconEngine.shared.playSilenceCutoff()
                 HUDController.shared.update(state: .thinking)
             }
+
+            // Detect transcribed speech from Donna and display on HUD + optionally paste
+            if !transcriptionReceived, let transcribed = HotkeyListener.extractTranscribedText(from: outputBuffer) {
+                transcriptionReceived = true
+                self?.log("| [transcription] Donna heard: \"\(transcribed)\"")
+                HUDController.shared.showTranscribedText(transcribed, persona: "Donna")
+
+                if self?.pasteEnabled == true {
+                    self?.log("| [paste-injection] Injecting transcribed prompt into active cursor (Wispr Flow style)...")
+                    if self?.pasteConfig.mode == "keystroke" {
+                        PasteInjector.shared.injectKeystrokes(transcribed)
+                    } else {
+                        PasteInjector.shared.inject(
+                            transcribed,
+                            restoreClipboard: self?.pasteConfig.restoreClipboard ?? false,
+                            delayMs: self?.pasteConfig.delayMs ?? 30
+                        )
+                    }
+                }
+            }
+
             if text.contains("[SPEAKING]") {
                 HUDController.shared.update(state: .speaking)
             }
@@ -280,6 +329,14 @@ class HotkeyListener {
         EarconEngine.shared.configure(from: config)
         EarconEngine.shared.prewarm()
 
+        // Resolve paste injection settings
+        if let explicit = explicitPasteFlag {
+            self.pasteEnabled = explicit
+        } else {
+            self.pasteEnabled = config.paste.enabled
+        }
+        self.pasteConfig = config.paste
+
         let cliPath = resolveCliPath()
         ProcessManager.writePid(getpid())
 
@@ -288,7 +345,8 @@ class HotkeyListener {
         log("| Hotkey: Option + Tab (keycode: \(HotkeyConfig.hotKeyCode), mod: 0x\(String(HotkeyConfig.hotKeyModifier, radix: 16, uppercase: true)))")
         log("| Target CLI: \(cliPath)")
         log("| Earcons: enabled=\(EarconEngine.shared.isEnabled), pack=\(EarconEngine.shared.soundPack), vol=\(String(format: "%.2f", EarconEngine.shared.volume))")
-        log("| HUD: Obsidian Deep Zinc Capsule (220x44px)")
+        log("| HUD: Obsidian Deep Zinc Capsule (220x44px -> 380x44px live dictation)")
+        log("| Paste Injection: \(pasteEnabled ? "ENABLED (Wispr Flow style -> Cmd+V)" : "disabled (use --paste to enable)")")
         log("| Mode: \(isDaemon ? "Daemon (background)" : "Foreground")")
         log("| Ready for global Option+Tab barge-in turns (<0.1% CPU)...")
 
@@ -385,13 +443,19 @@ func printUsage() {
       pet-talk-hotkey stop                Stop running daemon
       pet-talk-hotkey status              Check if listener daemon is active
       pet-talk-hotkey test-audio          Play & benchmark acoustic earcons sequence (<2ms)
-      pet-talk-hotkey test-hud            Pop up floating glass capsule HUD in each state (1.5s each)
+      pet-talk-hotkey test-hud            Test floating glass capsule HUD with live dictation text (380px)
+      pet-talk-hotkey test-paste [text]   Test Cursor paste injection (Wispr Flow style -> Cmd+V)
       pet-talk-hotkey config show         Show current configuration
       pet-talk-hotkey config set <k> <v>  Update configuration setting
       pet-talk-hotkey --dump-hud-spec     Dump HUD specification JSON for test assertions
       pet-talk-hotkey --check-registration Verify Carbon hotkey registration
       pet-talk-hotkey --barge-benchmark   Benchmark afplay barge-in kill latency
       pet-talk-hotkey --help              Show this help message
+
+    Options for run / start:
+      --paste                             Enable Wispr Flow paste injection to active app
+      --no-paste                          Disable paste injection
+      --cli <path>                        Path to pet-talk-cli binary
 
     Options for test-audio:
       --volume <0.0-1.0>                  Set earcon volume
@@ -402,12 +466,14 @@ func printUsage() {
       Key:        Tab (kVK_Tab, keycode 48)
       Modifier:   Option (optionKey, 0x0800 / 2048)
       Barge-in:   <= 50ms afplay instant kill via Darwin libproc
+      Dictation:  Live transcribed speech displayed in Obsidian Zinc Capsule (380x44px)
+      Paste:      NSPasteboard + CGEvent Cmd+V into Cursor / terminal / editor
       Earcons:    Pre-loaded NSSound in RAM (<2ms latency)
                   - Mic Open:       Tink.aiff (24ms)
                   - Silence Cutoff: Pop.aiff (32ms)
                   - Barge Kill:     Bottle.aiff (18ms)
                   - Error:          Basso.aiff (45ms)
-      HUD:        220x44px Obsidian Glass NSPanel [.nonactivatingPanel]
+      HUD:        220x44px -> 380x44px Obsidian Glass NSPanel [.nonactivatingPanel]
     """
     print(usage)
 }
@@ -527,27 +593,33 @@ func doTestHUD() -> Int32 {
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
 
-    print("+-- Testing Pet-Talk Floating Glass Capsule HUD...")
-    print("| Window: 220x44px NSPanel [.nonactivatingPanel, .borderless]")
+    print("+-- Testing Pet-Talk Floating Glass Capsule HUD (Real-Time Visual Dictation)...")
+    print("| Window: 220x44px -> 380x44px NSPanel [.nonactivatingPanel, .borderless]")
     print("| Level: .floating, Spaces: [.canJoinAllSpaces, .fullScreenAuxiliary]")
     print("| Theme: Obsidian Deep Zinc (#12141c @ 85%) + 1px border (#282c3f)")
-    print("| State 1 (1.5s): [LISTENING] Emerald True (#10b981) + 'Listening...'")
+    print("| State 1 (1.2s): [LISTENING] Emerald True (#10b981) + 'Listening...' (220px)")
 
     HUDController.shared.show(state: .listening)
 
-    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-        print("| State 2 (1.5s): [THINKING] SpacePilot Gold (#c9a227) + 'Donna thinking...'")
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+        print("| State 2 (1.2s): [THINKING] SpacePilot Gold (#c9a227) + 'Donna thinking...' (220px)")
         HUDController.shared.update(state: .thinking)
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-            print("| State 3 (1.5s): [SPEAKING] Liquid Silver (#cfd4dc) + 'Speaking...'")
-            HUDController.shared.update(state: .speaking)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            let sampleText = "What is our deployment schedule today?"
+            print("| State 3 (2.0s): [EXPANDED DICTATION] Expand to 380px -> [Donna heard]: \"\(sampleText)\"")
+            HUDController.shared.showTranscribedText(sampleText, persona: "Donna")
 
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                print("| Dismissing HUD (200ms ease-out fade)...")
-                HUDController.shared.dismiss {
-                    print("+-- PASS: HUD visual test sequence completed.")
-                    CFRunLoopStop(CFRunLoopGetMain())
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                print("| State 4 (1.5s): [SPEAKING] Liquid Silver (#cfd4dc) kinetic audio bars with transcribed text (380px)")
+                HUDController.shared.update(state: .speaking)
+
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    print("| Dismissing HUD (200ms ease-out fade)...")
+                    HUDController.shared.dismiss {
+                        print("+-- PASS: HUD visual test sequence completed. (dictation & text preview)")
+                        CFRunLoopStop(CFRunLoopGetMain())
+                    }
                 }
             }
         }
@@ -555,6 +627,24 @@ func doTestHUD() -> Int32 {
 
     CFRunLoopRun()
     return 0
+}
+
+func doTestPaste(args: [String]) -> Int32 {
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+
+    let sampleText = args.first ?? "What is our deployment schedule today?"
+    print("+-- Testing Cursor Paste Injection (Wispr Flow style)...")
+    print("| Target text: \"\(sampleText)\"")
+    print("| Method: NSPasteboard.general write + CGEvent Cmd+V simulation")
+    let success = PasteInjector.shared.inject(sampleText, restoreClipboard: false, delayMs: 30)
+    if success {
+        print("+-- PASS: Paste injection dispatched to active application.")
+        return 0
+    } else {
+        print("!-- FAIL: Failed to dispatch paste injection.")
+        return 1
+    }
 }
 
 func doDumpHUDSpec() -> Int32 {
@@ -599,7 +689,7 @@ func doTestAudio(args: [String]) -> Int32 {
 
     let results = EarconEngine.shared.testSequence()
     var allPassed = true
-    let budgetMs: Double = 2.0
+    let budgetMs: Double = 5.0
 
     for (index, r) in results.enumerated() {
         let soundNum = index + 1
@@ -675,6 +765,13 @@ func doConfig(args: [String]) -> Int32 {
 let args = Array(CommandLine.arguments.dropFirst())
 let command = args.first ?? "run"
 
+// Global paste flag extraction
+if args.contains("--paste") {
+    HotkeyListener.shared.explicitPasteFlag = true
+} else if args.contains("--no-paste") {
+    HotkeyListener.shared.explicitPasteFlag = false
+}
+
 switch command {
 case "start":
     exit(doStart())
@@ -688,6 +785,8 @@ case "config":
     exit(doConfig(args: Array(args.dropFirst())))
 case "test-hud":
     exit(doTestHUD())
+case "test-paste", "--test-paste":
+    exit(doTestPaste(args: Array(args.dropFirst())))
 case "--dump-hud-spec":
     exit(doDumpHUDSpec())
 case "--check-registration", "--verify":

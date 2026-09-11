@@ -147,52 +147,138 @@ class StubLLM(LLMProvider):
 
 
 class OpenAICompatibleLLM(LLMProvider):
-    """Real backend (lazy import). Any OpenAI-compatible endpoint via config."""
+    """Real backend: Any OpenAI-compatible endpoint via config.
+    Uses httpx async SSE streaming with automatic remote-to-local fallback.
+    """
 
-    def __init__(self, base_url: str, model: str, api_key: str = "") -> None:
-        self.base_url = base_url
+    def __init__(
+        self,
+        base_url: str = "http://100.99.50.84:8000/v1",
+        model: str = "claude-sonnet-4-6",
+        api_key: str = "",
+    ) -> None:
+        self.base_url = base_url.rstrip("/")
         self.model = model
-        self.api_key = api_key
+        self.api_key = (
+            api_key
+            or os.environ.get("LLM_API_KEY")
+            or os.environ.get("LITELLM_MASTER_KEY", "sk-3340dc7a5732b32c09a08a86da68b7400a9778d3bbbc574a")
+        )
 
     def route(self, text: str) -> str:
         return route_text(text)
 
+    async def _resolve_endpoint(self) -> str:
+        """Resolve base_url, falling back from offline Lenovo (100.99.50.84) to local 127.0.0.1."""
+        target = self.base_url
+        if "100.99.50.84" in target:
+            import socket
+
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(0.5)
+            try:
+                sock.connect(("100.99.50.84", 8000))
+            except Exception:
+                target = target.replace("100.99.50.84:8000", "127.0.0.1:8000")
+            finally:
+                sock.close()
+        return target
+
     async def stream(self, messages: list[dict]) -> AsyncIterator[str]:
+        import json as _json
+
         try:
-            from openai import AsyncOpenAI  # type: ignore  # lazy: pip install openai
-        except ImportError as e:
-            raise ProviderError("llm_openai_not_installed", str(e))
-        client = AsyncOpenAI(base_url=self.base_url, api_key=self.api_key or "x")
-        try:
-            resp = await client.chat.completions.create(
-                model=self.model, messages=messages, stream=True
-            )
+            import httpx
+        except ImportError:
+            httpx = None
+
+        endpoint = await self._resolve_endpoint()
+        url = f"{endpoint}/chat/completions"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key or 'x'}",
+        }
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "stream": True,
+        }
+
+        if httpx is not None:
             buf = ""
-            async for chunk in resp:
-                delta = chunk.choices[0].delta.content if chunk.choices else None
-                if not delta:
-                    continue
-                buf += delta
-                while True:
-                    split_idx = -1
-                    for i, ch in enumerate(buf):
-                        if ch in (".", "!", "?", "\n"):
-                            if i + 1 == len(buf) or buf[i + 1].isspace():
-                                split_idx = i + 1
+            try:
+                async with httpx.AsyncClient(timeout=45.0) as client:
+                    async with client.stream("POST", url, headers=headers, json=payload) as resp:
+                        if resp.status_code != 200:
+                            err_body = await resp.aread()
+                            raise ProviderError(
+                                "llm_stream_failed",
+                                f"HTTP {resp.status_code}: {err_body.decode(errors='replace')}",
+                            )
+                        async for line in resp.aiter_lines():
+                            if not line or not line.startswith("data: "):
+                                continue
+                            data_str = line[6:].strip()
+                            if data_str == "[DONE]":
                                 break
-                    if split_idx != -1:
-                        sentence = buf[:split_idx].strip()
-                        buf = buf[split_idx:].lstrip()
-                        if sentence:
-                            yield sentence
-                    else:
-                        break
-            if buf.strip():
-                yield buf.strip()
-        except ProviderError:
-            raise
-        except Exception as e:
-            raise ProviderError("llm_stream_failed", str(e))
+                            try:
+                                chunk = _json.loads(data_str)
+                                delta = chunk["choices"][0]["delta"].get("content") or ""
+                            except Exception:
+                                continue
+                            if not delta:
+                                continue
+                            buf += delta
+                            while True:
+                                split_idx = -1
+                                for i, ch in enumerate(buf):
+                                    if ch in (".", "!", "?", "\n"):
+                                        if i + 1 == len(buf) or buf[i + 1].isspace():
+                                            split_idx = i + 1
+                                            break
+                                if split_idx != -1:
+                                    sentence = buf[:split_idx].strip()
+                                    buf = buf[split_idx:].lstrip()
+                                    if sentence:
+                                        yield sentence
+                                else:
+                                    break
+                        if buf.strip():
+                            yield buf.strip()
+            except ProviderError:
+                raise
+            except Exception as e:
+                raise ProviderError("llm_stream_failed", str(e))
+        else:
+            try:
+                from openai import AsyncOpenAI  # type: ignore
+
+                client = AsyncOpenAI(base_url=endpoint, api_key=self.api_key or "x")
+                resp = await client.chat.completions.create(model=self.model, messages=messages, stream=True)
+                buf = ""
+                async for chunk in resp:
+                    delta = chunk.choices[0].delta.content if chunk.choices else None
+                    if not delta:
+                        continue
+                    buf += delta
+                    while True:
+                        split_idx = -1
+                        for i, ch in enumerate(buf):
+                            if ch in (".", "!", "?", "\n"):
+                                if i + 1 == len(buf) or buf[i + 1].isspace():
+                                    split_idx = i + 1
+                                    break
+                        if split_idx != -1:
+                            sentence = buf[:split_idx].strip()
+                            buf = buf[split_idx:].lstrip()
+                            if sentence:
+                                yield sentence
+                        else:
+                            break
+                if buf.strip():
+                    yield buf.strip()
+            except Exception as e:
+                raise ProviderError("llm_stream_failed", str(e))
 
 
 # ---------------------------------------------------------------- TTS ---
@@ -251,17 +337,38 @@ class KokoroSpacePilotTTS(TTSProvider):
     def _auth_token(self) -> str:
         if self._token is not None:
             return self._token
+        env_tok = (
+            os.environ.get("SPACEPILOT_TOKEN")
+            or os.environ.get("STUDIO_TOKEN")
+            or os.environ.get("KOKORO_TOKEN")
+        )
+        if env_tok and env_tok.strip():
+            self._token = env_tok.strip()
+            return self._token
         token_file = os.environ.get("STUDIO_TOKEN_FILE", "")
-        if not token_file:
-            raise ProviderError("tts_no_token", "STUDIO_TOKEN_FILE env not set")
+        if token_file and os.path.exists(token_file):
+            try:
+                with open(token_file) as f:
+                    tok = f.read().strip()
+                if tok:
+                    self._token = tok
+                    return self._token
+            except OSError:
+                pass
+        # Auto-fetch token from daemon /api/token
         try:
-            with open(token_file) as f:
-                self._token = f.read().strip()
-        except OSError as e:
-            raise ProviderError("tts_token_unreadable", str(e))
-        if not self._token:
-            raise ProviderError("tts_token_empty", f"{token_file} is empty")
-        return self._token
+            req = urllib.request.Request(f"{self.base_url}/api/token")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                import json as _json
+
+                data = _json.loads(resp.read().decode())
+                tok = data.get("token", "")
+                if tok:
+                    self._token = tok
+                    return self._token
+        except Exception:
+            pass
+        raise ProviderError("tts_no_token", "Could not obtain SpacePilot token from env, file, or /api/token")
 
     def _request(self, method: str, path: str, payload: Optional[dict] = None) -> dict:
         import json as _json
@@ -310,7 +417,7 @@ class KokoroSpacePilotTTS(TTSProvider):
         url = (
             file_path
             if file_path.startswith("http")
-            else self.base_url + urllib.parse.quote(file_path)
+            else self.base_url + (file_path if file_path.startswith("/") else f"/{file_path}")
         )
         req = urllib.request.Request(
             url, headers={"X-SpacePilot-Token": self._auth_token()}
@@ -377,6 +484,8 @@ class ElevenLabsTTS(TTSProvider):
 
 def pcm16_to_wav_bytes(pcm16_bytes: bytes, sample_rate: int = 16000) -> bytes:
     """Pack PCM16 mono bytes into a compliant in-memory RIFF WAV container."""
+    if pcm16_bytes.startswith(b"RIFF"):
+        return pcm16_bytes
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
         w.setnchannels(1)
@@ -733,6 +842,44 @@ class SenseVoiceSTT(STTProvider):
         return text
 
 
+class FasterWhisperSTT(STTProvider):
+    """Local faster-whisper backend running on CPU/Metal. Zero cloud dependencies."""
+
+    def __init__(
+        self,
+        model_name: str = "tiny.en",
+        device: str = "cpu",
+        compute_type: str = "int8",
+    ) -> None:
+        self.model_name = model_name
+        self.device = device
+        self.compute_type = compute_type
+        self._model = None
+
+    def _load(self):
+        if self._model is None:
+            try:
+                from faster_whisper import WhisperModel
+            except ImportError as e:
+                raise ProviderError("stt_faster_whisper_not_installed", str(e))
+            self._model = WhisperModel(self.model_name, device=self.device, compute_type=self.compute_type)
+        return self._model
+
+    def transcribe(self, pcm16_bytes: bytes, sample_rate: int = 16000) -> str:
+        if not pcm16_bytes:
+            raise ProviderError("stt_empty_audio", "no bytes to transcribe")
+        model = self._load()
+        wav = pcm16_to_wav_bytes(pcm16_bytes, sample_rate=sample_rate)
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as f:
+            f.write(wav)
+            f.flush()
+            segments, _ = model.transcribe(f.name)
+            text = " ".join(s.text.strip() for s in segments).strip()
+        if not text:
+            raise ProviderError("stt_empty_result", "faster-whisper returned no text")
+        return text
+
+
 class DeepgramTTS(TTSProvider):
     """Cloud tyre: Deepgram speak API (Aura family). Same interface.
 
@@ -787,15 +934,17 @@ def json_dumps(payload: dict) -> str:
 
 
 def make_tts(provider: Optional[str] = None, base_url: Optional[str] = None) -> TTSProvider:
-    """Tyre switch: TTS_PROVIDER=stub|kokoro|elevenlabs|deepgram (default: stub)."""
-    which = (provider or os.environ.get("TTS_PROVIDER", "stub")).lower()
+    """Tyre switch: TTS_PROVIDER=kokoro|deepgram|elevenlabs|stub (default: kokoro)."""
+    which = (provider or os.environ.get("TTS_PROVIDER", "kokoro")).lower()
     if which == "kokoro":
         return KokoroSpacePilotTTS(base_url=base_url or os.environ.get("KOKORO_BASE_URL", "http://127.0.0.1:8088"))
     if which == "elevenlabs":
         return ElevenLabsTTS()
     if which == "deepgram":
         return DeepgramTTS()
-    return StubTTS()
+    if which == "stub":
+        return StubTTS()
+    return KokoroSpacePilotTTS(base_url=base_url or os.environ.get("KOKORO_BASE_URL", "http://127.0.0.1:8088"))
 
 
 def make_stt(
@@ -805,10 +954,11 @@ def make_stt(
     model: Optional[str] = None,
 ) -> STTProvider:
     """Tyre switch for STT provider:
-    stub | deepgram | groq | openai | whisperkit | mlx | sensevoice (default: stub).
+    deepgram | groq | sensevoice | whisperkit | faster-whisper | mlx | openai | stub.
     Fail-closed: raises ProviderError on unknown provider or missing credentials.
     """
-    which = (provider or os.environ.get("STT_PROVIDER", "stub")).lower().strip()
+    default_provider = "deepgram" if os.environ.get("DEEPGRAM_API_KEY") else "faster-whisper"
+    which = (provider or os.environ.get("STT_PROVIDER", default_provider)).lower().strip()
     if which in ("", "stub"):
         return StubSTT()
     if which == "deepgram":
@@ -833,16 +983,18 @@ def make_stt(
             model=model or "openai/whisper-large-v3_turbo",
             cli_path=base_url or os.environ.get("WHISPERKIT_CLI_PATH", "whisperkit-cli"),
         )
+    if which in ("faster-whisper", "faster_whisper", "whisper", "local", "whisper-local"):
+        return FasterWhisperSTT(
+            model_name=model or os.environ.get("WHISPER_MODEL", "tiny.en"),
+        )
     if which in ("mlx", "mlx-whisper"):
         return MLXWhisperSTT(
             model=model or "mlx-community/whisper-large-v3-turbo",
         )
     if which in ("sensevoice", "fleet", "sovereign"):
         return SenseVoiceSTT(
-            base_url=base_url or os.environ.get("SENSEVOICE_BASE_URL", "http://127.0.0.1:8086"),
+            base_url=base_url or os.environ.get("SENSEVOICE_BASE_URL", "http://100.99.50.84:8086"),
         )
-    if which in ("whisper-local", "whisper_local", "whisper", "local"):
-        raise ProviderError("stt_not_wired", "whisper-local not wired")
     raise ProviderError("stt_unknown_provider", f"unknown STT provider: {which}")
 
 
@@ -852,14 +1004,27 @@ def make_llm(
     model: Optional[str] = None,
     api_key: Optional[str] = None,
 ) -> LLMProvider:
-    """Tyre switch: LLM_PROVIDER=stub|openai|litellm|fleet (default: stub)."""
-    which = (provider or os.environ.get("LLM_PROVIDER", "stub")).lower()
+    """Tyre switch: LLM_PROVIDER=litellm|openai|fleet|local|stub (default: litellm)."""
+    which = (provider or os.environ.get("LLM_PROVIDER", "litellm")).lower()
     if which in ("openai", "litellm", "fleet", "local"):
         b_url = base_url or os.environ.get("LLM_BASE_URL", "http://100.99.50.84:8000/v1")
-        m = model or os.environ.get("LLM_MODEL", "claude-3-7-sonnet")
-        key = api_key or os.environ.get("LLM_API_KEY", "x")
+        m = model or os.environ.get("LLM_MODEL", "claude-sonnet-4-6")
+        key = (
+            api_key
+            or os.environ.get("LLM_API_KEY")
+            or os.environ.get("LITELLM_MASTER_KEY", "sk-3340dc7a5732b32c09a08a86da68b7400a9778d3bbbc574a")
+        )
         return OpenAICompatibleLLM(base_url=b_url, model=m, api_key=key)
-    return StubLLM()
+    if which == "stub":
+        return StubLLM()
+    b_url = base_url or os.environ.get("LLM_BASE_URL", "http://100.99.50.84:8000/v1")
+    m = model or os.environ.get("LLM_MODEL", "claude-sonnet-4-6")
+    key = (
+        api_key
+        or os.environ.get("LLM_API_KEY")
+        or os.environ.get("LITELLM_MASTER_KEY", "sk-3340dc7a5732b32c09a08a86da68b7400a9778d3bbbc574a")
+    )
+    return OpenAICompatibleLLM(base_url=b_url, model=m, api_key=key)
 
 
 # ---------------------------------------------------------------- VAD ---

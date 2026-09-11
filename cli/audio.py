@@ -49,17 +49,21 @@ class EnergyVAD:
     """Lightweight Voice Activity Detector based on energy (RMS) thresholds.
 
     - Detects voice onset by requiring N consecutive speech frames.
-    - Measures silence duration after speech has started.
-    - Declares turn finished when silence exceeds ``silence_ms``.
+    - Measures silence duration after speech has started (default 800ms).
+    - Prevents premature cutoff during natural mid-sentence pauses.
+    - Prevents capturing unending ambient silence via initial silence timeout (default 4000ms).
+    - Declares turn finished when speech silence exceeds ``silence_ms`` or initial silence exceeds ``initial_silence_ms``.
     """
 
     def __init__(
         self,
         threshold: float = 350.0,
         confirm_frames: int = 2,
-        silence_ms: int = 600,
+        silence_ms: int = 800,
         sample_rate: int = 16000,
         chunk_samples: int = 512,
+        initial_silence_ms: int = 4000,
+        min_speech_ms: int = 0,
     ) -> None:
         self.threshold = threshold
         self.confirm_frames = confirm_frames
@@ -67,16 +71,22 @@ class EnergyVAD:
         self.sample_rate = sample_rate
         self.chunk_samples = chunk_samples
         self.chunk_duration_ms = (chunk_samples / sample_rate) * 1000.0
+        self.initial_silence_ms = initial_silence_ms
+        self.min_speech_ms = min_speech_ms
 
         self.speech_started: bool = False
         self._consecutive_speech: int = 0
+        self._speech_duration_ms: float = 0.0
         self.silence_duration_ms: float = 0.0
+        self.initial_silence_duration_ms: float = 0.0
 
     def reset(self) -> None:
         """Reset VAD state for a fresh turn."""
         self.speech_started = False
         self._consecutive_speech = 0
+        self._speech_duration_ms = 0.0
         self.silence_duration_ms = 0.0
+        self.initial_silence_duration_ms = 0.0
 
     def process_chunk(self, chunk: bytes) -> tuple[bool, bool]:
         """Process a PCM chunk.
@@ -89,6 +99,7 @@ class EnergyVAD:
 
         if is_speech:
             self._consecutive_speech += 1
+            self._speech_duration_ms += self.chunk_duration_ms
             if not self.speech_started and self._consecutive_speech >= self.confirm_frames:
                 self.speech_started = True
             if self.speech_started:
@@ -96,8 +107,17 @@ class EnergyVAD:
         else:
             self._consecutive_speech = 0
             if self.speech_started:
+                # Active speech finished, accumulating trailing silence
                 self.silence_duration_ms += self.chunk_duration_ms
-                if self.silence_duration_ms >= self.silence_ms:
+                if (
+                    self.silence_duration_ms >= self.silence_ms
+                    and self._speech_duration_ms >= self.min_speech_ms
+                ):
+                    return False, True
+            else:
+                # Speech has not started yet: accumulate initial silence
+                self.initial_silence_duration_ms += self.chunk_duration_ms
+                if self.initial_silence_duration_ms >= self.initial_silence_ms:
                     return False, True
 
         return is_speech, False
@@ -183,6 +203,7 @@ class AudioRecorder:
         self._accumulated = []
         self._proc = subprocess.Popen(
             cmd,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             bufsize=0,
@@ -297,6 +318,10 @@ class AudioPlayer:
         if self._barge_in_progress:
             return
 
+        # Ensure payload is a valid non-empty WAV (RIFF/WAVE header, min 44 bytes)
+        if len(wav_bytes) < 44 or not (wav_bytes.startswith(b"RIFF") and b"WAVE" in wav_bytes[:16]):
+            return
+
         # Write to temporary WAV file
         fd, path = tempfile.mkstemp(prefix=f"pet_talk_{turn_id}_{seq}_", suffix=".wav")
         try:
@@ -380,6 +405,7 @@ class AudioPlayer:
             try:
                 proc = subprocess.Popen(
                     ["afplay", path],
+                    stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )

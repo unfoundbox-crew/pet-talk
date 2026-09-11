@@ -102,15 +102,22 @@ VOICES_PATH = os.path.join(os.path.dirname(SERVER_DIR), "personas", "voices.yaml
 TURNS_PATH = os.path.join(SERVER_DIR, "turns.jsonl")
 
 RUNTIME_SETTINGS = {
-    "stt_provider": os.environ.get("STT_PROVIDER", "stub").lower(),
+    "stt_provider": os.environ.get(
+        "STT_PROVIDER",
+        "deepgram" if os.environ.get("DEEPGRAM_API_KEY") else "faster-whisper",
+    ).lower(),
     "deepgram_api_key": os.environ.get("DEEPGRAM_API_KEY", ""),
     "groq_api_key": os.environ.get("GROQ_API_KEY", ""),
     "openai_api_key": os.environ.get("OPENAI_API_KEY", ""),
-    "sensevoice_base_url": os.environ.get("SENSEVOICE_BASE_URL", "http://127.0.0.1:8086"),
-    "llm_provider": os.environ.get("LLM_PROVIDER", "stub").lower(),
+    "sensevoice_base_url": os.environ.get("SENSEVOICE_BASE_URL", "http://100.99.50.84:8086"),
+    "llm_provider": os.environ.get("LLM_PROVIDER", "litellm").lower(),
     "llm_base_url": os.environ.get("LLM_BASE_URL", "http://100.99.50.84:8000/v1"),
-    "llm_model": os.environ.get("LLM_MODEL", "claude-3-7-sonnet"),
-    "tts_provider": os.environ.get("TTS_PROVIDER", "stub").lower(),
+    "llm_model": os.environ.get("LLM_MODEL", "claude-sonnet-4-6"),
+    "llm_api_key": os.environ.get(
+        "LLM_API_KEY",
+        os.environ.get("LITELLM_MASTER_KEY", "sk-3340dc7a5732b32c09a08a86da68b7400a9778d3bbbc574a"),
+    ),
+    "tts_provider": os.environ.get("TTS_PROVIDER", "kokoro").lower(),
     "kokoro_base_url": os.environ.get("KOKORO_BASE_URL", "http://127.0.0.1:8088"),
     "vad_silence_ms": int(os.environ.get("VAD_SILENCE_MS", "600")),
 }
@@ -132,13 +139,14 @@ llm = make_llm(
     provider=RUNTIME_SETTINGS["llm_provider"],
     base_url=RUNTIME_SETTINGS["llm_base_url"],
     model=RUNTIME_SETTINGS["llm_model"],
+    api_key=RUNTIME_SETTINGS["llm_api_key"],
 )
 tts = make_tts(
     provider=RUNTIME_SETTINGS["tts_provider"],
     base_url=RUNTIME_SETTINGS["kokoro_base_url"],
 )
 memory = Hippocampus(ledger_path=os.path.join(SERVER_DIR, "ledger.jsonl"))
-persona = load_persona()  # built-in default until personas/ exists
+persona = load_persona(os.environ.get("DEFAULT_PERSONA", "donna"))
 
 
 def new_turn_id() -> str:
@@ -341,6 +349,8 @@ async def settings_post(req: dict) -> Response:
             RUNTIME_SETTINGS["llm_base_url"] = str(req["llm_base_url"])
         if "llm_model" in req:
             RUNTIME_SETTINGS["llm_model"] = str(req["llm_model"])
+        if "llm_api_key" in req:
+            RUNTIME_SETTINGS["llm_api_key"] = str(req["llm_api_key"])
         if "tts_provider" in req:
             RUNTIME_SETTINGS["tts_provider"] = str(req["tts_provider"]).lower()
         if "kokoro_base_url" in req:
@@ -368,7 +378,7 @@ async def settings_post(req: dict) -> Response:
             provider=RUNTIME_SETTINGS["llm_provider"],
             base_url=RUNTIME_SETTINGS["llm_base_url"],
             model=RUNTIME_SETTINGS["llm_model"],
-            api_key=req.get("llm_api_key"),
+            api_key=req.get("llm_api_key") or RUNTIME_SETTINGS.get("llm_api_key"),
         )
         tts = make_tts(
             provider=RUNTIME_SETTINGS["tts_provider"],

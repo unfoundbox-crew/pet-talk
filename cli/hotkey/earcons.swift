@@ -135,9 +135,10 @@ public class EarconEngine {
     /// Pre-warm CoreAudio to ensure instantaneous sub-millisecond execution.
     public func prewarm() {
         // AudioServicesCreateSystemSoundID already loads into RAM.
-        // Quick no-op dispatch ensures CoreAudio client Mach port is mapped.
-        guard let sid = soundIDs[.micOpen] else { return }
-        AudioServicesPlaySystemSound(sid)
+        // Quick no-op dispatch ensures CoreAudio client Mach port is mapped for all sounds.
+        for sid in soundIDs.values {
+            AudioServicesPlaySystemSound(sid)
+        }
     }
 
     @discardableResult
