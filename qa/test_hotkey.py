@@ -109,15 +109,22 @@ class TestDaemonLifecycle(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        res = subprocess.run([BIN_PATH, "status"], capture_output=True, text=True)
+        cls._was_running = (res.returncode == 0)
         if not os.path.exists(BIN_PATH):
             subprocess.run(["swiftc", "-O", SWIFT_SRC, "-o", BIN_PATH], check=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        if getattr(cls, "_was_running", False):
+            subprocess.run([BIN_PATH, "start"], capture_output=True)
 
     def setUp(self):
         # Guarantee clean state before each test
         subprocess.run([BIN_PATH, "stop"], capture_output=True)
 
     def tearDown(self):
-        # Clean up any leftover daemon
+        # Clean up any leftover daemon from individual test
         subprocess.run([BIN_PATH, "stop"], capture_output=True)
 
     def test_lifecycle_transitions(self):

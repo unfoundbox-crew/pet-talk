@@ -292,7 +292,7 @@ class HotkeyListener {
         log("| Mode: \(isDaemon ? "Daemon (background)" : "Foreground")")
         log("| Ready for global Option+Tab barge-in turns (<0.1% CPU)...")
 
-        // 1. Install Carbon Event Handler
+        // 1. Install Carbon Event Handler on Event Dispatcher Target
         let eventHandler: EventHandlerUPP = { (_, _, _) -> OSStatus in
             HotkeyListener.shared.handleHotKeyTrigger()
             return noErr
@@ -304,7 +304,7 @@ class HotkeyListener {
         )
 
         let installStatus = InstallEventHandler(
-            GetApplicationEventTarget(),
+            GetEventDispatcherTarget(),
             eventHandler,
             1,
             &eventType,
@@ -318,13 +318,13 @@ class HotkeyListener {
             return 1
         }
 
-        // 2. Register Global Hotkey (kVK_Tab + optionKey)
+        // 2. Register Global Hotkey (kVK_Tab + optionKey) on Event Dispatcher Target
         let hotKeyID = EventHotKeyID(signature: HotkeyConfig.hotKeySignature, id: HotkeyConfig.hotKeyId)
         let regStatus = RegisterEventHotKey(
             HotkeyConfig.hotKeyCode,
             HotkeyConfig.hotKeyModifier,
             hotKeyID,
-            GetApplicationEventTarget(),
+            GetEventDispatcherTarget(),
             0,
             &hotKeyRef
         )
@@ -353,8 +353,8 @@ class HotkeyListener {
         }
         sigtermSource.resume()
 
-        // 4. Run CoreFoundation RunLoop (zero CPU usage when idle)
-        CFRunLoopRun()
+        // 4. Run NSApplication RunLoop to pump WindowServer events and AppKit animations
+        NSApplication.shared.run()
         return 0
     }
 
