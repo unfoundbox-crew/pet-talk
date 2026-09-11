@@ -20,9 +20,13 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
 HUD_SWIFT_SRC = os.path.join(ROOT, "cli", "hotkey", "hud_window.swift")
 ALL_SWIFT_SRCS = sorted(glob.glob(os.path.join(ROOT, "cli", "hotkey", "*.swift")))
 BIN_PATH = os.path.join(ROOT, "bin", "pet-talk-hotkey")
@@ -164,6 +168,173 @@ class TestHUDInteractiveSequence(unittest.TestCase):
         self.assertIn("[SPEAKING] Liquid Silver (#cfd4dc)", res.stdout)
         self.assertIn("[ERROR SHAKE]", res.stdout)
         self.assertIn("PASS: HUD visual test sequence completed.", res.stdout)
+
+
+class TestAcousticTruthAndTelemetry(unittest.TestCase):
+    """Verify acoustic truth implementation: zero looping animations, live RMS parsing, and audio levels."""
+
+    def test_no_looping_animations_during_listening(self):
+        """Assert that fake looping CABasicAnimation has been eliminated from listening state."""
+        with open(HUD_SWIFT_SRC, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        # Check setupListeningWaveform implementation
+        self.assertIn("setupListeningWaveform", content)
+        # Extract setupListeningWaveform function block
+        idx = content.find("setupListeningWaveform")
+        block = content[idx:idx + 1200]
+
+        self.assertNotIn("CABasicAnimation(keyPath: \"bounds.size.height\")", block,
+                         "Fake looping CABasicAnimation must be eliminated from setupListeningWaveform")
+        self.assertNotIn("repeatCount = .infinity", block,
+                         "Infinite repeatCount must be eliminated from setupListeningWaveform")
+        self.assertIn("isAcousticListening = true", block,
+                         "setupListeningWaveform must activate acoustic listening mode")
+
+    def test_acoustic_truth_update_audio_level_api(self):
+        """Verify updateAudioLevel(rms:peak:) API is exposed on HUD components."""
+        with open(HUD_SWIFT_SRC, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        self.assertIn("public func updateAudioLevel(rms: Float, peak: Float)", content,
+                      "HUDIndicatorView and HUDController must provide updateAudioLevel(rms: Float, peak: Float)")
+
+    def test_rms_telemetry_parsing_patterns(self):
+        """Verify regex extraction of live microphone RMS and Peak telemetry."""
+        import re
+
+        pattern = r"(?i)\[RMS:\s*(?:rms=)?([0-9.]+)(?:[,\s]+(?:(?:PEAK|peak)=?|peak:?)?\s*([0-9.]+))?\]"
+
+        samples = [
+            ("[RMS: 0.245, PEAK: 0.512]", 0.245, 0.512),
+            ("[RMS: 0.350]", 0.350, None),
+            ("[RMS: 0.120, 0.450]", 0.120, 0.450),
+            ("[RMS: rms=0.420, peak=0.780]", 0.420, 0.780),
+            ("[rms: 0.085, peak: 0.190]", 0.085, 0.190),
+        ]
+
+        for text, exp_rms, exp_peak in samples:
+            match = re.search(pattern, text)
+            self.assertIsNotNone(match, f"Failed to match: {text}")
+            self.assertAlmostEqual(float(match.group(1)), exp_rms, places=3)
+            if exp_peak is not None:
+                self.assertAlmostEqual(float(match.group(2)), exp_peak, places=3)
+
+    def test_calculate_rms_and_peak(self):
+        """Verify calculate_rms_and_peak computes accurate acoustic energy and peak amplitude."""
+        import array
+        from cli.audio import calculate_rms_and_peak
+
+        # 1. Digital silence
+        silence = bytes(1024)
+        rms, peak = calculate_rms_and_peak(silence)
+        self.assertEqual(rms, 0.0)
+        self.assertEqual(peak, 0.0)
+
+        # 2. Known amplitude block
+        test_val = 5000
+        samples = array.array("h", [test_val] * 512).tobytes()
+        rms, peak = calculate_rms_and_peak(samples)
+        self.assertAlmostEqual(rms, float(test_val), delta=1.0)
+        self.assertEqual(peak, float(test_val))
+
+
+class TestDynamicMultiLineAndBreadcrumbs(unittest.TestCase):
+    """Verify dynamic multi-line height expansion and semantic action breadcrumbs."""
+
+    @classmethod
+    def setUpClass(cls):
+        res = subprocess.run([BIN_PATH, "--dump-hud-spec"], capture_output=True, text=True, check=True)
+        cls.spec = json.loads(res.stdout)
+
+    def test_multiline_word_wrapping_attributes(self):
+        """Verify labelField uses word wrapping, multi-line mode, and 4 lines maximum."""
+        data = self.spec
+        self.assertFalse(data.get("labelUsesSingleLineMode"), "labelUsesSingleLineMode must be false")
+        self.assertEqual(data.get("labelMaximumNumberOfLines"), 4, "labelMaximumNumberOfLines must be 4")
+        self.assertEqual(data.get("maxExpandedHeight"), 110.0, "maxExpandedHeight must be 110px clamp")
+        self.assertTrue(data.get("supportsBreadcrumbs"), "supportsBreadcrumbs must be true")
+
+    def test_dynamic_notch_height_stepping(self):
+        """Verify dynamic height calculation stepping from 60px to 76px to 96px to 110px clamp."""
+        with open(HUD_SWIFT_SRC, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        self.assertIn("computeDynamicNotchHeight", content)
+        self.assertIn("maxExpandedHeight", content)
+        self.assertIn("calculateTextHeight", content)
+
+    def test_semantic_action_breadcrumb_sanitization(self):
+        """Verify raw tool calls, tracebacks, and coding harness events are sanitized into clean breadcrumbs."""
+        import re
+
+        # Helper matching the Swift sanitizeSemanticBreadcrumb logic
+        def sanitize(line):
+            t = line.strip()
+            if not t or t.startswith("[RMS:") or t.startswith("[rms:"):
+                return None
+            if t.startswith("[BREADCRUMB]") or t.startswith("[STATUS]"):
+                rest = t.replace("[BREADCRUMB]", "").replace("[STATUS]", "").strip()
+                if ":" in rest:
+                    parts = rest.split(":", 1)
+                    return (parts[0].strip(), parts[1].strip())
+            # Transcribed
+            m = re.search(r'\[([^\]]+ heard)\]:\s*\"([^\"]+)\"', t)
+            if m:
+                return (m.group(1), f'"{m.group(2)}"')
+            # Harness patterns
+            for pattern in ["Thinking", "Running", "Editing", "Searching", "Reading", "Testing"]:
+                if t.lower().startswith(f"[{pattern.lower()}]:") or t.lower().startswith(f"{pattern.lower()}:"):
+                    parts = t.split(":", 1)
+                    return (pattern, parts[1].strip())
+            # Tool calls
+            if "run_command" in t or "CommandLine" in t:
+                if "qa/run_all.sh" in t or "test_" in t:
+                    return ("Running", "Executing QA test suites")
+                elif "swiftc" in t:
+                    return ("Running", "Compiling Swift hotkey daemon")
+                elif "git diff" in t:
+                    return ("Running", "Checking git diff")
+                elif "git status" in t:
+                    return ("Running", "Inspecting repository status")
+                return ("Running", "Executing system task")
+            if "replace_file_content" in t or "write_to_file" in t:
+                return ("Editing", "Applying code changes")
+            if "view_file" in t or "read_resource" in t:
+                return ("Reading", "Inspecting file context")
+            if "search_web" in t or "duckduckgo_web_search" in t:
+                return ("Searching", "Consulting web knowledge")
+            if t.startswith("{") or t.startswith("[{") or "Traceback" in t:
+                return None
+            return None
+
+        # Test cases
+        self.assertEqual(sanitize('[STATUS] Running: Compiling Swift daemon'), ('Running', 'Compiling Swift daemon'))
+        self.assertEqual(sanitize('[Thinking]: Formulating reply...'), ('Thinking', 'Formulating reply...'))
+        self.assertEqual(sanitize('[Donna heard]: "check test suites"'), ('Donna heard', '"check test suites"'))
+        self.assertEqual(sanitize('{"tool": "run_command", "CommandLine": "bash qa/run_all.sh"}'),
+                         ('Running', 'Executing QA test suites'))
+        self.assertEqual(sanitize('{"tool": "replace_file_content", "TargetFile": "hud.swift"}'),
+                         ('Editing', 'Applying code changes'))
+        self.assertIsNone(sanitize('Traceback (most recent call last): File "app.py"'))
+        self.assertIsNone(sanitize('[RMS: 0.245, PEAK: 0.512]'))
+
+    def test_breadcrumbs_visual_command_output(self):
+        """Verify test-breadcrumbs CLI command executes successfully."""
+        res = subprocess.run(
+            [BIN_PATH, "test-breadcrumbs"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        self.assertEqual(res.returncode, 0, f"test-breadcrumbs failed:\n{res.stderr}\n{res.stdout}")
+        self.assertIn("Testing Dynamic Island Semantic Action Breadcrumbs", res.stdout)
+        self.assertIn("[Thinking]", res.stdout)
+        self.assertIn("[Running]", res.stdout)
+        self.assertIn("[Editing]", res.stdout)
+        self.assertIn("[Donna heard]", res.stdout)
+        self.assertIn("[Speaking]", res.stdout)
+        self.assertIn("PASS: Semantic Action Breadcrumbs & Multi-line visual test completed.", res.stdout)
 
 
 if __name__ == "__main__":

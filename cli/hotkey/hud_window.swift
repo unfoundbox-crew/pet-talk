@@ -409,6 +409,7 @@ public class HUDCapsuleView: NSView {
     public static let notchRestingHeight: CGFloat = 38.0
     public static let notchListeningHeight: CGFloat = 52.0
     public static let notchExpandedHeight: CGFloat = 60.0
+    public static let maxExpandedHeight: CGFloat = 110.0
     public static let earFilletRadius: CGFloat = 10.0
     public static let bottomCornerRadius: CGFloat = 20.0
     public static let hoverPeekHeight: CGFloat = 6.0
@@ -497,7 +498,7 @@ public class HUDCapsuleView: NSView {
         personaBadge.isHidden = true
         addSubview(personaBadge)
 
-        // 6. Status & Dictation Typography
+        // 6. Status & Dictation Typography (Multi-line word wrapping)
         labelField.isEditable = false
         labelField.isSelectable = false
         labelField.isBordered = false
@@ -505,10 +506,12 @@ public class HUDCapsuleView: NSView {
         labelField.font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
         labelField.textColor = NSColor(srgbRed: 0xf3 / 255.0, green: 0xf4 / 255.0, blue: 0xf6 / 255.0, alpha: 1.0)
         labelField.alignment = .left
-        labelField.lineBreakMode = .byTruncatingTail
+        labelField.lineBreakMode = .byWordWrapping
+        labelField.cell?.wraps = true
+        labelField.cell?.isScrollable = false
         labelField.cell?.truncatesLastVisibleLine = true
-        labelField.maximumNumberOfLines = 1
-        labelField.usesSingleLineMode = true
+        labelField.maximumNumberOfLines = 4
+        labelField.usesSingleLineMode = false
         labelField.stringValue = "Listening..."
         addSubview(labelField)
 
@@ -638,6 +641,40 @@ public class HUDCapsuleView: NSView {
         visualEffectView.frame = NSRect(x: 0, y: 0, width: width, height: height)
     }
 
+    public static func calculateTextHeight(for attrString: NSAttributedString, constrainedToWidth width: CGFloat) -> CGFloat {
+        let size = CGSize(width: width, height: CGFloat.greatestFiniteMagnitude)
+        let rect = attrString.boundingRect(
+            with: size,
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            context: nil
+        )
+        return ceil(rect.height)
+    }
+
+    public static func computeDynamicNotchHeight(for textHeight: CGFloat, hasNotch: Bool) -> CGFloat {
+        if hasNotch {
+            if textHeight <= 22.0 {
+                return notchExpandedHeight // 60.0px (single line)
+            } else if textHeight <= 42.0 {
+                return 76.0 // 2 lines
+            } else if textHeight <= 62.0 {
+                return 96.0 // 3 lines
+            } else {
+                return maxExpandedHeight // 110.0px (4 lines clamp)
+            }
+        } else {
+            if textHeight <= 22.0 {
+                return capsuleHeight // 44.0px
+            } else if textHeight <= 42.0 {
+                return 64.0 // 2 lines
+            } else if textHeight <= 62.0 {
+                return 82.0 // 3 lines
+            } else {
+                return 96.0 // 4 lines
+            }
+        }
+    }
+
     public func layoutSubviews(forWidth width: CGFloat, height: CGFloat) {
         self.currentWidth = width
         self.currentHeight = height
@@ -646,19 +683,40 @@ public class HUDCapsuleView: NSView {
         updateShapePath(width: width, height: height)
 
         let isExpanded = width > (Self.capsuleWidth + 40.0)
+        let notchInfo = NotchManager.shared.currentNotch()
 
         if isExpanded {
-            // Expanded wings layout (flanking the notch core)
-            personaBadge.isHidden = false
-            personaBadge.frame = NSRect(x: 22, y: height - 32, width: 44, height: 18)
-            indicatorView.frame = NSRect(x: 70, y: height - 33, width: 18, height: 18)
-            labelField.frame = NSRect(x: 96, y: height - 32, width: width - 118, height: 20)
+            if notchInfo.hasNotch {
+                // Expanded wings layout (flanking notch core + downward shelf)
+                personaBadge.isHidden = false
+                // Persona badge in the open left ear wing flanking the hardware notch
+                personaBadge.frame = NSRect(x: 20, y: 10, width: 64, height: 18)
+                // Status indicator on shelf below physical notch
+                indicatorView.frame = NSRect(x: 20, y: 41, width: 16, height: 16)
+                // Multi-line word-wrapping label spanning width below notch
+                let textTop: CGFloat = 38.0
+                let textH = max(20.0, height - textTop - 10.0)
+                labelField.frame = NSRect(x: 44, y: textTop, width: width - 64, height: textH)
+            } else {
+                // External monitor floating layout
+                personaBadge.isHidden = false
+                indicatorView.frame = NSRect(x: 16, y: 14, width: 16, height: 16)
+                personaBadge.frame = NSRect(x: 38, y: 13, width: 50, height: 18)
+                let textTop: CGFloat = 12.0
+                let textH = max(20.0, height - textTop - 10.0)
+                labelField.frame = NSRect(x: 94, y: textTop, width: width - 110, height: textH)
+            }
         } else {
-            // Compact shelf layout right beneath the camera lens
+            // Compact shelf layout right beneath camera lens
             personaBadge.isHidden = true
-            let shelfY = height - 28.0
-            indicatorView.frame = NSRect(x: 18, y: shelfY, width: 18, height: 18)
-            labelField.frame = NSRect(x: 44, y: shelfY, width: width - 56, height: 20)
+            if notchInfo.hasNotch {
+                indicatorView.frame = NSRect(x: 18, y: 38, width: 14, height: 14)
+                labelField.frame = NSRect(x: 38, y: 36, width: width - 48, height: 16)
+            } else {
+                let centerY = (height - 18.0) / 2.0
+                indicatorView.frame = NSRect(x: 18, y: centerY, width: 18, height: 18)
+                labelField.frame = NSRect(x: 44, y: (height - 20.0) / 2.0, width: width - 56, height: 20)
+            }
         }
 
         // Gold dot positioned at bottom center of the shelf
@@ -671,7 +729,8 @@ public class HUDCapsuleView: NSView {
         labelField.textColor = NSColor(srgbRed: 0xf3 / 255.0, green: 0xf4 / 255.0, blue: 0xf6 / 255.0, alpha: 1.0)
     }
 
-    public func setTranscribedText(_ text: String, persona: String = "Donna") {
+    @discardableResult
+    public func setTranscribedText(_ text: String, persona: String = "Donna") -> CGFloat {
         let cleanText = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
         let attr = NSMutableAttributedString()
@@ -690,6 +749,38 @@ public class HUDCapsuleView: NSView {
 
         labelField.attributedStringValue = attr
         labelField.toolTip = "[\(persona) heard]: \"\(cleanText)\""
+
+        let availableWidth = Self.expandedWidth - 64.0
+        let textH = Self.calculateTextHeight(for: attr, constrainedToWidth: availableWidth)
+        let notchInfo = NotchManager.shared.currentNotch()
+        return Self.computeDynamicNotchHeight(for: textH, hasNotch: notchInfo.hasNotch)
+    }
+
+    @discardableResult
+    public func setBreadcrumb(badge: String, detail: String, accentColor: NSColor) -> CGFloat {
+        let cleanDetail = detail.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let attr = NSMutableAttributedString()
+        let prefixAttr: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 12.0, weight: .bold),
+            .foregroundColor: accentColor
+        ]
+        let textAttr: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 12.5, weight: .medium),
+            .foregroundColor: NSColor(srgbRed: 0xf3 / 255.0, green: 0xf4 / 255.0, blue: 0xf6 / 255.0, alpha: 1.0) // Zinc White
+        ]
+
+        let prefixStr = "[\(badge)]: "
+        attr.append(NSAttributedString(string: prefixStr, attributes: prefixAttr))
+        attr.append(NSAttributedString(string: cleanDetail, attributes: textAttr))
+
+        labelField.attributedStringValue = attr
+        labelField.toolTip = "[\(badge)]: \(cleanDetail)"
+
+        let availableWidth = Self.expandedWidth - 64.0
+        let textH = Self.calculateTextHeight(for: attr, constrainedToWidth: availableWidth)
+        let notchInfo = NotchManager.shared.currentNotch()
+        return Self.computeDynamicNotchHeight(for: textH, hasNotch: notchInfo.hasNotch)
     }
 
     public func reset() {
@@ -996,21 +1087,42 @@ public class HUDController {
         }
     }
 
-    /// Expand Dynamic Island outward for dictation: expands to 440px with continuous ear fillets.
+    /// Expand Dynamic Island outward for dictation with dynamic multi-line height expansion (52px -> 76px -> 96px -> 110px).
     public func showTranscribedText(_ text: String, persona: String = "Donna") {
         ensureMainThread {
             self.transcribedText = text
-            self.panel.capsuleView.setTranscribedText(text, persona: persona)
-
-            let notchInfo = NotchManager.shared.currentNotch()
-            let targetH = notchInfo.hasNotch ? HUDCapsuleView.notchExpandedHeight : HUDCapsuleView.capsuleHeight
+            let targetH = self.panel.capsuleView.setTranscribedText(text, persona: persona)
             let targetW = HUDCapsuleView.expandedWidth
 
             self.resizeIsland(toWidth: targetW, height: targetH, animated: true)
 
             if !self.isVisible {
                 self.show(state: .thinking)
-                self.panel.capsuleView.setTranscribedText(text, persona: persona)
+                _ = self.panel.capsuleView.setTranscribedText(text, persona: persona)
+                self.resizeIsland(toWidth: targetW, height: targetH, animated: false)
+            }
+        }
+    }
+
+    /// Render a high-level Semantic Action Breadcrumb (e.g. [Thinking], [Running], [Editing], [Searching], [Speaking]).
+    public func showBreadcrumb(
+        badge: String,
+        detail: String,
+        state: HUDState = .thinking,
+        accentColor: NSColor? = nil
+    ) {
+        ensureMainThread {
+            self.currentState = state
+            self.panel.capsuleView.indicatorView.configure(for: state)
+            let color = accentColor ?? state.accentColor
+            let targetH = self.panel.capsuleView.setBreadcrumb(badge: badge, detail: detail, accentColor: color)
+            let targetW = HUDCapsuleView.expandedWidth
+
+            self.resizeIsland(toWidth: targetW, height: targetH, animated: true)
+
+            if !self.isVisible {
+                self.show(state: state)
+                _ = self.panel.capsuleView.setBreadcrumb(badge: badge, detail: detail, accentColor: color)
                 self.resizeIsland(toWidth: targetW, height: targetH, animated: false)
             }
         }
@@ -1024,7 +1136,7 @@ public class HUDController {
 
             if let text = self.transcribedText, !text.isEmpty {
                 self.panel.capsuleView.indicatorView.configure(for: state)
-                let targetH = notchInfo.hasNotch ? HUDCapsuleView.notchExpandedHeight : HUDCapsuleView.capsuleHeight
+                let targetH = self.panel.capsuleView.setTranscribedText(text, persona: "Donna")
                 self.resizeIsland(toWidth: HUDCapsuleView.expandedWidth, height: targetH, animated: false)
             } else {
                 self.panel.capsuleView.update(state: state)
@@ -1171,6 +1283,10 @@ public class HUDController {
             "errorShakeSupported": true,
             "isHoverPeekActive": isHoverPeekActive,
             "reduceMotion": NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+            "maxExpandedHeight": HUDCapsuleView.maxExpandedHeight,
+            "labelUsesSingleLineMode": panel.capsuleView.labelField.usesSingleLineMode,
+            "labelMaximumNumberOfLines": panel.capsuleView.labelField.maximumNumberOfLines,
+            "supportsBreadcrumbs": true,
             "motionTokens": [
                 "springStiffness": HUDMotionTokens.springStiffness,
                 "springDamping": HUDMotionTokens.springDamping,
@@ -1189,6 +1305,7 @@ public class HUDController {
                 "restingHeight": HUDCapsuleView.notchRestingHeight,
                 "listeningHeight": HUDCapsuleView.notchListeningHeight,
                 "expandedHeight": HUDCapsuleView.notchExpandedHeight,
+                "maxExpandedHeight": HUDCapsuleView.maxExpandedHeight,
                 "restingWidth": HUDCapsuleView.capsuleWidth,
                 "expandedWidth": HUDCapsuleView.expandedWidth,
                 "earFilletRadius": HUDCapsuleView.earFilletRadius,

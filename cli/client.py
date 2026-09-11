@@ -20,7 +20,7 @@ import uuid
 from typing import Optional
 from urllib.parse import urlparse
 
-from .audio import AudioPlayer, AudioRecorder, EnergyVAD, pcm16_to_base64
+from .audio import AudioPlayer, AudioRecorder, EnergyVAD, calculate_rms_and_peak, pcm16_to_base64
 
 try:
     from websockets.asyncio.client import connect as ws_connect
@@ -239,6 +239,12 @@ class PetTalkClient:
                         "turn_id": self.current_turn_id,
                         "chunk": pcm16_to_base64(chunk),
                     })
+
+                    # Real-time acoustic energy telemetry for Dynamic Island HUD
+                    rms, peak = calculate_rms_and_peak(chunk)
+                    norm_rms = min(1.0, max(0.0, rms / 4000.0))
+                    norm_peak = min(1.0, max(0.0, peak / 16000.0))
+                    self._log(f"[RMS: {norm_rms:.3f}, PEAK: {norm_peak:.3f}]")
 
                     # VAD analysis
                     _is_speech, turn_done = self.vad.process_chunk(chunk)

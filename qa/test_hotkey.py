@@ -112,7 +112,7 @@ class TestDaemonLifecycle(unittest.TestCase):
         res = subprocess.run([BIN_PATH, "status"], capture_output=True, text=True)
         cls._was_running = (res.returncode == 0)
         if not os.path.exists(BIN_PATH):
-            subprocess.run(["swiftc", "-O", SWIFT_SRC, "-o", BIN_PATH], check=True)
+            subprocess.run(["swiftc", "-O"] + SWIFT_SRCS + ["-o", BIN_PATH], check=True)
 
     @classmethod
     def tearDownClass(cls):

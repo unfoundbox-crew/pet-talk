@@ -212,6 +212,95 @@ class HotkeyListener {
         return results
     }
 
+    /// Extract spoken sentence from pet-talk-cli or Donna output
+    static func extractSpokenSentence(from text: String) -> String? {
+        let pattern = #"(?:\[SPEAKING\]\s*)?(?:Donna:\s*)?\"([^\"]+)\""#
+        if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
+            let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
+            if let match = regex.firstMatch(in: text, options: [], range: nsRange),
+               let r = Range(match.range(at: 1), in: text) {
+                return String(text[r])
+            }
+        }
+        return nil
+    }
+
+    /// Sanitizes raw CLI output / agent harness events into clean semantic breadcrumbs.
+    /// Filters out raw tool-call JSON, stack traces, and terminal ANSI noise.
+    static func sanitizeSemanticBreadcrumb(from line: String) -> (badge: String, detail: String, state: HUDState)? {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        // Ignore acoustic telemetry lines
+        if trimmed.hasPrefix("[RMS:") || trimmed.hasPrefix("[rms:") { return nil }
+
+        // 1. Explicit [BREADCRUMB] or [STATUS] formats: [STATUS] Running: Compiling Swift daemon
+        if trimmed.hasPrefix("[BREADCRUMB]") || trimmed.hasPrefix("[STATUS]") {
+            let rest = trimmed.replacingOccurrences(of: "[BREADCRUMB]", with: "")
+                              .replacingOccurrences(of: "[STATUS]", with: "")
+                              .trimmingCharacters(in: .whitespaces)
+            if let colonIdx = rest.firstIndex(of: ":") {
+                let badge = String(rest[..<colonIdx]).trimmingCharacters(in: .whitespaces)
+                let detail = String(rest[rest.index(after: colonIdx)...]).trimmingCharacters(in: .whitespaces)
+                let bLower = badge.lowercased()
+                let state: HUDState = bLower.contains("speak") ? .speaking :
+                                      (bLower.contains("listen") ? .listening : .thinking)
+                return (badge, detail, state)
+            }
+        }
+
+        // 2. Transcribed user speech: [Donna heard]: "..." or [HEARD] "..."
+        if let heard = extractTranscribedText(from: trimmed) {
+            return ("Donna heard", "\"\(heard)\"", .thinking)
+        }
+
+        // 3. Spoken sentence: [SPEAKING] Donna: "..."
+        if trimmed.contains("[SPEAKING]") || trimmed.contains("Donna: \"") {
+            if let sentence = extractSpokenSentence(from: trimmed) {
+                return ("Speaking", sentence, .speaking)
+            }
+        }
+
+        // 4. Semantic coding harness actions
+        // Detect: [Thinking]: ..., [Running]: ..., [Editing]: ..., [Searching]: ...
+        let harnessPatterns = ["Thinking", "Running", "Editing", "Searching", "Reading", "Testing", "Executing"]
+        for pattern in harnessPatterns {
+            if trimmed.lowercased().hasPrefix("[\(pattern.lowercased())]:") || trimmed.lowercased().hasPrefix("\(pattern.lowercased()):") {
+                let parts = trimmed.components(separatedBy: ":")
+                if parts.count >= 2 {
+                    let detail = parts.dropFirst().joined(separator: ":").trimmingCharacters(in: .whitespaces)
+                    return (pattern, detail, .thinking)
+                }
+            }
+        }
+
+        // 5. Raw tool call interception & translation
+        if trimmed.contains("run_command") || trimmed.contains("CommandLine") {
+            if trimmed.contains("qa/run_all.sh") || trimmed.contains("test_") {
+                return ("Running", "Executing QA test suites", .thinking)
+            } else if trimmed.contains("swiftc") {
+                return ("Running", "Compiling Swift hotkey daemon", .thinking)
+            } else if trimmed.contains("git diff") {
+                return ("Running", "Checking git diff", .thinking)
+            } else if trimmed.contains("git status") {
+                return ("Running", "Inspecting repository status", .thinking)
+            } else {
+                return ("Running", "Executing system task", .thinking)
+            }
+        }
+        if trimmed.contains("replace_file_content") || trimmed.contains("write_to_file") {
+            return ("Editing", "Applying code changes", .thinking)
+        }
+        if trimmed.contains("view_file") || trimmed.contains("read_resource") {
+            return ("Reading", "Inspecting file context", .thinking)
+        }
+        if trimmed.contains("search_web") || trimmed.contains("duckduckgo_web_search") {
+            return ("Searching", "Consulting web knowledge", .thinking)
+        }
+
+        return nil
+    }
+
     func handleBargeKill() {
         log("+-- [ESCAPE] Barge-kill triggered")
         let (killedAfplay, bargeMs) = ProcessManager.killAfplay()
@@ -296,6 +385,17 @@ class HotkeyListener {
                 silenceCutoffFired = true
                 EarconEngine.shared.playSilenceCutoff()
                 HUDController.shared.update(state: .thinking)
+            }
+
+            // Check for semantic breadcrumbs or status events
+            for line in text.components(separatedBy: .newlines) {
+                if let breadcrumb = HotkeyListener.sanitizeSemanticBreadcrumb(from: line) {
+                    HUDController.shared.showBreadcrumb(
+                        badge: breadcrumb.badge,
+                        detail: breadcrumb.detail,
+                        state: breadcrumb.state
+                    )
+                }
             }
 
             // Detect transcribed speech from Donna and display on HUD + optionally paste
@@ -517,6 +617,8 @@ func printUsage() {
       pet-talk-hotkey status              Check if listener daemon is active
       pet-talk-hotkey test-audio          Play & benchmark acoustic earcons sequence (<2ms)
       pet-talk-hotkey test-hud            Test floating glass capsule HUD with live dictation text (380px)
+      pet-talk-hotkey test-breadcrumbs    Test multi-line height expansion & semantic breadcrumbs
+      pet-talk-hotkey breadcrumb <b> <d>  Display custom breadcrumb in Dynamic Island HUD
       pet-talk-hotkey test-paste [text]   Test Cursor paste injection (Wispr Flow style -> Cmd+V)
       pet-talk-hotkey config show         Show current configuration
       pet-talk-hotkey config set <k> <v>  Update configuration setting
@@ -720,6 +822,95 @@ func doTestHUD() -> Int32 {
     return 0
 }
 
+func doTestBreadcrumbs() -> Int32 {
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+
+    print("+-- Testing Dynamic Island Semantic Action Breadcrumbs & Multi-Line Expansion...")
+    print("| Phase 1 (1.2s): [Thinking]: Synthesizing dynamic multi-line layout... (60px)")
+    HUDController.shared.showBreadcrumb(
+        badge: "Thinking",
+        detail: "Synthesizing dynamic multi-line layout...",
+        state: .thinking
+    )
+
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+        print("| Phase 2 (1.2s): [Running]: Executing test suite (qa/run_all.sh)... (60px)")
+        HUDController.shared.showBreadcrumb(
+            badge: "Running",
+            detail: "Executing test suite (qa/run_all.sh)...",
+            state: .thinking
+        )
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            print("| Phase 3 (1.2s): [Editing]: cli/hotkey/hud_window.swift... (60px)")
+            HUDController.shared.showBreadcrumb(
+                badge: "Editing",
+                detail: "cli/hotkey/hud_window.swift",
+                state: .thinking
+            )
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                let longSpoken = "How difficult is it to make an ambient agent as my Chief of Staff like Alexa or Siri powered by my frontier subscriptions in duplex?"
+                print("| Phase 4 (2.5s): [Donna heard]: Multi-line wrapped text (expanded height 76px-96px)")
+                HUDController.shared.showBreadcrumb(
+                    badge: "Donna heard",
+                    detail: "\"\(longSpoken)\"",
+                    state: .thinking
+                )
+
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                    let reply = "Doable. Weekend prototype, not weekend product. The hard parts are duplex interruptions and subscription limits, not Tailscale."
+                    print("| Phase 5 (2.2s): [Speaking]: Multi-line wrapped reply (expanded height 76px-96px)")
+                    HUDController.shared.showBreadcrumb(
+                        badge: "Speaking",
+                        detail: "\"\(reply)\"",
+                        state: .speaking
+                    )
+
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) {
+                        print("| Dismissing HUD (suction retraction)...")
+                        HUDController.shared.dismiss {
+                            print("+-- PASS: Semantic Action Breadcrumbs & Multi-line visual test completed.")
+                            CFRunLoopStop(CFRunLoopGetMain())
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    CFRunLoopRun()
+    return 0
+}
+
+func doShowBreadcrumb(args: [String]) -> Int32 {
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+
+    guard args.count >= 2 else {
+        print("Usage: pet-talk-hotkey breadcrumb <badge> <detail>")
+        return 1
+    }
+    let badge = args[0]
+    let detail = args.dropFirst().joined(separator: " ")
+
+    let bLower = badge.lowercased()
+    let state: HUDState = bLower.contains("speak") ? .speaking :
+                          (bLower.contains("listen") ? .listening : .thinking)
+
+    HUDController.shared.showBreadcrumb(badge: badge, detail: detail, state: state)
+
+    DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+        HUDController.shared.dismiss {
+            CFRunLoopStop(CFRunLoopGetMain())
+        }
+    }
+
+    CFRunLoopRun()
+    return 0
+}
+
 func doTestPaste(args: [String]) -> Int32 {
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
@@ -876,6 +1067,10 @@ case "config":
     exit(doConfig(args: Array(args.dropFirst())))
 case "test-hud":
     exit(doTestHUD())
+case "test-breadcrumbs", "--test-breadcrumbs":
+    exit(doTestBreadcrumbs())
+case "breadcrumb", "--breadcrumb":
+    exit(doShowBreadcrumb(args: Array(args.dropFirst())))
 case "test-paste", "--test-paste":
     exit(doTestPaste(args: Array(args.dropFirst())))
 case "--dump-hud-spec":
