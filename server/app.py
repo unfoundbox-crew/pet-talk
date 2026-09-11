@@ -23,6 +23,7 @@ from typing import Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
+from starlette.websockets import WebSocketState
 
 from .dictation import CleanProseFormatter
 from .memory import Hippocampus
@@ -85,7 +86,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 _turn_counter = itertools.count(1)
-_audio_store: dict[str, bytes] = {}  # audio_id -> wav bytes (in-process v0.2)
+MAX_AUDIO_STORE_ENTRIES = 250
+_audio_store: collections.OrderedDict[str, bytes] = collections.OrderedDict()
+_settings_lock = asyncio.Lock()
+
+
+def _store_audio(audio_id: str, wav: bytes) -> None:
+    _audio_store[audio_id] = wav
+    _audio_store.move_to_end(audio_id)
+    while len(_audio_store) > MAX_AUDIO_STORE_ENTRIES:
+        _audio_store.popitem(last=False)
 
 SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
 VOICES_PATH = os.path.join(os.path.dirname(SERVER_DIR), "personas", "voices.yaml")
@@ -297,10 +307,12 @@ def persona_delete(name: str) -> Response:
 
 
 @app.get("/settings")
-def settings_get() -> Response:
+async def settings_get() -> Response:
+    async with _settings_lock:
+        settings_copy = dict(RUNTIME_SETTINGS)
     return JSONResponse({
         "ok": True,
-        "settings": RUNTIME_SETTINGS,
+        "settings": settings_copy,
         "active": {
             "stt": type(stt).__name__,
             "llm": type(llm).__name__,
@@ -312,58 +324,61 @@ def settings_get() -> Response:
 @app.post("/settings")
 async def settings_post(req: dict) -> Response:
     global stt, llm, tts
-    if "stt_provider" in req:
-        RUNTIME_SETTINGS["stt_provider"] = str(req["stt_provider"]).lower()
-    if "deepgram_api_key" in req:
-        RUNTIME_SETTINGS["deepgram_api_key"] = str(req["deepgram_api_key"])
-    if "groq_api_key" in req:
-        RUNTIME_SETTINGS["groq_api_key"] = str(req["groq_api_key"])
-    if "openai_api_key" in req:
-        RUNTIME_SETTINGS["openai_api_key"] = str(req["openai_api_key"])
-    if "sensevoice_base_url" in req:
-        RUNTIME_SETTINGS["sensevoice_base_url"] = str(req["sensevoice_base_url"])
-    if "llm_provider" in req:
-        RUNTIME_SETTINGS["llm_provider"] = str(req["llm_provider"]).lower()
-    if "llm_base_url" in req:
-        RUNTIME_SETTINGS["llm_base_url"] = str(req["llm_base_url"])
-    if "llm_model" in req:
-        RUNTIME_SETTINGS["llm_model"] = str(req["llm_model"])
-    if "tts_provider" in req:
-        RUNTIME_SETTINGS["tts_provider"] = str(req["tts_provider"]).lower()
-    if "kokoro_base_url" in req:
-        RUNTIME_SETTINGS["kokoro_base_url"] = str(req["kokoro_base_url"])
-    if "vad_silence_ms" in req:
-        try:
-            RUNTIME_SETTINGS["vad_silence_ms"] = int(req["vad_silence_ms"])
-        except (ValueError, TypeError):
-            pass
+    async with _settings_lock:
+        if "stt_provider" in req:
+            RUNTIME_SETTINGS["stt_provider"] = str(req["stt_provider"]).lower()
+        if "deepgram_api_key" in req:
+            RUNTIME_SETTINGS["deepgram_api_key"] = str(req["deepgram_api_key"])
+        if "groq_api_key" in req:
+            RUNTIME_SETTINGS["groq_api_key"] = str(req["groq_api_key"])
+        if "openai_api_key" in req:
+            RUNTIME_SETTINGS["openai_api_key"] = str(req["openai_api_key"])
+        if "sensevoice_base_url" in req:
+            RUNTIME_SETTINGS["sensevoice_base_url"] = str(req["sensevoice_base_url"])
+        if "llm_provider" in req:
+            RUNTIME_SETTINGS["llm_provider"] = str(req["llm_provider"]).lower()
+        if "llm_base_url" in req:
+            RUNTIME_SETTINGS["llm_base_url"] = str(req["llm_base_url"])
+        if "llm_model" in req:
+            RUNTIME_SETTINGS["llm_model"] = str(req["llm_model"])
+        if "tts_provider" in req:
+            RUNTIME_SETTINGS["tts_provider"] = str(req["tts_provider"]).lower()
+        if "kokoro_base_url" in req:
+            RUNTIME_SETTINGS["kokoro_base_url"] = str(req["kokoro_base_url"])
+        if "vad_silence_ms" in req:
+            try:
+                RUNTIME_SETTINGS["vad_silence_ms"] = int(req["vad_silence_ms"])
+            except (ValueError, TypeError):
+                pass
 
-    stt_key = None
-    if RUNTIME_SETTINGS["stt_provider"] == "deepgram":
-        stt_key = req.get("deepgram_api_key") or RUNTIME_SETTINGS.get("deepgram_api_key")
-    elif RUNTIME_SETTINGS["stt_provider"] == "groq":
-        stt_key = req.get("groq_api_key") or RUNTIME_SETTINGS.get("groq_api_key")
-    elif RUNTIME_SETTINGS["stt_provider"] in ("openai", "openai-whisper", "whisper-openai"):
-        stt_key = req.get("openai_api_key") or RUNTIME_SETTINGS.get("openai_api_key")
+        stt_key = None
+        if RUNTIME_SETTINGS["stt_provider"] == "deepgram":
+            stt_key = req.get("deepgram_api_key") or RUNTIME_SETTINGS.get("deepgram_api_key")
+        elif RUNTIME_SETTINGS["stt_provider"] == "groq":
+            stt_key = req.get("groq_api_key") or RUNTIME_SETTINGS.get("groq_api_key")
+        elif RUNTIME_SETTINGS["stt_provider"] in ("openai", "openai-whisper", "whisper-openai"):
+            stt_key = req.get("openai_api_key") or RUNTIME_SETTINGS.get("openai_api_key")
 
-    stt = make_stt(
-        provider=RUNTIME_SETTINGS["stt_provider"],
-        api_key=stt_key,
-        base_url=req.get("sensevoice_base_url") or RUNTIME_SETTINGS.get("sensevoice_base_url"),
-    )
-    llm = make_llm(
-        provider=RUNTIME_SETTINGS["llm_provider"],
-        base_url=RUNTIME_SETTINGS["llm_base_url"],
-        model=RUNTIME_SETTINGS["llm_model"],
-        api_key=req.get("llm_api_key"),
-    )
-    tts = make_tts(
-        provider=RUNTIME_SETTINGS["tts_provider"],
-        base_url=RUNTIME_SETTINGS["kokoro_base_url"],
-    )
+        stt = make_stt(
+            provider=RUNTIME_SETTINGS["stt_provider"],
+            api_key=stt_key,
+            base_url=req.get("sensevoice_base_url") or RUNTIME_SETTINGS.get("sensevoice_base_url"),
+        )
+        llm = make_llm(
+            provider=RUNTIME_SETTINGS["llm_provider"],
+            base_url=RUNTIME_SETTINGS["llm_base_url"],
+            model=RUNTIME_SETTINGS["llm_model"],
+            api_key=req.get("llm_api_key"),
+        )
+        tts = make_tts(
+            provider=RUNTIME_SETTINGS["tts_provider"],
+            base_url=RUNTIME_SETTINGS["kokoro_base_url"],
+        )
+        settings_copy = dict(RUNTIME_SETTINGS)
+
     return JSONResponse({
         "ok": True,
-        "settings": RUNTIME_SETTINGS,
+        "settings": settings_copy,
         "active": {
             "stt": type(stt).__name__,
             "llm": type(llm).__name__,
@@ -427,29 +442,32 @@ def get_audio(audio_id: str) -> Response:
     wav = _audio_store.get(audio_id)
     if wav is None:
         return JSONResponse({"reason": "audio_not_found", "audio_id": audio_id}, status_code=404)
+    _audio_store.move_to_end(audio_id)
     return Response(content=wav, media_type="audio/wav")
 
 
 async def _safe_send_json(ws: WebSocket, payload: dict) -> bool:
     try:
+        if ws.client_state != WebSocketState.CONNECTED:
+            return False
         await ws.send_json(payload)
         return True
-    except (RuntimeError, WebSocketDisconnect):
+    except (RuntimeError, WebSocketDisconnect, Exception):
         return False
 
 
 async def _speak_sentence(
     ws: WebSocket, turn_id: str, sentence: str, seq: int, active_persona: Optional[Persona] = None
-) -> None:
+) -> bool:
     p = active_persona or persona
     try:
         wav, _word_times = tts.synth(sentence, voice=p.voice, speed=p.speed)
     except ProviderError as e:
         await _safe_send_json(ws, frame("agent.error", turn_id, reason=e.reason, seq=seq))
-        return
+        return False
     audio_id = f"{turn_id}-s{seq}"
-    _audio_store[audio_id] = wav
-    await _safe_send_json(
+    _store_audio(audio_id, wav)
+    return await _safe_send_json(
         ws, frame("agent.sentence", turn_id, seq=seq, text=sentence, audio_url=f"/audio/{audio_id}")
     )
 
@@ -472,7 +490,6 @@ async def handle_turn_task(
     turn_tasks: dict, active_persona: Optional[Persona] = None,
 ) -> None:
     """Run handle_turn as a cancellable task so barge can kill it mid-turn."""
-    # Fired from user.stop: TurnLog starts here, ends on done/interrupt.
     log = TurnLog(path=TURNS_PATH)
     log.start(turn_id, _provider_names())
     task = asyncio.ensure_future(handle_turn(ws, turn_id, text, queue, log, active_persona=active_persona))
@@ -481,8 +498,10 @@ async def handle_turn_task(
         await task
     except asyncio.CancelledError:
         log.end(path="interrupted", chars=0, sentences=0)
-        await ws.send_json(frame("agent.done", turn_id, path="interrupted"))
-        raise
+        await _safe_send_json(ws, frame("agent.done", turn_id, path="interrupted"))
+    except Exception as e:
+        log.end(path="error", chars=0, sentences=0)
+        await _safe_send_json(ws, frame("agent.error", turn_id, reason="turn_task_exception", detail=str(e)))
     finally:
         turn_tasks.pop(turn_id, None)
 
@@ -493,8 +512,8 @@ async def handle_turn(
 ) -> None:
     """Router stub: stall+worker path vs direct answer path."""
     if not text or not text.strip():
-        await ws.send_json(frame("agent.error", turn_id, reason="empty_transcript"))
-        await ws.send_json(frame("agent.done", turn_id))
+        await _safe_send_json(ws, frame("agent.error", turn_id, reason="empty_transcript"))
+        await _safe_send_json(ws, frame("agent.done", turn_id))
         if log is not None:
             log.end(path="empty", chars=0, sentences=0)
         return
@@ -512,59 +531,70 @@ async def handle_turn(
     )
     messages = [{"role": "system", "content": instruction}, *history, {"role": "user", "content": text}]
 
-    async def _speak_tracked(sentence: str, seq: int) -> None:
+    async def _speak_tracked(sentence: str, seq: int) -> bool:
         nonlocal chars, first
-        await _speak_sentence(ws, turn_id, sentence, seq=seq, active_persona=p)
+        sent = await _speak_sentence(ws, turn_id, sentence, seq=seq, active_persona=p)
+        if not sent:
+            return False
         chars += len(sentence)
         spoken_sentences.append(sentence)
         if first and log is not None:
             log.mark("first_sentence")
         first = False
+        return True
 
     if path == "stall":
         stall_text = p.stall_for(0)
-        await ws.send_json(frame("agent.stall", turn_id, phrase_id="stall-0", text=stall_text))
+        if not await _safe_send_json(ws, frame("agent.stall", turn_id, phrase_id="stall-0", text=stall_text)):
+            return
         if log is not None:
             log.mark("stall")
-        await ws.send_json(frame("state.thinking", turn_id))
-        await _speak_tracked(stall_text, seq=0)
+        if not await _safe_send_json(ws, frame("state.thinking", turn_id)):
+            return
+        if not await _speak_tracked(stall_text, seq=0):
+            return
         # Worker path: stream >=1 sentences behind the playing stall audio.
-        await ws.send_json(frame("state.speaking", turn_id))
+        if not await _safe_send_json(ws, frame("state.speaking", turn_id)):
+            return
         seq = 1
         try:
             async for sentence in llm.stream(messages):
                 await queue.push(sentence)
                 queued = await queue.pop()
                 if queued is not None:
-                    await _speak_tracked(queued, seq=seq)
+                    if not await _speak_tracked(queued, seq=seq):
+                        break
                     seq += 1
                     # Test hook only: stretch the turn so barge-kill is observable.
                     # PET_TALK_TURN_DELAY_MS=0 (default) in production.
                     await asyncio.sleep(_turn_delay_s())
         except ProviderError as e:
-            await ws.send_json(frame("agent.error", turn_id, reason=e.reason))
+            await _safe_send_json(ws, frame("agent.error", turn_id, reason=e.reason))
         if log is not None:
             log.mark("done")
-        await ws.send_json(frame("agent.done", turn_id, path="worker", sentences=seq - 1))
+        await _safe_send_json(ws, frame("agent.done", turn_id, path="worker", sentences=seq - 1))
         if log is not None:
             log.end(path="worker", chars=chars, sentences=seq - 1)
         # Record completed turn in durable Hippocampus ledger
         memory.record_turn(turn_id, pname, text, spoken_sentences)
     else:
-        await ws.send_json(frame("state.thinking", turn_id))
-        await ws.send_json(frame("state.speaking", turn_id))
+        if not await _safe_send_json(ws, frame("state.thinking", turn_id)):
+            return
+        if not await _safe_send_json(ws, frame("state.speaking", turn_id)):
+            return
         seq = 0
         try:
             async for sentence in llm.stream(messages):
-                await _speak_tracked(sentence, seq=seq)
+                if not await _speak_tracked(sentence, seq=seq):
+                    break
                 seq += 1
                 if seq >= 1:
                     break  # direct path: first answer only, no worker fan-out
         except ProviderError as e:
-            await ws.send_json(frame("agent.error", turn_id, reason=e.reason))
+            await _safe_send_json(ws, frame("agent.error", turn_id, reason=e.reason))
         if log is not None:
             log.mark("done")
-        await ws.send_json(frame("agent.done", turn_id, path="direct", sentences=seq))
+        await _safe_send_json(ws, frame("agent.done", turn_id, path="direct", sentences=seq))
         if log is not None:
             log.end(path="direct", chars=chars, sentences=seq)
         # Record completed turn in durable Hippocampus ledger
@@ -575,12 +605,19 @@ async def handle_turn(
 async def ws_endpoint(ws: WebSocket) -> None:
     await ws.accept()
     queue = SpeakQueue()
-    turn_tasks: dict = {}
+    turn_tasks: dict[str, asyncio.Task] = {}
+    active_tasks: set[asyncio.Task] = set()
     turn_persona: dict = {}
     turn_id = new_turn_id()
     chunks: list[bytes] = []
+
+    def _track(t: asyncio.Task) -> asyncio.Task:
+        active_tasks.add(t)
+        t.add_done_callback(active_tasks.discard)
+        return t
+
     try:
-        await ws.send_json(frame("state.idle", turn_id))
+        await _safe_send_json(ws, frame("state.idle", turn_id))
         while True:
             msg = await ws.receive_json()
             mtype = msg.get("type", "")
@@ -604,7 +641,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 if isinstance(msg.get("custom_stalls"), list) and msg["custom_stalls"]:
                     current_p.stalls = [str(s) for s in msg["custom_stalls"] if str(s).strip()]
                 turn_persona[turn_id] = current_p
-                await ws.send_json(frame("state.listening", turn_id))
+                await _safe_send_json(ws, frame("state.listening", turn_id))
             elif mtype == "user.chunk":
                 b64 = msg.get("chunk", "")
                 if b64:
@@ -622,31 +659,31 @@ async def ws_endpoint(ws: WebSocket) -> None:
                             # Use client's complete merged buffer if provided
                             chunks = [decoded]
                     except Exception:
-                        await ws.send_json(frame("agent.error", turn_id, reason="bad_pcm_encoding"))
+                        await _safe_send_json(ws, frame("agent.error", turn_id, reason="bad_pcm_encoding"))
                         continue
                 audio_payload = b"".join(chunks)
                 if not audio_payload:
-                    await ws.send_json(frame("agent.error", turn_id, reason="stt_empty_audio"))
+                    await _safe_send_json(ws, frame("agent.error", turn_id, reason="stt_empty_audio"))
                     continue
                 sample_rate = int(msg.get("sample_rate") or 16000)
                 try:
                     text = stt.transcribe(audio_payload, sample_rate=sample_rate)
                 except ProviderError as e:
-                    await ws.send_json(frame("agent.error", turn_id, reason=e.reason))
+                    await _safe_send_json(ws, frame("agent.error", turn_id, reason=e.reason))
                     continue
                 # Fire-and-forget: the receive loop MUST stay open so a
                 # mid-turn barge can land. Wrapper tracks + cleans up.
                 active_p = turn_persona.get(turn_id)
-                await ws.send_json(frame("transcript.user", turn_id, text=text))
-                asyncio.ensure_future(
+                await _safe_send_json(ws, frame("transcript.user", turn_id, text=text))
+                _track(asyncio.create_task(
                     handle_turn_task(ws, turn_id, text, queue, turn_tasks, active_persona=active_p)
-                )
+                ))
                 chunks = []
             elif mtype == "user.text":
                 turn_id = msg.get("turn_id") or new_turn_id()
                 text = (msg.get("text") or "").strip()
                 if not text:
-                    await ws.send_json(frame("agent.error", turn_id, reason="empty_text"))
+                    await _safe_send_json(ws, frame("agent.error", turn_id, reason="empty_text"))
                     continue
                 pname = msg.get("persona") or "donna"
                 try:
@@ -667,12 +704,12 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 turn_persona[turn_id] = current_p
 
                 # Emit user transcript frame to mirror user speech/text into the client log
-                await ws.send_json(frame("transcript.user", turn_id, text=text))
+                await _safe_send_json(ws, frame("transcript.user", turn_id, text=text))
 
                 active_p = turn_persona.get(turn_id)
-                asyncio.ensure_future(
+                _track(asyncio.create_task(
                     handle_turn_task(ws, turn_id, text, queue, turn_tasks, active_persona=active_p)
-                )
+                ))
             elif mtype == "barge":
                 # Kill playback: cancel the live turn FIRST, then flush + re-route.
                 ref = msg.get("turn_id") or turn_id
@@ -681,17 +718,29 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     live.cancel()
                 dropped = await queue.flush()
                 turn_id = new_turn_id()
-                await ws.send_json(
-                    frame("state.listening", turn_id, barged_turn=ref, dropped=dropped)
+                await _safe_send_json(
+                    ws, frame("state.listening", turn_id, barged_turn=ref, dropped=dropped)
                 )
             else:
-                await ws.send_json(
+                await _safe_send_json(
+                    ws,
                     frame(
                         "agent.error",
                         msg.get("turn_id") or turn_id,
                         reason="unknown_frame",
                         detail=mtype,
-                    )
+                    ),
                 )
     except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        all_pending = list(active_tasks) + list(turn_tasks.values())
+        for t in all_pending:
+            if not t.done():
+                t.cancel()
+        if all_pending:
+            await asyncio.gather(*all_pending, return_exceptions=True)
         await queue.flush()
+
