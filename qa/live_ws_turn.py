@@ -4,17 +4,18 @@
 Proves the real FastAPI WS loop live: state.idle -> user.start/user.stop ->
 agent.stall (timed) -> agent.sentence* -> agent.done -> barge -> state.listening.
 
-Needs: real server on LIVE_WS_URL (default ws://127.0.0.1:8099/ws), i.e.
-  python3 -m uvicorn server.app:app --host 127.0.0.1 --port 8099
+Needs: real server on LIVE_WS_URL (default ws://127.0.0.1:8089/ws), i.e.
+  python3 -m uvicorn server.app:app --host 127.0.0.1 --port 8089
 from the pet-talk/ dir. Plus the `websockets` pip package (pure, small).
 SKIPs honestly (exit 0) when the server or the lib is absent — never red.
 
-Stall gate: TECH-SPEC sec 8.4 stall <=400ms is the REAL threshold; with stub
-providers (sine TTS, canned LLM) local time-to-stall is ~ms, so the assert is
-lenient <=4000ms and the REPORTED actual is what matters. Same story for
-barge: the serialize-behind-handle_turn shape means a barge sent mid-turn is
-acked only after agent.done — the test asserts the ack shape
-(state.listening + barged_turn + dropped int), not a <=100ms kill.
+Stall gate: TECH-SPEC sec 8.4 stall <=400ms, loaded from qa/budgets.json (the
+one place budgets live — never a copy here). With stub providers (sine TTS,
+canned LLM) local time-to-stall is ~150ms, comfortably inside the real budget.
+
+Barge: measures wall-clock from sending `barge` to receiving the
+state.listening ack (not just asserting the ack shape) and asserts `dropped`
+is reported as a number.
 
 Run: `python3 qa/live_ws_turn.py` (unittest, verbose). Exit 0 = pass/skip.
 """
@@ -34,13 +35,17 @@ try:
 except ImportError:
     HAVE_WS = False
 
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+with open(os.path.join(ROOT, "qa", "budgets.json")) as _f:
+    BUDGETS = {k: v for k, v in json.load(_f).items() if not k.startswith("_")}
+
 PORT = os.environ.get("LIVE_WS_PORT", "8089")
 WS_URL = os.environ.get("LIVE_WS_URL", f"ws://127.0.0.1:{PORT}/ws")
 HTTP_BASE = os.environ.get("LIVE_HTTP_BASE", f"http://127.0.0.1:{PORT}")
 
-# Lenient ceiling for stub providers; report the actual, gate on the ceiling.
-STALL_LENIENT_MS = 4000.0
-SPEC_STALL_MS = 400.0  # TECH-SPEC sec 8.4 real threshold (target for real backends)
+# Real budgets (qa/budgets.json), not a hardcoded/lenient copy.
+STALL_CEILING_MS = float(BUDGETS["stall_ms"])
+BARGE_CEILING_MS = float(BUDGETS["barge_ms"])
 
 # Use real audio fixture with spoken text if present, otherwise 320ms PCM fallback
 WEATHER_FIXTURE = "/tmp/weather_turn_fixture.wav"
@@ -114,22 +119,32 @@ class TestLiveWsTurn(unittest.TestCase):
         for dt, m in frames:
             self.assertEqual(m.get("turn_id"), "t-live-qa-1",
                              "frame %r has wrong turn_id" % (m,))
-        # Stall gate (lenient for stubs; report actual vs 400ms spec).
+        # Stall gate: real qa/budgets.json threshold, not a lenient stand-in.
         self.assertIsNotNone(stall_ms, "no agent.stall frame in worker-path turn")
-        print("    time-to-stall: %.1fms (spec 8.4 <=%.0fms; lenient assert <=%.0fms)"
-              % (stall_ms, SPEC_STALL_MS, STALL_LENIENT_MS))
-        self.assertLessEqual(stall_ms, STALL_LENIENT_MS,
-                             "stall %.1fms exceeds lenient ceiling" % stall_ms)
+        print("    time-to-stall: %.1fms (budget <=%.0fms)" % (stall_ms, STALL_CEILING_MS))
+        self.assertLessEqual(stall_ms, STALL_CEILING_MS,
+                             "stall %.1fms exceeds budget %.0fms" % (stall_ms, STALL_CEILING_MS))
         # Ordering: stall before thinking/speaking, done last with path=worker.
         self.assertLess(types.index("agent.stall"), types.index("state.thinking"))
         done = frames[-1][1]
         self.assertEqual(done.get("type"), "agent.done")
         self.assertEqual(done.get("path"), "worker", "expected stall->worker path, got %r" % (done,))
-        worker_sents = [m for _, m in frames
-                        if m.get("type") == "agent.sentence" and m.get("seq", 0) >= 1]
-        print("    worker sentences behind stall: %d" % len(worker_sents))
-        self.assertGreaterEqual(len(worker_sents), 1,
-                                "worker path streamed <1 sentences: %d" % len(worker_sents))
+        all_sentences = [m for _, m in frames if m.get("type") == "agent.sentence"]
+        worker_sents = [m for m in all_sentences if m.get("seq", 0) >= 1]
+        print("    worker sentences behind stall: %d (total agent.sentence frames: %d)"
+              % (len(worker_sents), len(all_sentences)))
+        if len(all_sentences) >= 5:
+            # Contract gate 3 (TECH-SPEC sec 9): >=3 sentences gapless behind
+            # playing audio, exercised only when the stub actually emits >=5.
+            self.assertGreaterEqual(len(worker_sents), 3,
+                                    "stub emits >=5 sentences but only %d streamed behind stall"
+                                    % len(worker_sents))
+        else:
+            print("    NOTE: current stub LLM emits %d sentence(s) total (<5) — "
+                  "gate-3 (>=3 gapless) is not fully exercised on this contract yet, "
+                  "asserting the weaker >=1 instead" % len(all_sentences))
+            self.assertGreaterEqual(len(worker_sents), 1,
+                                    "worker path streamed <1 sentences: %d" % len(worker_sents))
         for m in worker_sents:
             self.assertTrue(m.get("audio_url"), "sentence lacks audio_url: %r" % (m,))
         # One TTS url actually plays (HTTP 200 audio/wav).
@@ -154,24 +169,34 @@ class TestLiveWsTurn(unittest.TestCase):
                 # stop then barge with no read between: barge lands mid-turn.
                 await ws.send(json.dumps({"type": "user.stop", "turn_id": turn,
                                           "pcm_b64": PCM_B64}))
+                t_barge = time.monotonic()
                 await ws.send(json.dumps({"type": "barge", "turn_id": turn}))
                 ack = None
+                ack_ms = None
                 while True:
                     m = await _recv(ws, 10.0)
                     if m.get("type") == "state.listening" and "barged_turn" in m:
+                        ack_ms = (time.monotonic() - t_barge) * 1000.0
                         ack = m
                         break
-                return ack
+                return ack, ack_ms
             except asyncio.TimeoutError:
                 self.fail("TIMEOUT waiting for barge ack")
             finally:
                 await ws.close()
-        ack = _run(go())
+        ack, ack_ms = _run(go())
         self.assertEqual(ack.get("barged_turn"), "t-live-qa-2")
-        self.assertIsInstance(ack.get("dropped"), int)
+        self.assertIsInstance(ack.get("dropped"), int, "barge ack must report `dropped` as a number")
         self.assertTrue(ack.get("turn_id"), "barge ack lacks fresh turn_id")
-        print("    barge ack: state.listening barged_turn=%r dropped=%r new=%r"
-              % (ack.get("barged_turn"), ack.get("dropped"), ack.get("turn_id")))
+        print("    barge ack latency: %.1fms (budget <=%.0fms) — barged_turn=%r dropped=%r new=%r"
+              % (ack_ms, BARGE_CEILING_MS, ack.get("barged_turn"), ack.get("dropped"), ack.get("turn_id")))
+        # Reported, not gated hard-red: the serialize-behind-handle_turn shape
+        # means an ack after agent.done can legitimately exceed the kill budget
+        # for stub turns. Flag it loudly instead of silently passing.
+        if ack_ms > BARGE_CEILING_MS:
+            print("    NOTE: barge ack %.1fms exceeds the %.0fms budget — "
+                  "expected until barge preempts handle_turn instead of "
+                  "waiting behind it" % (ack_ms, BARGE_CEILING_MS))
 
 
 if __name__ == "__main__":

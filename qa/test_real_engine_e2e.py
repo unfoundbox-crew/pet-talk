@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """qa/test_real_engine_e2e.py — End-to-end verification of real engine endpoints.
 
+Only runs when PET_TALK_REAL_ENGINE=1 — this hits the real Kokoro/STT/LLM
+stack (network calls, real synthesis), never the default QA gate. `make
+qa-real` sets the flag; plain `make qa`/`qa/run_all.sh` SKIP this file.
+
 Verifies:
 1. Kokoro TTS on http://127.0.0.1:8088 (real WAV synthesis >10KB).
 2. STT via /transcribe (real transcription of audio input).
@@ -15,14 +19,25 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from fastapi.testclient import TestClient
-from server import app as server_module
-from server import providers
+SCRATCH = os.environ.get("PET_TALK_SCRATCH") or os.path.join(ROOT, ".qa-scratch")
+
+REAL_ENGINE = os.environ.get("PET_TALK_REAL_ENGINE") == "1"
+
+if REAL_ENGINE:
+    from fastapi.testclient import TestClient
+    from server import app as server_module
+    from server import providers
 
 
 class TestRealEngineEndpoints(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        if not REAL_ENGINE:
+            raise unittest.SkipTest(
+                "SKIP: PET_TALK_REAL_ENGINE!=1 — this test hits the real "
+                "Kokoro/STT/LLM stack; run `make qa-real` to exercise it"
+            )
+        os.makedirs(SCRATCH, exist_ok=True)
         cls.client = TestClient(server_module.app)
 
     def test_01_kokoro_tts_synthesis(self):
@@ -38,14 +53,14 @@ class TestRealEngineEndpoints(unittest.TestCase):
         self.assertTrue(len(wav_bytes) > 10000, f"Audio too small: {len(wav_bytes)} bytes")
         self.assertTrue(wav_bytes.startswith(b"RIFF"), "Missing RIFF WAV header")
 
-        receipt_path = "/tmp/kokoro_tts_receipt.wav"
+        receipt_path = os.path.join(SCRATCH, "kokoro_tts_receipt.wav")
         with open(receipt_path, "wb") as f:
             f.write(wav_bytes)
         print(f"\n[RECEIPT 1] Kokoro TTS Synthesized {len(wav_bytes)} bytes -> {receipt_path}")
 
     def test_02_stt_transcribe_endpoint(self):
         """Verify /transcribe endpoint transcribes real audio input."""
-        receipt_path = "/tmp/kokoro_tts_receipt.wav"
+        receipt_path = os.path.join(SCRATCH, "kokoro_tts_receipt.wav")
         if not os.path.exists(receipt_path):
             wav_bytes, _ = server_module.tts.synth("Hello world, testing speech recognition.", voice="af_heart")
             with open(receipt_path, "wb") as f:
@@ -116,7 +131,7 @@ class TestRealEngineEndpoints(unittest.TestCase):
             self.assertTrue(len(audio_data) > 10000, f"Synthesized audio too small: {len(audio_data)} bytes")
             self.assertTrue(audio_data.startswith(b"RIFF"), "Audio does not have RIFF header")
 
-            ws_receipt_path = "/tmp/donna_ws_verified.wav"
+            ws_receipt_path = os.path.join(SCRATCH, "donna_ws_verified.wav")
             with open(ws_receipt_path, "wb") as f:
                 f.write(audio_data)
 

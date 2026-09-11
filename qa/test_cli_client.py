@@ -25,6 +25,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+SCRATCH = os.environ.get("PET_TALK_SCRATCH") or os.path.join(ROOT, ".qa-scratch")
+
 from cli.audio import (
     AudioPlayer,
     AudioRecorder,
@@ -129,6 +131,8 @@ class TestAudioPlaybackAndBarge(unittest.IsolatedAsyncioTestCase):
         await player.stop()
 
     async def test_afplay_barge_kill_under_50ms(self):
+        if os.environ.get("PET_TALK_SILENT") == "1":
+            self.skipTest("SKIP: PET_TALK_SILENT=1 — this spawns real afplay playback")
         player = AudioPlayer()
         player.start()
 
@@ -206,7 +210,7 @@ class TestLiveWsClient(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(m1.get("turn_id"), turn_id)
 
             # Send audio chunk (use real speech fixture if available so real STT transcribes words)
-            receipt_path = "/tmp/donna_ws_verified.wav"
+            receipt_path = os.path.join(SCRATCH, "donna_ws_verified.wav")
             sample_rate = 16000
             if os.path.exists(receipt_path):
                 import wave

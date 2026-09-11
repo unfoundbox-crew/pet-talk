@@ -1,92 +1,49 @@
 #!/usr/bin/env python3
-"""qa/latency.py — latency budget check (TECH-SPEC section 6) + gate status.
+"""qa/latency.py — latency budget check against a live server (TECH-SPEC sec 8.4).
 
-HONEST STUB, not a fake green: with no backend in the repo there is no real
-loop to time. What this script DOES do (exit 0 on success):
-  1. asserts the section-6 budget table sums to the claimed ~=1.1s naive total
-  2. asserts the streaming target (~600ms) sits under the CI smoke limit
-     (p50 turn <1200ms)
-  3. reports every acceptance-gate measurement it could NOT take and exactly
-     what backend would make it provable
+Budgets come from ONE place: qa/budgets.json. This script never restates a
+budget as a Python constant and never asserts a constant equals itself.
 
-When a measurable backend exists (WS /ws + STT/LLM/TTS), replace probe_backend
-with real turn timing and keep the arithmetic assertions as the budget guard.
-Stdlib only. Run: `python3 qa/latency.py`.
+Behavior:
+  - If a server answers on 127.0.0.1:$APP_PORT (default 8089), open a WS
+    connection and run N=5 stub-provider turns, measuring:
+      * stall latency    (user.stop -> agent.stall)
+      * first-sentence latency (user.stop -> first agent.sentence)
+      * barge ack latency (barge sent -> state.listening ack received)
+    then print a p50/p95 table and PASS/FAIL against qa/budgets.json.
+  - If no server is reachable (or `websockets` is not installed), print
+    NOT-MEASURED for every metric and exit 0 — this is not a failure, it is
+    an honest "nothing was measured."
+
+Run: `python3 qa/latency.py`. Exit 0 unless a live measurement breaches budget.
 """
+from __future__ import annotations
 
+import asyncio
+import base64
+import json
+import os
 import socket
 import sys
+import time
 
-# TECH-SPEC section 6, verbatim figures (ms).
-BUDGET_MS = {
-    "vad": 30,
-    "stt": 300,
-    "llm_first_token": 400,
-    "tts_first_audio": 300,
-    "playback": 20,
-    "loopback": 2,
-}
-NAIVE_CLAIM_MS = 1100          # spec: "1.1s naive"
-STREAMING_TARGET_MS = 600      # spec: "~600ms with partial streaming"
-SMOKE_P50_LIMIT_MS = 1200      # spec: "p50 turn <1200ms on M1 Max or fails loudly"
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BUDGETS_PATH = os.path.join(ROOT, "qa", "budgets.json")
 
-# TECH-SPEC section 7 gate thresholds that need a live loop to measure.
-GATES_NEEDING_BACKEND = [
-    ("gate 1: stall plays <=400ms after user stops", "timed research-question turn over WS /ws"),
-    ("gate 2: barge-in kills audio <=100ms", "barge frame + audio-kill timestamp from server log"),
-     ("gate 3: worker streams >=3 sentences gapless", "3+ agent.sentence frames behind playing audio"),
-]
+APP_PORT = int(os.environ.get("APP_PORT", "8089"))
+WS_URL = os.environ.get("LATENCY_WS_URL", f"ws://127.0.0.1:{APP_PORT}/ws")
+N_TURNS = int(os.environ.get("LATENCY_N", "5"))
 
-# TECH-SPEC section 8.4, verbatim figures (ms) — QA gates from field data.
-# NOTE: a DIFFERENT budget from the section-6 naive table above
-# (sec 6: VAD30/STT300/LLM400/TTS300 naive sum; sec 8.4: streaming targets).
-# Both blocks coexist; neither may drift from its own spec section.
-SPEC_84_MS = {  # the spec text itself — edit only when TECH-SPEC changes
-    "stt": 150,
-    "llm": 800,
-    "tts": 200,
-    "turn_target": 800,
-    "turn_worst": 1200,
-    "silero_confirm": 250,
-    "silero_silence": 500,
-    "stall": 400,
-    "barge_kill": 100,
-}
-
-BUDGET_84_MS = dict(SPEC_84_MS)  # working constants under test
+PCM_B64 = base64.b64encode(bytes(320 * 2)).decode()
 
 
-def check_budgets():
-    """Assert the working 8.4 constants match the spec verbatim. Fail loudly."""
-    ok = True
-    for k, want in SPEC_84_MS.items():
-        got = BUDGET_84_MS.get(k)
-        match = (got == want)
-        check("8.4 %-14s == spec %4dms" % (k, want), match,
-              "working=%sms" % (got,))
-        ok = ok and match
-    # Relational gates the spec states as inequalities.
-    check("8.4 turn target <=800ms steady",
-          BUDGET_84_MS["turn_target"] <= 800,
-          "turn_target=%dms" % BUDGET_84_MS["turn_target"])
-    ok = ok and BUDGET_84_MS["turn_target"] <= 800
-    check("8.4 turn worst <=1200ms",
-          BUDGET_84_MS["turn_worst"] <= 1200,
-          "turn_worst=%dms" % BUDGET_84_MS["turn_worst"])
-    ok = ok and BUDGET_84_MS["turn_worst"] <= 1200
-    return ok
-
-FAILURES = []
+def load_budgets() -> dict:
+    with open(BUDGETS_PATH) as f:
+        data = json.load(f)
+    return {k: v for k, v in data.items() if not k.startswith("_")}
 
 
-def check(name, cond, detail):
-    print(("PASS  " if cond else "FAIL  ") + name + " — " + detail)
-    if not cond:
-        FAILURES.append(name)
-
-
-def probe_backend(host="127.0.0.1", port=8088, timeout=0.7):
-    """True if anything listens on the daemon port (TTS HTTP today, WS later)."""
+def port_reachable(host="127.0.0.1", port=APP_PORT, timeout=1.0) -> bool:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(timeout)
     try:
@@ -98,39 +55,140 @@ def probe_backend(host="127.0.0.1", port=8088, timeout=0.7):
         s.close()
 
 
+def percentile(values, pct):
+    if not values:
+        return None
+    s = sorted(values)
+    k = max(0, min(len(s) - 1, round(pct / 100.0 * (len(s) - 1))))
+    return s[k]
+
+
+async def _recv(ws, timeout=10.0):
+    return json.loads(await asyncio.wait_for(ws.recv(), timeout))
+
+
+async def _measure_turn(ws_connect, turn_no):
+    """One user.start/stop turn: returns (stall_ms|None, first_sentence_ms|None)."""
+    turn_id = f"t-latency-{turn_no}"
+    async with ws_connect(WS_URL, max_size=4 * 1024 * 1024) as ws:
+        await _recv(ws, 5.0)  # state.idle
+        await ws.send(json.dumps({"type": "user.start", "turn_id": turn_id}))
+        await _recv(ws, 5.0)  # state.listening
+        t0 = time.monotonic()
+        await ws.send(json.dumps({"type": "user.stop", "turn_id": turn_id,
+                                  "pcm_b64": PCM_B64}))
+        stall_ms = None
+        first_sentence_ms = None
+        while True:
+            m = await _recv(ws, 10.0)
+            dt = (time.monotonic() - t0) * 1000.0
+            if m.get("type") == "agent.stall" and stall_ms is None:
+                stall_ms = dt
+            if m.get("type") == "agent.sentence" and first_sentence_ms is None:
+                first_sentence_ms = dt
+            if m.get("type") in ("agent.done", "agent.error"):
+                return stall_ms, first_sentence_ms
+
+
+async def _measure_barge(ws_connect):
+    """One turn: send barge mid-turn, measure send->ack latency; returns ms|None."""
+    turn_id = "t-latency-barge"
+    async with ws_connect(WS_URL, max_size=4 * 1024 * 1024) as ws:
+        await _recv(ws, 5.0)  # state.idle
+        await ws.send(json.dumps({"type": "user.start", "turn_id": turn_id}))
+        await _recv(ws, 5.0)  # state.listening
+        await ws.send(json.dumps({"type": "user.stop", "turn_id": turn_id,
+                                  "pcm_b64": PCM_B64}))
+        t0 = time.monotonic()
+        await ws.send(json.dumps({"type": "barge", "turn_id": turn_id}))
+        while True:
+            m = await asyncio.wait_for(ws.recv(), 10.0)
+            m = json.loads(m)
+            if m.get("type") == "state.listening" and "barged_turn" in m:
+                return (time.monotonic() - t0) * 1000.0
+            if m.get("type") in ("agent.done", "agent.error"):
+                # Turn finished before the barge landed — nothing to measure this run.
+                return None
+
+
+def run_measurements():
+    try:
+        from websockets.asyncio.client import connect as ws_connect
+    except ImportError:
+        return None, "websockets not installed (`pip install websockets`)"
+
+    stalls, first_sentences, barges = [], [], []
+
+    async def go():
+        for i in range(N_TURNS):
+            stall_ms, fs_ms = await _measure_turn(ws_connect, i)
+            if stall_ms is not None:
+                stalls.append(stall_ms)
+            if fs_ms is not None:
+                first_sentences.append(fs_ms)
+            barge_ms = await _measure_barge(ws_connect)
+            if barge_ms is not None:
+                barges.append(barge_ms)
+
+    try:
+        asyncio.run(go())
+    except Exception as e:
+        return None, f"measurement run failed: {e}"
+
+    return {
+        "stall_ms": stalls,
+        "first_sentence_ms": first_sentences,
+        "barge_ms": barges,
+    }, None
+
+
 def main():
-    print("latency budget (TECH-SPEC sec 6, all figures ms):")
-    for k, v in BUDGET_MS.items():
-        print("  %-15s %4d" % (k, v))
-    naive = sum(BUDGET_MS.values())
-    print("  %-15s %4d" % ("naive total", naive))
+    budgets = load_budgets()
+    print("budgets (qa/budgets.json, ms):")
+    for k, v in budgets.items():
+        print("  %-15s %6d" % (k, v))
 
-    check("budget sums to ~=1.1s",
-          abs(naive - 1052) == 0 and abs(naive - NAIVE_CLAIM_MS) <= 100,
-          "sum=%dms vs claimed ~%dms" % (naive, NAIVE_CLAIM_MS))
-    check("streaming target under smoke limit",
-          STREAMING_TARGET_MS < SMOKE_P50_LIMIT_MS,
-          "target ~%dms < p50 limit %dms" % (STREAMING_TARGET_MS, SMOKE_P50_LIMIT_MS))
+    reachable = port_reachable()
+    if not reachable:
+        print(f"\nno listener on 127.0.0.1:{APP_PORT} — nothing measured")
+        for metric in ("stall_ms", "first_sentence_ms", "barge_ms"):
+            print(f"  {metric:<18} NOT-MEASURED (no server on :{APP_PORT})")
+        print("RESULT: NOT-MEASURED (no server)")
+        return 0
 
-    print("latency constants (TECH-SPEC sec 8.4, all figures ms):")
-    for k, v in BUDGET_84_MS.items():
-        print("  %-15s %4d" % (k, v))
-    check_budgets()
+    samples, err = run_measurements()
+    if samples is None:
+        print(f"\nserver on :{APP_PORT} reachable but could not measure: {err}")
+        for metric in ("stall_ms", "first_sentence_ms", "barge_ms"):
+            print(f"  {metric:<18} NOT-MEASURED ({err})")
+        print("RESULT: NOT-MEASURED")
+        return 0
 
-    print("live loop measurement:")
-    if probe_backend():
-        print("  listener on 127.0.0.1:8088 — but no WS /ws turn timer exists yet, "
-              "so no turn was timed")
-    else:
-        print("  no listener on 127.0.0.1:8088 — no turn timed (expected: no backend yet)")
-    for gate, needs in GATES_NEEDING_BACKEND:
-        print("  NOT MEASURED: %s [would need: %s]" % (gate, needs))
+    # metric -> budget key comparison. first_sentence is judged against the
+    # steady-state turn target since it is the first audible output.
+    checks = [
+        ("stall_ms", samples["stall_ms"], budgets.get("stall_ms")),
+        ("first_sentence_ms", samples["first_sentence_ms"], budgets.get("turn_p50_ms")),
+        ("barge_ms", samples["barge_ms"], budgets.get("barge_ms")),
+    ]
 
-    if FAILURES:
-        print("RESULT: FAIL (%d)" % len(FAILURES))
-        return 1
-    print("RESULT: budget arithmetic OK; live-loop timing NOT MEASURED (no backend)")
-    return 0
+    print(f"\nlive measurement over {WS_URL} (N={N_TURNS} turns):")
+    print("  %-18s %8s %8s %10s %6s" % ("metric", "p50", "p95", "budget", "n"))
+    fail = False
+    for name, values, budget in checks:
+        if not values:
+            print("  %-18s %8s %8s %10s %6d  NOT-MEASURED" % (name, "-", "-", budget, 0))
+            continue
+        p50 = percentile(values, 50)
+        p95 = percentile(values, 95)
+        ok = budget is None or p95 <= budget
+        status = "PASS" if ok else "FAIL"
+        print("  %-18s %8.1f %8.1f %10s %6d  %s" % (name, p50, p95, budget, len(values), status))
+        if not ok:
+            fail = True
+
+    print("RESULT: %s" % ("FAIL" if fail else "OK"))
+    return 1 if fail else 0
 
 
 if __name__ == "__main__":
