@@ -15,6 +15,7 @@ import { LatencyMetrics, TelemetryHud } from "./components/TelemetryHud";
 import { PersonaData, PersonaStudio } from "./components/PersonaStudio";
 import { MemoryDrawer, MemoryTurn } from "./components/MemoryDrawer";
 import { ActiveProviders, RuntimeSettings, SettingsModal } from "./components/SettingsModal";
+import { PromptComposer } from "./components/PromptComposer";
 
 type Strings = typeof en;
 const STRINGS: Record<"en" | "hi", Strings> = { en, hi };
@@ -237,6 +238,27 @@ export default function App() {
     setState("listening");
     turnRef.current = newTurnId();
   }, [killPlayback]);
+
+  const handleSendPrompt = useCallback(
+    (promptText: string) => {
+      if (!promptText.trim()) return;
+      const turnId = newTurnId();
+      turnRef.current = turnId;
+      turnStartTimeRef.current = performance.now();
+      setState("thinking");
+
+      socket.send({
+        type: "user.text",
+        turn_id: turnId,
+        text: promptText.trim(),
+        persona: currentPersona,
+        voice: voice,
+        speed: speed,
+        system_prompt: systemPrompt,
+      });
+    },
+    [currentPersona, voice, speed, systemPrompt]
+  );
 
   // --- Mic Engine: getUserMedia + ScriptProcessor + Analyser ---
   const startTalking = useCallback(async () => {
@@ -1032,6 +1054,15 @@ export default function App() {
             )}
           </div>
         </section>
+
+        {/* Google Labs Styled Prompt Composer & Dictation Dock */}
+        <PromptComposer
+          onSend={handleSendPrompt}
+          disabled={!connected}
+          connected={connected}
+          serverUrl={httpBaseFromWs(WS_URL)}
+          t={t}
+        />
       </main>
 
       {/* Persistent Hippocampus Memory Drawer */}

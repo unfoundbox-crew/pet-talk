@@ -20,5 +20,11 @@
   "hands-free": "हैंड्स-फ्री (VAD)",
   "push-to-talk-mode": "पुश-टू-टॉक",
   "preview-voice": "आवाज़ सुनें",
-  "settings": "सेटिंग्स"
+  "settings": "सेटिंग्स",
+  "dictate": "बोलें",
+  "recording": "रिकॉर्डिंग…",
+  "transcribing": "ट्रांसक्राइब हो रहा है…",
+  "send_prompt": "भेजें",
+  "done": "पूर्ण",
+  "prompt_placeholder": "डोना से कुछ भी पूछें, या बोलें पर क्लिक करें…"
 }

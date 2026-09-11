@@ -35,6 +35,19 @@ export type ClientFrame =
       pcm_b64?: string;
       sample_rate?: number;
     }
+  | {
+      type: "user.text";
+      turn_id: string;
+      text: string;
+      persona?: PersonaId;
+      voice?: string;
+      speed?: number;
+      custom_voice?: string;
+      custom_speed?: number;
+      custom_tone?: string;
+      custom_stalls?: string[];
+      system_prompt?: string;
+    }
   | { type: "barge"; turn_id: string };
 
 // ---- Frames: server -> client ----

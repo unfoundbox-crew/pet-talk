@@ -20,5 +20,11 @@
   "hands-free": "Hands-Free (VAD)",
   "push-to-talk-mode": "Push-to-Talk",
   "preview-voice": "Preview Voice",
-  "settings": "Settings"
+  "settings": "Settings",
+  "dictate": "Dictate",
+  "recording": "Recording…",
+  "transcribing": "Transcribing…",
+  "send_prompt": "Send",
+  "done": "Done",
+  "prompt_placeholder": "Ask Donna anything, or click Dictate…"
 }

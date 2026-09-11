@@ -354,6 +354,35 @@ def ledger_clear() -> Response:
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@app.post("/transcribe")
+async def transcribe_endpoint(req: dict) -> Response:
+    pcm_b64 = req.get("pcm_b64") or req.get("audio_b64") or req.get("audio")
+    if not pcm_b64 or not isinstance(pcm_b64, str) or not pcm_b64.strip():
+        return JSONResponse({"ok": False, "error": "empty_audio"}, status_code=400)
+
+    try:
+        audio_bytes = base64.b64decode(pcm_b64, validate=True)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"invalid_base64: {e}"}, status_code=400)
+
+    if not audio_bytes:
+        return JSONResponse({"ok": False, "error": "empty_audio"}, status_code=400)
+
+    try:
+        sample_rate = int(req.get("sample_rate") or 16000)
+    except (ValueError, TypeError):
+        sample_rate = 16000
+
+    try:
+        text = stt.transcribe(audio_bytes, sample_rate=sample_rate)
+        return JSONResponse({"ok": True, "text": text})
+    except ProviderError as e:
+        status_code = 400 if "empty" in e.reason else 502
+        return JSONResponse({"ok": False, "error": str(e), "reason": e.reason}, status_code=status_code)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
 @app.get("/audio/{audio_id}")
 def get_audio(audio_id: str) -> Response:
     wav = _audio_store.get(audio_id)
@@ -569,10 +598,42 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 # Fire-and-forget: the receive loop MUST stay open so a
                 # mid-turn barge can land. Wrapper tracks + cleans up.
                 active_p = turn_persona.get(turn_id)
+                await ws.send_json(frame("transcript.user", turn_id, text=text))
                 asyncio.ensure_future(
                     handle_turn_task(ws, turn_id, text, queue, turn_tasks, active_persona=active_p)
                 )
                 chunks = []
+            elif mtype == "user.text":
+                turn_id = msg.get("turn_id") or new_turn_id()
+                text = (msg.get("text") or "").strip()
+                if not text:
+                    await ws.send_json(frame("agent.error", turn_id, reason="empty_text"))
+                    continue
+                pname = msg.get("persona") or "donna"
+                try:
+                    current_p = load_persona(pname)
+                except Exception:
+                    current_p = Persona(name=pname)
+                if msg.get("custom_voice") or msg.get("voice"):
+                    current_p.voice = str(msg.get("custom_voice") or msg.get("voice"))
+                if msg.get("custom_speed") or msg.get("speed"):
+                    try:
+                        current_p.speed = float(msg.get("custom_speed") or msg.get("speed"))
+                    except (ValueError, TypeError):
+                        pass
+                if msg.get("custom_tone") or msg.get("system_prompt"):
+                    current_p.tone = str(msg.get("custom_tone") or msg.get("system_prompt"))
+                if isinstance(msg.get("custom_stalls"), list) and msg["custom_stalls"]:
+                    current_p.stalls = [str(s) for s in msg["custom_stalls"] if str(s).strip()]
+                turn_persona[turn_id] = current_p
+
+                # Emit user transcript frame to mirror user speech/text into the client log
+                await ws.send_json(frame("transcript.user", turn_id, text=text))
+
+                active_p = turn_persona.get(turn_id)
+                asyncio.ensure_future(
+                    handle_turn_task(ws, turn_id, text, queue, turn_tasks, active_persona=active_p)
+                )
             elif mtype == "barge":
                 # Kill playback: cancel the live turn FIRST, then flush + re-route.
                 ref = msg.get("turn_id") or turn_id
