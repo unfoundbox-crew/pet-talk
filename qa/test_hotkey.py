@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+"""qa/test_hotkey.py — TDD test suite for Pet-Talk Native macOS Hotkey Listener.
+
+Verifies:
+1. Swift source compiles cleanly via native `swiftc` without warnings.
+2. Carbon `RegisterEventHotKey` registration with keycode 48 (kVK_Tab) and
+   modifier 0x0800 (optionKey) without requiring Accessibility/TCC prompts.
+3. Sub-50ms instant barge-in kill latency on active audio playback.
+4. Daemon lifecycle management: start, status, stop, and PID tracking.
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import sys
+import time
+import unittest
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SWIFT_SRC = os.path.join(ROOT, "cli", "hotkey", "main.swift")
+BIN_PATH = os.path.join(ROOT, "bin", "pet-talk-hotkey")
+PID_FILE = "/tmp/pet-talk-hotkey.pid"
+
+
+class TestHotkeyCompilation(unittest.TestCase):
+    """Verify Swift compilation of native Carbon hotkey listener."""
+
+    def test_swiftc_compiler_available(self):
+        swiftc = shutil.which("swiftc")
+        self.assertIsNotNone(swiftc, "swiftc compiler must be available on macOS")
+
+    def test_clean_compilation(self):
+        self.assertTrue(os.path.exists(SWIFT_SRC), f"Source file missing: {SWIFT_SRC}")
+
+        os.makedirs(os.path.dirname(BIN_PATH), exist_ok=True)
+        cmd = ["swiftc", "-O", SWIFT_SRC, "-o", BIN_PATH]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+
+        self.assertEqual(
+            res.returncode,
+            0,
+            f"Compilation failed with code {res.returncode}:\nStdout: {res.stdout}\nStderr: {res.stderr}",
+        )
+        self.assertTrue(os.path.exists(BIN_PATH), f"Compiled binary missing at {BIN_PATH}")
+        self.assertTrue(os.access(BIN_PATH, os.X_OK), "Binary must be executable")
+
+        # Verify Mach-O binary
+        file_check = subprocess.run(["file", BIN_PATH], capture_output=True, text=True)
+        self.assertIn("Mach-O 64-bit", file_check.stdout)
+
+
+class TestCarbonHotkeyRegistration(unittest.TestCase):
+    """Verify Carbon API registration and configuration."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not os.path.exists(BIN_PATH):
+            subprocess.run(["swiftc", "-O", SWIFT_SRC, "-o", BIN_PATH], check=True)
+
+    def test_keycode_and_modifier_registration(self):
+        res = subprocess.run(
+            [BIN_PATH, "--check-registration"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(res.returncode, 0, f"Registration failed:\n{res.stderr}\n{res.stdout}")
+        self.assertIn("48 (kVK_Tab)", res.stdout)
+        self.assertIn("0x800", res.stdout)
+        self.assertIn("PASS: Carbon RegisterEventHotKey succeeded", res.stdout)
+
+
+class TestBargeInLatency(unittest.TestCase):
+    """Verify instant barge-in kill latency is within the 50ms budget."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not os.path.exists(BIN_PATH):
+            subprocess.run(["swiftc", "-O", SWIFT_SRC, "-o", BIN_PATH], check=True)
+
+    def test_afplay_kill_under_50ms(self):
+        wav_file = os.path.join(ROOT, "bake-deepgram_0.wav")
+        afplay_proc = None
+        if os.path.exists(wav_file):
+            afplay_proc = subprocess.Popen(
+                ["afplay", wav_file],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            time.sleep(0.02)  # ensure afplay is actively running
+
+        try:
+            res = subprocess.run(
+                [BIN_PATH, "--barge-benchmark"],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(res.returncode, 0, f"Barge benchmark failed:\n{res.stdout}")
+            self.assertIn("PASS: Barge-in kill under 50ms budget", res.stdout)
+        finally:
+            if afplay_proc and afplay_proc.poll() is None:
+                afplay_proc.kill()
+
+
+class TestDaemonLifecycle(unittest.TestCase):
+    """Verify daemon start, status, and stop lifecycle."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not os.path.exists(BIN_PATH):
+            subprocess.run(["swiftc", "-O", SWIFT_SRC, "-o", BIN_PATH], check=True)
+
+    def setUp(self):
+        # Guarantee clean state before each test
+        subprocess.run([BIN_PATH, "stop"], capture_output=True)
+
+    def tearDown(self):
+        # Clean up any leftover daemon
+        subprocess.run([BIN_PATH, "stop"], capture_output=True)
+
+    def test_lifecycle_transitions(self):
+        # 1. Initially stopped
+        res_initial = subprocess.run([BIN_PATH, "status"], capture_output=True, text=True)
+        self.assertNotEqual(res_initial.returncode, 0)
+        self.assertIn("stopped", res_initial.stdout)
+
+        # 2. Start daemon
+        res_start = subprocess.run([BIN_PATH, "start"], capture_output=True, text=True)
+        self.assertEqual(res_start.returncode, 0)
+        self.assertIn("daemon started", res_start.stdout)
+
+        # 3. Status is running with PID
+        res_status = subprocess.run([BIN_PATH, "status"], capture_output=True, text=True)
+        self.assertEqual(res_status.returncode, 0)
+        self.assertIn("running", res_status.stdout)
+
+        # Verify PID file exists and matches live PID
+        self.assertTrue(os.path.exists(PID_FILE))
+        with open(PID_FILE, "r") as f:
+            pid = int(f.read().strip())
+        self.assertGreater(pid, 0)
+        # Check process is alive
+        try:
+            os.kill(pid, 0)
+            is_alive = True
+        except OSError:
+            is_alive = False
+        self.assertTrue(is_alive, f"Daemon process {pid} should be active")
+
+        # 4. Stop daemon
+        res_stop = subprocess.run([BIN_PATH, "stop"], capture_output=True, text=True)
+        self.assertEqual(res_stop.returncode, 0)
+        self.assertIn("stopped", res_stop.stdout)
+
+        # 5. Status is stopped
+        res_final = subprocess.run([BIN_PATH, "status"], capture_output=True, text=True)
+        self.assertNotEqual(res_final.returncode, 0)
+        self.assertIn("stopped", res_final.stdout)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

@@ -60,9 +60,13 @@ else
   echo "SKIP  live WS turn — 127.0.0.1:$APP_PORT refused (boot \`python3 -m uvicorn server.app:app --port $APP_PORT\` from pet-talk/ to prove it)"
 fi
 
-say "8/8 terminal CLI client (audio recording, playback, barge-in <=50ms, WS client)"
+say "8/9 terminal CLI client (audio recording, playback, barge-in <=50ms, WS client)"
 if python3 "$ROOT/qa/test_cli_client.py" -v; then :; else FAIL=1; fi
+
+say "9/9 native macOS global hotkey listener (Carbon Option+Tab, sub-50ms barge kill, daemon lifecycle)"
+if python3 "$ROOT/qa/test_hotkey.py" -v; then :; else FAIL=1; fi
 
 say "summary"
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: OK (passes + honest SKIP/NOT-MEASURED only)"; else echo "RESULT: FAIL"; fi
 exit "$FAIL"
+
