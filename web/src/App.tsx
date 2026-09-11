@@ -156,6 +156,7 @@ export default function App() {
   // VAD state for hands-free mode
   const speechDetectedRef = useRef(false);
   const silenceTimerRef = useRef<number | null>(null);
+  const recordedAudioRef = useRef<Float32Array[]>([]);
 
   // Stable refs for callbacks
   const personaRef = useRef(currentPersona);
@@ -240,6 +241,7 @@ export default function App() {
   // --- Mic Engine: getUserMedia + ScriptProcessor + Analyser ---
   const startTalking = useCallback(async () => {
     try {
+      recordedAudioRef.current = [];
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
@@ -251,7 +253,7 @@ export default function App() {
       const Ctx: typeof AudioContext =
         window.AudioContext ??
         (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      const ctx = new Ctx();
+      const ctx = new Ctx({ sampleRate: 16000 });
       const src = ctx.createMediaStreamSource(stream);
 
       // WebAudio Analyser for living orb visualization
@@ -260,10 +262,23 @@ export default function App() {
       src.connect(ana);
       setAnalyser(ana);
 
-      // 128-sample chunks per spec
-      const proc = ctx.createScriptProcessor(128, 1, 1);
+      // Send user.start ONCE at the start of talking
+      socket.send({
+        type: "user.start",
+        turn_id: turnRef.current,
+        persona: personaRef.current,
+        voice: voiceRef.current,
+        speed: speedRef.current,
+        system_prompt: promptRef.current,
+      });
+
+      // 512-sample chunks for smooth visualization & stream buffering
+      const proc = ctx.createScriptProcessor(512, 1, 1);
       proc.onaudioprocess = (ev: AudioProcessingEvent) => {
-        const samples = ev.inputBuffer.getChannelData(0).slice(0, 128);
+        const input = ev.inputBuffer.getChannelData(0);
+        const samples = new Float32Array(input.length);
+        samples.set(input);
+        recordedAudioRef.current.push(samples);
 
         // Calculate RMS for continuous VAD mode
         let sum = 0;
@@ -291,13 +306,9 @@ export default function App() {
         }
 
         socket.send({
-          type: "user.start",
+          type: "user.chunk",
           turn_id: turnRef.current,
           chunk: float32ToBase64Pcm16(samples),
-          persona: personaRef.current,
-          voice: voiceRef.current,
-          speed: speedRef.current,
-          system_prompt: promptRef.current,
         });
       };
 
@@ -312,7 +323,8 @@ export default function App() {
       setTalking(true);
       setState("listening");
       turnStartTimeRef.current = performance.now();
-    } catch {
+    } catch (err) {
+      console.error("Failed to start mic:", err);
       setTalking(false);
     }
   }, [inputMode]);
@@ -321,7 +333,34 @@ export default function App() {
     if (!micRef.current) return;
     setTalking(false);
     turnStartTimeRef.current = performance.now();
-    socket.send({ type: "user.stop", turn_id: turnRef.current });
+
+    // Flatten recorded chunks into one complete PCM16 payload
+    const totalLen = recordedAudioRef.current.reduce((acc, c) => acc + c.length, 0);
+    let pcmB64 = "";
+    if (totalLen > 0) {
+      const merged = new Float32Array(totalLen);
+      let offset = 0;
+      for (const c of recordedAudioRef.current) {
+        merged.set(c, offset);
+        offset += c.length;
+      }
+      pcmB64 = float32ToBase64Pcm16(merged);
+    }
+    recordedAudioRef.current = [];
+
+    // Stop tracks and close audio context cleanly
+    try {
+      micRef.current.stream.getTracks().forEach((t) => t.stop());
+      void micRef.current.ctx.close();
+    } catch {}
+    micRef.current = null;
+
+    socket.send({
+      type: "user.stop",
+      turn_id: turnRef.current,
+      pcm_b64: pcmB64,
+      sample_rate: 16000,
+    });
   }, []);
 
   // --- WebSocket Setup & Event Demux ---

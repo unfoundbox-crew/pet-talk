@@ -14,17 +14,27 @@ export type ClientFrame =
   | {
       type: "user.start";
       turn_id: string;
-      chunk: string;
-      persona: PersonaId;
-      voice: string;
-      speed: number;
+      chunk?: string;
+      persona?: PersonaId;
+      voice?: string;
+      speed?: number;
       custom_voice?: string;
       custom_speed?: number;
       custom_tone?: string;
       custom_stalls?: string[];
       system_prompt?: string;
     }
-  | { type: "user.stop"; turn_id: string }
+  | {
+      type: "user.chunk";
+      turn_id: string;
+      chunk: string;
+    }
+  | {
+      type: "user.stop";
+      turn_id: string;
+      pcm_b64?: string;
+      sample_rate?: number;
+    }
   | { type: "barge"; turn_id: string };
 
 // ---- Frames: server -> client ----

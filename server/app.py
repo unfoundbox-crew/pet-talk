@@ -537,17 +537,32 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     current_p.stalls = [str(s) for s in msg["custom_stalls"] if str(s).strip()]
                 turn_persona[turn_id] = current_p
                 await ws.send_json(frame("state.listening", turn_id))
+            elif mtype == "user.chunk":
+                b64 = msg.get("chunk", "")
+                if b64:
+                    try:
+                        chunks.append(base64.b64decode(b64))
+                    except Exception:
+                        pass
             elif mtype == "user.stop":
                 turn_id = msg.get("turn_id") or turn_id
                 pcm_b64 = msg.get("pcm_b64", "")
-                try:
-                    pcm = base64.b64decode(pcm_b64) if pcm_b64 else b""
-                except Exception:
-                    await ws.send_json(frame("agent.error", turn_id, reason="bad_pcm_encoding"))
+                if pcm_b64:
+                    try:
+                        decoded = base64.b64decode(pcm_b64)
+                        if decoded:
+                            # Use client's complete merged buffer if provided
+                            chunks = [decoded]
+                    except Exception:
+                        await ws.send_json(frame("agent.error", turn_id, reason="bad_pcm_encoding"))
+                        continue
+                audio_payload = b"".join(chunks)
+                if not audio_payload:
+                    await ws.send_json(frame("agent.error", turn_id, reason="stt_empty_audio"))
                     continue
-                chunks.append(pcm)
+                sample_rate = int(msg.get("sample_rate") or 16000)
                 try:
-                    text = stt.transcribe(b"".join(chunks))
+                    text = stt.transcribe(audio_payload, sample_rate=sample_rate)
                 except ProviderError as e:
                     await ws.send_json(frame("agent.error", turn_id, reason=e.reason))
                     continue

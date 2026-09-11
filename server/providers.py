@@ -380,11 +380,12 @@ class DeepgramSTT(STTProvider):
 
     LISTEN_URL = "https://api.deepgram.com/v1/listen"
 
-    def __init__(self, model: str = "nova-3") -> None:
+    def __init__(self, model: str = "nova-3", api_key: str = "") -> None:
         self.model = model
+        self.api_key = api_key
 
     def _key(self) -> str:
-        key = os.environ.get("DEEPGRAM_API_KEY", "")
+        key = self.api_key or os.environ.get("DEEPGRAM_API_KEY", "")
         if not key:
             raise ProviderError("stt_no_key", "DEEPGRAM_API_KEY env not set")
         return key
@@ -441,11 +442,12 @@ class DeepgramTTS(TTSProvider):
 
     SPEAK_URL = "https://api.deepgram.com/v1/speak"
 
-    def __init__(self, model: str = "aura-2-thalia-en") -> None:
+    def __init__(self, model: str = "aura-2-thalia-en", api_key: str = "") -> None:
         self.model = model
+        self.api_key = api_key
 
     def _key(self) -> str:
-        key = os.environ.get("DEEPGRAM_API_KEY", "")
+        key = self.api_key or os.environ.get("DEEPGRAM_API_KEY", "")
         if not key:
             raise ProviderError("tts_no_key", "DEEPGRAM_API_KEY env not set")
         return key
