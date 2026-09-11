@@ -1,0 +1,10 @@
+{
+  "_comment": "Single source of truth for latency budgets (TECH-SPEC.md sec 8.4). qa/latency.py and qa/live_ws_turn.py both load this file — never hardcode a copy elsewhere.",
+  "stall_ms": 400,
+  "barge_ms": 100,
+  "turn_p50_ms": 800,
+  "turn_worst_ms": 1200,
+  "stt_ms": 150,
+  "llm_ms": 800,
+  "tts_ms": 200
+}
