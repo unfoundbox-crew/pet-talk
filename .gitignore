@@ -1,0 +1,25 @@
+# pet-talk gitignore — binaries and runtime exhaust stay out; code stays in.
+# audio evidence (reproducible via bake scripts)
+*.wav
+*.mp3
+*.ogg
+*.aiff
+
+# telemetry + runtime
+server/turns.jsonl
+*.jsonl
+
+# builds + deps
+web/dist/
+web/node_modules/
+node_modules/
+dist/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS + editor
+.DS_Store
+*.swp
+.env

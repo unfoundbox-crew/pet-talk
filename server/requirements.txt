@@ -1,0 +1,10 @@
+# pet-talk duplex server (v0.2) — minimal deps.
+fastapi
+uvicorn
+numpy
+
+# --- plug-in points (DO NOT install by default; providers use lazy imports) ---
+# whisper-local STT:   pip install openai-whisper   (imported lazily in providers.py)
+# kokoro-local TTS:    pip install kokoro            (imported lazily in providers.py)
+# neural VAD:          pip install silero-vad        (imported lazily in providers.py)
+# OpenAI-compatible LLM: pip install openai          (imported lazily in providers.py)

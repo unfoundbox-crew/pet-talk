@@ -1,0 +1,37 @@
+# voices.yaml — Kokoro voice map for pet-talk (v0.2).
+# Persona files reference `voice` by id; the server resolves via this map.
+# No hardcoded voice ids anywhere else.
+# Voice ids verified against hexgrad/Kokoro-82M VOICES.md (2026-09-11).
+voices:
+  af_heart:
+    display_name: Heart
+    lang: en-US
+    suggested_persona: donna
+  am_adam:
+    display_name: Adam
+    lang: en-US
+    suggested_persona: jarvis
+  af_bella:
+    display_name: Bella
+    lang: en-US
+    suggested_persona: donna
+  af_sarah:
+    display_name: Sarah
+    lang: en-US
+    suggested_persona: donna
+  am_michael:
+    display_name: Michael
+    lang: en-US
+    suggested_persona: zuck
+  bf_emma:
+    display_name: Emma
+    lang: en-GB
+    suggested_persona: jarvis
+  bm_george:
+    display_name: George
+    lang: en-GB
+    suggested_persona: jarvis
+  af_nicole:
+    display_name: Nicole
+    lang: en-US
+    suggested_persona: donna
