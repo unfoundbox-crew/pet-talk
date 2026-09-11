@@ -116,19 +116,19 @@ RUNTIME_SETTINGS = {
     "sensevoice_base_url": os.environ.get("SENSEVOICE_BASE_URL", "http://100.99.50.84:8086"),
     "llm_provider": os.environ.get(
         "LLM_PROVIDER",
-        "haiku" if (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("LITELLM_MASTER_KEY")) else ("groq" if os.environ.get("GROQ_API_KEY") else "litellm"),
+        "groq" if os.environ.get("GROQ_API_KEY") else ("haiku" if os.environ.get("ANTHROPIC_API_KEY") else "litellm"),
     ).lower(),
     "llm_base_url": os.environ.get(
         "LLM_BASE_URL",
-        "http://100.99.50.84:8000/v1" if (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("LITELLM_MASTER_KEY")) else ("https://api.groq.com/openai/v1" if os.environ.get("GROQ_API_KEY") else "http://100.99.50.84:8000/v1"),
+        "https://api.groq.com/openai/v1" if (os.environ.get("GROQ_API_KEY") and os.environ.get("LLM_PROVIDER", "groq") == "groq") else "http://100.99.50.84:8000/v1",
     ),
     "llm_model": os.environ.get(
         "LLM_MODEL",
-        "claude-3-5-haiku-20241022" if (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("LITELLM_MASTER_KEY")) else ("groq/compound-mini" if os.environ.get("GROQ_API_KEY") else "claude-sonnet-4-6"),
+        "groq/compound-mini" if (os.environ.get("GROQ_API_KEY") and os.environ.get("LLM_PROVIDER", "groq") == "groq") else "claude-3-5-haiku-20241022",
     ),
     "llm_api_key": os.environ.get(
         "LLM_API_KEY",
-        os.environ.get("ANTHROPIC_API_KEY", os.environ.get("LITELLM_MASTER_KEY", os.environ.get("GROQ_API_KEY", "sk-3340dc7a5732b32c09a08a86da68b7400a9778d3bbbc574a"))),
+        os.environ.get("GROQ_API_KEY", os.environ.get("ANTHROPIC_API_KEY", os.environ.get("LITELLM_MASTER_KEY", "sk-3340dc7a5732b32c09a08a86da68b7400a9778d3bbbc574a"))),
     ),
     "tts_provider": os.environ.get("TTS_PROVIDER", "smallest" if os.environ.get("SMALLEST_API_KEY") else "kokoro").lower(),
     "kokoro_base_url": os.environ.get("KOKORO_BASE_URL", "http://127.0.0.1:8088"),
