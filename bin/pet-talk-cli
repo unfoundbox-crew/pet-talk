@@ -1,0 +1,20 @@
+#!/usr/bin/env python3
+"""pet-talk-cli — Low-latency Terminal Client for Pet-Talk full-duplex voice loop.
+
+Usage:
+  pet-talk-cli                   # Interactive TUI mode (talk to Donna in your terminal)
+  pet-talk-cli once              # One-shot hotkey mode (for Raycast, Shortcuts, Alfred)
+  pet-talk-cli --help            # View all options
+"""
+import os
+import sys
+
+# Ensure repository root is on sys.path
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+from cli.client import main
+
+if __name__ == "__main__":
+    sys.exit(main())
