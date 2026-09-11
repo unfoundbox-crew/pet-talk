@@ -11,10 +11,14 @@ import asyncio
 import io
 import math
 import os
+import shutil
 import struct
+import subprocess
+import tempfile
 import time
 import urllib.parse
 import urllib.request
+import uuid
 import wave
 from typing import AsyncIterator, Optional
 
@@ -110,6 +114,13 @@ RESEARCH_TRIGGERS = (
     "deep dive",
     "what is the weather",
     "weather",
+    "what is going on",
+    "what's going on",
+    "how are things",
+    "status report",
+    "check on",
+    "explain",
+    "analyze",
 )
 
 
@@ -143,52 +154,206 @@ class StubLLM(LLMProvider):
 
 
 class OpenAICompatibleLLM(LLMProvider):
-    """Real backend (lazy import). Any OpenAI-compatible endpoint via config."""
+    """Real backend: Any OpenAI-compatible endpoint via config.
+    Uses httpx async SSE streaming with automatic remote-to-local fallback.
+    """
 
-    def __init__(self, base_url: str, model: str, api_key: str = "") -> None:
-        self.base_url = base_url
+    def __init__(
+        self,
+        base_url: str = "http://100.99.50.84:8000/v1",
+        model: str = "claude-sonnet-4-6",
+        api_key: str = "",
+    ) -> None:
+        self.base_url = base_url.rstrip("/")
         self.model = model
-        self.api_key = api_key
+        self.api_key = (
+            api_key
+            or os.environ.get("LLM_API_KEY")
+            or os.environ.get("LITELLM_MASTER_KEY", "sk-3340dc7a5732b32c09a08a86da68b7400a9778d3bbbc574a")
+        )
 
     def route(self, text: str) -> str:
         return route_text(text)
 
+    async def _resolve_endpoint(self) -> str:
+        """Resolve base_url, falling back from offline Lenovo (100.99.50.84) to local 127.0.0.1."""
+        target = self.base_url
+        if "100.99.50.84" in target:
+            import socket
+
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(0.5)
+            try:
+                sock.connect(("100.99.50.84", 8000))
+            except Exception:
+                target = target.replace("100.99.50.84:8000", "127.0.0.1:8000")
+            finally:
+                sock.close()
+        return target
+
+    def _build_payload(self, messages: Any, system_prompt: str = "") -> dict[str, Any]:
+        """Format request payload with model-specific parameters.
+        Reasoning models (gpt-5, o1, o3) use max_completion_tokens and omit temperature.
+        Standard models use max_tokens and temperature.
+        """
+        formatted_messages = []
+        if system_prompt:
+            formatted_messages.append({"role": "system", "content": system_prompt})
+        if isinstance(messages, list):
+            for m in messages:
+                if isinstance(m, tuple) and len(m) == 2:
+                    formatted_messages.append({"role": m[0], "content": m[1]})
+                elif isinstance(m, dict):
+                    formatted_messages.append(m)
+        elif isinstance(messages, str):
+            formatted_messages.append({"role": "user", "content": messages})
+
+        is_reasoning = any(x in self.model for x in ("gpt-5", "o1", "o3"))
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": formatted_messages,
+            "stream": True,
+        }
+        if is_reasoning:
+            payload["max_completion_tokens"] = 800
+        else:
+            payload["max_tokens"] = 50
+            payload["temperature"] = 0.7
+        return payload
+
     async def stream(self, messages: list[dict]) -> AsyncIterator[str]:
+        import json as _json
+
         try:
-            from openai import AsyncOpenAI  # type: ignore  # lazy: pip install openai
-        except ImportError as e:
-            raise ProviderError("llm_openai_not_installed", str(e))
-        client = AsyncOpenAI(base_url=self.base_url, api_key=self.api_key or "x")
-        try:
-            resp = await client.chat.completions.create(
-                model=self.model, messages=messages, stream=True
-            )
+            import httpx
+        except ImportError:
+            httpx = None
+
+        endpoint = await self._resolve_endpoint()
+        url = f"{endpoint}/chat/completions"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key or 'x'}",
+        }
+        payload = self._build_payload(messages)
+
+        if httpx is not None:
             buf = ""
-            async for chunk in resp:
-                delta = chunk.choices[0].delta.content if chunk.choices else None
-                if not delta:
-                    continue
-                buf += delta
-                while True:
-                    split_idx = -1
-                    for i, ch in enumerate(buf):
-                        if ch in (".", "!", "?", "\n"):
-                            if i + 1 == len(buf) or buf[i + 1].isspace():
+            try:
+                async with httpx.AsyncClient(timeout=45.0) as client:
+                    async with client.stream("POST", url, headers=headers, json=payload) as resp:
+                        if resp.status_code != 200:
+                            err_body = await resp.aread()
+                            raise ProviderError(
+                                "llm_stream_failed",
+                                f"HTTP {resp.status_code}: {err_body.decode(errors='replace')}",
+                            )
+                        async for line in resp.aiter_lines():
+                            if not line or not line.startswith("data: "):
+                                continue
+                            data_str = line[6:].strip()
+                            if data_str == "[DONE]":
+                                break
+                            try:
+                                chunk = _json.loads(data_str)
+                                delta = chunk["choices"][0]["delta"].get("content") or ""
+                            except Exception:
+                                continue
+                            buf += delta
+                            if "<think>" in buf and "</think>" in buf:
+                                import re
+                                buf = re.sub(r"<think>[\s\S]*?</think>", "", buf).lstrip()
+                            elif "<think>" in buf and "</think>" not in buf:
+                                continue
+                            while True:
+                                split_idx = -1
+                                for i, ch in enumerate(buf):
+                                    if ch in (".", "!", "?", "\n"):
+                                        if i + 1 == len(buf) or buf[i + 1].isspace():
+                                            split_idx = i + 1
+                                            break
+                                    elif ch in (";", "—") and len(buf[:i].split()) >= 5:
+                                        split_idx = i + 1
+                                        break
+                                    elif ch == "," and len(buf[:i].split()) >= 8:
+                                        split_idx = i + 1
+                                        break
+                                if split_idx != -1:
+                                    sentence = buf[:split_idx].strip()
+                                    buf = buf[split_idx:].lstrip()
+                                    if sentence:
+                                        yield sentence
+                                else:
+                                    break
+                        if buf.strip():
+                            if "<think>" in buf and "</think>" in buf:
+                                import re
+                                buf = re.sub(r"<think>[\s\S]*?</think>", "", buf).strip()
+                            elif "<think>" in buf:
+                                buf = ""
+                            if buf.strip():
+                                yield buf.strip()
+            except ProviderError:
+                raise
+            except Exception as e:
+                raise ProviderError("llm_stream_failed", str(e))
+        else:
+            try:
+                from openai import AsyncOpenAI  # type: ignore
+
+                client = AsyncOpenAI(base_url=endpoint, api_key=self.api_key or "x")
+                create_params = {
+                    "model": self.model,
+                    "messages": messages,
+                    "stream": True,
+                }
+                if is_reasoning:
+                    create_params["max_completion_tokens"] = 300
+                else:
+                    create_params["max_tokens"] = 50
+                    create_params["temperature"] = 0.7
+                resp = await client.chat.completions.create(**create_params)
+                buf = ""
+                async for chunk in resp:
+                    delta = chunk.choices[0].delta.content if chunk.choices else None
+                    if not delta:
+                        continue
+                    buf += delta
+                    if "<think>" in buf and "</think>" in buf:
+                        import re
+                        buf = re.sub(r"<think>[\s\S]*?</think>", "", buf).lstrip()
+                    elif "<think>" in buf and "</think>" not in buf:
+                        continue
+                    while True:
+                        split_idx = -1
+                        for i, ch in enumerate(buf):
+                            if ch in (".", "!", "?", "\n"):
+                                if i + 1 == len(buf) or buf[i + 1].isspace():
+                                    split_idx = i + 1
+                                    break
+                            elif ch in (";", "—") and len(buf[:i].split()) >= 5:
                                 split_idx = i + 1
                                 break
-                    if split_idx != -1:
-                        sentence = buf[:split_idx].strip()
-                        buf = buf[split_idx:].lstrip()
-                        if sentence:
-                            yield sentence
-                    else:
-                        break
-            if buf.strip():
-                yield buf.strip()
-        except ProviderError:
-            raise
-        except Exception as e:
-            raise ProviderError("llm_stream_failed", str(e))
+                            elif ch == "," and len(buf[:i].split()) >= 8:
+                                split_idx = i + 1
+                                break
+                        if split_idx != -1:
+                            sentence = buf[:split_idx].strip()
+                            buf = buf[split_idx:].lstrip()
+                            if sentence:
+                                yield sentence
+                        else:
+                            break
+                if buf.strip():
+                    if "<think>" in buf and "</think>" in buf:
+                        import re
+                        buf = re.sub(r"<think>[\s\S]*?</think>", "", buf).strip()
+                    elif "<think>" in buf:
+                        buf = ""
+                    if buf.strip():
+                        yield buf.strip()
+            except Exception as e:
+                raise ProviderError("llm_stream_failed", str(e))
 
 
 # ---------------------------------------------------------------- TTS ---
@@ -247,17 +412,38 @@ class KokoroSpacePilotTTS(TTSProvider):
     def _auth_token(self) -> str:
         if self._token is not None:
             return self._token
+        env_tok = (
+            os.environ.get("SPACEPILOT_TOKEN")
+            or os.environ.get("STUDIO_TOKEN")
+            or os.environ.get("KOKORO_TOKEN")
+        )
+        if env_tok and env_tok.strip():
+            self._token = env_tok.strip()
+            return self._token
         token_file = os.environ.get("STUDIO_TOKEN_FILE", "")
-        if not token_file:
-            raise ProviderError("tts_no_token", "STUDIO_TOKEN_FILE env not set")
+        if token_file and os.path.exists(token_file):
+            try:
+                with open(token_file) as f:
+                    tok = f.read().strip()
+                if tok:
+                    self._token = tok
+                    return self._token
+            except OSError:
+                pass
+        # Auto-fetch token from daemon /api/token
         try:
-            with open(token_file) as f:
-                self._token = f.read().strip()
-        except OSError as e:
-            raise ProviderError("tts_token_unreadable", str(e))
-        if not self._token:
-            raise ProviderError("tts_token_empty", f"{token_file} is empty")
-        return self._token
+            req = urllib.request.Request(f"{self.base_url}/api/token")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                import json as _json
+
+                data = _json.loads(resp.read().decode())
+                tok = data.get("token", "")
+                if tok:
+                    self._token = tok
+                    return self._token
+        except Exception:
+            pass
+        raise ProviderError("tts_no_token", "Could not obtain SpacePilot token from env, file, or /api/token")
 
     def _request(self, method: str, path: str, payload: Optional[dict] = None) -> dict:
         import json as _json
@@ -306,7 +492,7 @@ class KokoroSpacePilotTTS(TTSProvider):
         url = (
             file_path
             if file_path.startswith("http")
-            else self.base_url + urllib.parse.quote(file_path)
+            else self.base_url + (file_path if file_path.startswith("/") else f"/{file_path}")
         )
         req = urllib.request.Request(
             url, headers={"X-SpacePilot-Token": self._auth_token()}
@@ -368,11 +554,114 @@ class ElevenLabsTTS(TTSProvider):
         return audio, []
 
 
-# -------------------------------------------------- Deepgram (swappable tyre) ---
+# -------------------------------------------------- Smallest.ai (Lightning TTS) ---
+
+
+class SmallestAITTS(TTSProvider):
+    """Cloud tyre: Smallest AI Lightning TTS (https://api.smallest.ai/waves/v1/tts).
+    Ultra-low latency Indian English & Hindi natural voice synthesis.
+    Model: lightning_v3.1_pro, Voice: meher (or emily, radha, etc.).
+    Uses stdlib (urllib).
+    """
+
+    API_URL = "https://api.smallest.ai/waves/v1/tts"
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        voice_id: str = "meher",
+        model: str = "lightning_v3.1_pro",
+        sample_rate: int = 24000,
+    ) -> None:
+        self.api_key = (
+            api_key
+            or os.environ.get("SMALLEST_API_KEY", "")
+        )
+        self.voice_id = voice_id
+        self.model = model
+        self.sample_rate = sample_rate
+
+    def synth(self, text: str, voice: str = "meher", speed: float = 1.0) -> tuple[bytes, list]:
+        if not text or not text.strip():
+            raise ProviderError("tts_empty_text", "nothing to synthesize")
+        if not self.api_key:
+            raise ProviderError("tts_no_key", "SMALLEST_API_KEY env or key not provided")
+
+        chosen_voice = voice if voice and voice not in ("af_heart", "default", "") else self.voice_id
+        payload = {
+            "text": text.strip(),
+            "voice_id": chosen_voice,
+            "model": self.model,
+            "sample_rate": self.sample_rate,
+            "speed": speed,
+            "output_format": "wav",
+        }
+        data = json_dumps(payload).encode()
+        req = urllib.request.Request(
+            self.API_URL,
+            data=data,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+                "Accept": "audio/wav",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                if resp.status != 200:
+                    raise ProviderError("tts_request_failed", f"HTTP {resp.status}")
+                body = resp.read()
+                if not body:
+                    raise ProviderError("tts_empty_audio", "Smallest AI returned 0 bytes")
+                return body, []
+        except ProviderError:
+            raise
+        except Exception as e:
+            raise ProviderError("tts_request_failed", f"smallest.ai: {e}")
+
+
+# -------------------------------------------------- STT Helpers & Providers ---
+
+
+def pcm16_to_wav_bytes(pcm16_bytes: bytes, sample_rate: int = 16000) -> bytes:
+    """Pack PCM16 mono bytes into a compliant in-memory RIFF WAV container."""
+    if pcm16_bytes.startswith(b"RIFF"):
+        return pcm16_bytes
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sample_rate)
+        w.writeframes(pcm16_bytes)
+    return buf.getvalue()
+
+
+def encode_multipart_formdata(
+    fields: dict[str, str], files: dict[str, tuple[str, bytes, str]]
+) -> tuple[bytes, str]:
+    """Pure stdlib multipart/form-data encoder (RFC 7578) with zero extra deps."""
+    boundary = f"----PetTalkBoundary{uuid.uuid4().hex}"
+    body = bytearray()
+    for name, val in fields.items():
+        body.extend(f"--{boundary}\r\n".encode("utf-8"))
+        body.extend(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"))
+        body.extend(str(val).encode("utf-8"))
+        body.extend(b"\r\n")
+    for name, (fname, content, ctype) in files.items():
+        body.extend(f"--{boundary}\r\n".encode("utf-8"))
+        body.extend(
+            f'Content-Disposition: form-data; name="{name}"; filename="{fname}"\r\n'.encode("utf-8")
+        )
+        body.extend(f"Content-Type: {ctype}\r\n\r\n".encode("utf-8"))
+        body.extend(content)
+        body.extend(b"\r\n")
+    body.extend(f"--{boundary}--\r\n".encode("utf-8"))
+    return bytes(body), f"multipart/form-data; boundary={boundary}"
 
 
 class DeepgramSTT(STTProvider):
-    """Cloud tyre: Deepgram listen API. Same interface, env-selected.
+    """Cloud flagship: Deepgram listen API. Same interface, env-selected.
 
     Select with STT_PROVIDER=deepgram. Key from DEEPGRAM_API_KEY env.
     Default model nova-3. Uses only stdlib (urllib).
@@ -380,11 +669,12 @@ class DeepgramSTT(STTProvider):
 
     LISTEN_URL = "https://api.deepgram.com/v1/listen"
 
-    def __init__(self, model: str = "nova-3") -> None:
+    def __init__(self, model: str = "nova-3", api_key: str = "") -> None:
         self.model = model
+        self.api_key = api_key
 
     def _key(self) -> str:
-        key = os.environ.get("DEEPGRAM_API_KEY", "")
+        key = self.api_key or os.environ.get("DEEPGRAM_API_KEY", "")
         if not key:
             raise ProviderError("stt_no_key", "DEEPGRAM_API_KEY env not set")
         return key
@@ -394,13 +684,7 @@ class DeepgramSTT(STTProvider):
 
         if not pcm16_bytes:
             raise ProviderError("stt_empty_audio", "no bytes to transcribe")
-        buf = io.BytesIO()
-        with wave.open(buf, "wb") as w:
-            w.setnchannels(1)
-            w.setsampwidth(2)
-            w.setframerate(sample_rate)
-            w.writeframes(pcm16_bytes)
-        wav = buf.getvalue()
+        wav = pcm16_to_wav_bytes(pcm16_bytes, sample_rate=sample_rate)
         url = (
             f"{self.LISTEN_URL}?model={urllib.parse.quote(self.model)}"
             f"&encoding=linear16&sample_rate={sample_rate}&channels=1&punctuate=true"
@@ -432,6 +716,312 @@ class DeepgramSTT(STTProvider):
         return text
 
 
+class GroqSTT(STTProvider):
+    """Ultra-fast Groq LPU Whisper. Same interface, env or param selected.
+
+    Select with STT_PROVIDER=groq. Key from GROQ_API_KEY env or param.
+    Default model whisper-large-v3-turbo. Uses only stdlib (urllib).
+    """
+
+    DEFAULT_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+
+    def __init__(
+        self,
+        model: str = "whisper-large-v3-turbo",
+        api_key: str = "",
+        base_url: Optional[str] = None,
+    ) -> None:
+        self.model = model
+        self.api_key = api_key
+        self.base_url = (base_url or os.environ.get("GROQ_BASE_URL", self.DEFAULT_URL)).strip()
+
+    def _key(self) -> str:
+        key = self.api_key or os.environ.get("GROQ_API_KEY", "")
+        if not key:
+            raise ProviderError("stt_no_key", "GROQ_API_KEY env not set")
+        return key
+
+    def transcribe(self, pcm16_bytes: bytes, sample_rate: int = 16000) -> str:
+        import json as _json
+
+        if not pcm16_bytes:
+            raise ProviderError("stt_empty_audio", "no bytes to transcribe")
+        wav = pcm16_to_wav_bytes(pcm16_bytes, sample_rate=sample_rate)
+        body, ctype = encode_multipart_formdata(
+            fields={"model": self.model, "response_format": "json"},
+            files={"file": ("audio.wav", wav, "audio/wav")},
+        )
+        req = urllib.request.Request(
+            self.base_url,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": ctype,
+                "Authorization": f"Bearer {self._key()}",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = _json.loads(resp.read().decode())
+        except ProviderError:
+            raise
+        except Exception as e:
+            raise ProviderError("stt_request_failed", f"groq: {e}")
+        text = (data.get("text") or "").strip()
+        if not text:
+            raise ProviderError("stt_empty_result", "groq returned no text")
+        return text
+
+
+class OpenAIWhisperSTT(STTProvider):
+    """OpenAI Whisper API. Same interface.
+
+    Select with STT_PROVIDER=openai. Key from OPENAI_API_KEY env or param.
+    Default model whisper-1. Uses only stdlib (urllib).
+    """
+
+    DEFAULT_URL = "https://api.openai.com/v1/audio/transcriptions"
+
+    def __init__(
+        self,
+        model: str = "whisper-1",
+        api_key: str = "",
+        base_url: Optional[str] = None,
+    ) -> None:
+        self.model = model
+        self.api_key = api_key
+        self.base_url = (base_url or os.environ.get("OPENAI_BASE_URL", self.DEFAULT_URL)).strip()
+
+    def _key(self) -> str:
+        key = self.api_key or os.environ.get("OPENAI_API_KEY", "")
+        if not key:
+            raise ProviderError("stt_no_key", "OPENAI_API_KEY env not set")
+        return key
+
+    def transcribe(self, pcm16_bytes: bytes, sample_rate: int = 16000) -> str:
+        import json as _json
+
+        if not pcm16_bytes:
+            raise ProviderError("stt_empty_audio", "no bytes to transcribe")
+        wav = pcm16_to_wav_bytes(pcm16_bytes, sample_rate=sample_rate)
+        body, ctype = encode_multipart_formdata(
+            fields={"model": self.model},
+            files={"file": ("audio.wav", wav, "audio/wav")},
+        )
+        req = urllib.request.Request(
+            self.base_url,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": ctype,
+                "Authorization": f"Bearer {self._key()}",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = _json.loads(resp.read().decode())
+        except ProviderError:
+            raise
+        except Exception as e:
+            raise ProviderError("stt_request_failed", f"openai: {e}")
+        text = (data.get("text") or "").strip()
+        if not text:
+            raise ProviderError("stt_empty_result", "openai returned no text")
+        return text
+
+
+class WhisperKitSTT(STTProvider):
+    """Apple Neural Engine CoreML via CLI process.
+
+    Select with STT_PROVIDER=whisperkit.
+    Default model openai/whisper-large-v3_turbo.
+    """
+
+    def __init__(
+        self,
+        model: str = "openai/whisper-large-v3_turbo",
+        cli_path: str = "whisperkit-cli",
+    ) -> None:
+        self.model = model
+        self.cli_path = cli_path
+
+    def transcribe(self, pcm16_bytes: bytes, sample_rate: int = 16000) -> str:
+        import json as _json
+
+        if not pcm16_bytes:
+            raise ProviderError("stt_empty_audio", "no bytes to transcribe")
+
+        resolved_cli = shutil.which(self.cli_path) or (self.cli_path if os.path.exists(self.cli_path) else None)
+        if not resolved_cli:
+            raise ProviderError(
+                "stt_whisperkit_not_found",
+                f"whisperkit-cli executable not found at '{self.cli_path}'",
+            )
+
+        wav = pcm16_to_wav_bytes(pcm16_bytes, sample_rate=sample_rate)
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as f:
+            f.write(wav)
+            f.flush()
+
+            cmd = [
+                resolved_cli,
+                "transcribe",
+                "--audio-path",
+                f.name,
+                "--model",
+                self.model,
+                "--report",
+            ]
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=60,
+                )
+            except Exception as e:
+                raise ProviderError("stt_whisperkit_failed", str(e))
+
+            if proc.returncode != 0:
+                raise ProviderError(
+                    "stt_whisperkit_failed",
+                    f"exit {proc.returncode}: {proc.stderr.strip() or proc.stdout.strip()}",
+                )
+
+            out = proc.stdout.strip()
+            text = ""
+            if out.startswith("{") and out.endswith("}"):
+                try:
+                    data = _json.loads(out)
+                    text = data.get("text", "")
+                except Exception:
+                    text = out
+            else:
+                text = out
+
+            if not text:
+                raise ProviderError("stt_empty_result", "whisperkit returned no text")
+            return text
+
+
+class MLXWhisperSTT(STTProvider):
+    """Apple Silicon GPU via MLX. Lazy import of mlx_whisper.
+
+    Select with STT_PROVIDER=mlx.
+    Default model mlx-community/whisper-large-v3-turbo.
+    """
+
+    def __init__(
+        self,
+        model: str = "mlx-community/whisper-large-v3-turbo",
+    ) -> None:
+        self.model = model
+
+    def transcribe(self, pcm16_bytes: bytes, sample_rate: int = 16000) -> str:
+        if not pcm16_bytes:
+            raise ProviderError("stt_empty_audio", "no bytes to transcribe")
+
+        try:
+            import mlx_whisper  # type: ignore  # lazy
+        except ImportError as e:
+            raise ProviderError("stt_mlx_not_installed", str(e))
+
+        wav = pcm16_to_wav_bytes(pcm16_bytes, sample_rate=sample_rate)
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as f:
+            f.write(wav)
+            f.flush()
+            try:
+                result = mlx_whisper.transcribe(f.name, path_or_hf_repo=self.model)
+            except Exception as e:
+                raise ProviderError("stt_mlx_failed", str(e))
+
+        text = (result.get("text") or "").strip()
+        if not text:
+            raise ProviderError("stt_empty_result", "mlx returned no text")
+        return text
+
+
+class SenseVoiceSTT(STTProvider):
+    """Sovereign Fleet SenseVoice HTTP adapter (:8086).
+
+    Select with STT_PROVIDER=sensevoice. Base URL from SENSEVOICE_BASE_URL.
+    """
+
+    DEFAULT_URL = "http://127.0.0.1:8086"
+
+    def __init__(
+        self,
+        base_url: Optional[str] = None,
+    ) -> None:
+        self.base_url = (base_url or os.environ.get("SENSEVOICE_BASE_URL", self.DEFAULT_URL)).rstrip("/")
+
+    def transcribe(self, pcm16_bytes: bytes, sample_rate: int = 16000) -> str:
+        import json as _json
+
+        if not pcm16_bytes:
+            raise ProviderError("stt_empty_audio", "no bytes to transcribe")
+
+        wav = pcm16_to_wav_bytes(pcm16_bytes, sample_rate=sample_rate)
+        url = f"{self.base_url}/api/transcribe"
+        req = urllib.request.Request(
+            url,
+            data=wav,
+            method="POST",
+            headers={"Content-Type": "audio/wav"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = _json.loads(resp.read().decode())
+        except ProviderError:
+            raise
+        except Exception as e:
+            raise ProviderError("stt_request_failed", f"sensevoice: {e}")
+
+        text = (data.get("text") or "").strip()
+        if not text:
+            raise ProviderError("stt_empty_result", "sensevoice returned no text")
+        return text
+
+
+class FasterWhisperSTT(STTProvider):
+    """Local faster-whisper backend running on CPU/Metal. Zero cloud dependencies."""
+
+    def __init__(
+        self,
+        model_name: str = "tiny.en",
+        device: str = "cpu",
+        compute_type: str = "int8",
+    ) -> None:
+        self.model_name = model_name
+        self.device = device
+        self.compute_type = compute_type
+        self._model = None
+
+    def _load(self):
+        if self._model is None:
+            try:
+                from faster_whisper import WhisperModel
+            except ImportError as e:
+                raise ProviderError("stt_faster_whisper_not_installed", str(e))
+            self._model = WhisperModel(self.model_name, device=self.device, compute_type=self.compute_type)
+        return self._model
+
+    def transcribe(self, pcm16_bytes: bytes, sample_rate: int = 16000) -> str:
+        if not pcm16_bytes:
+            raise ProviderError("stt_empty_audio", "no bytes to transcribe")
+        model = self._load()
+        wav = pcm16_to_wav_bytes(pcm16_bytes, sample_rate=sample_rate)
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as f:
+            f.write(wav)
+            f.flush()
+            segments, _ = model.transcribe(f.name)
+            text = " ".join(s.text.strip() for s in segments).strip()
+        if not text:
+            raise ProviderError("stt_empty_result", "faster-whisper returned no text")
+        return text
+
+
 class DeepgramTTS(TTSProvider):
     """Cloud tyre: Deepgram speak API (Aura family). Same interface.
 
@@ -441,11 +1031,12 @@ class DeepgramTTS(TTSProvider):
 
     SPEAK_URL = "https://api.deepgram.com/v1/speak"
 
-    def __init__(self, model: str = "aura-2-thalia-en") -> None:
+    def __init__(self, model: str = "aura-2-thalia-en", api_key: str = "") -> None:
         self.model = model
+        self.api_key = api_key
 
     def _key(self) -> str:
-        key = os.environ.get("DEEPGRAM_API_KEY", "")
+        key = self.api_key or os.environ.get("DEEPGRAM_API_KEY", "")
         if not key:
             raise ProviderError("tts_no_key", "DEEPGRAM_API_KEY env not set")
         return key
@@ -484,40 +1075,157 @@ def json_dumps(payload: dict) -> str:
     return _json.dumps(payload)
 
 
-def make_tts() -> TTSProvider:
-    """Tyre switch: TTS_PROVIDER=stub|kokoro|elevenlabs|deepgram (default: stub)."""
-    which = os.environ.get("TTS_PROVIDER", "stub").lower()
+def make_tts(
+    provider: Optional[str] = None,
+    base_url: Optional[str] = None,
+    api_key: Optional[str] = None,
+    voice: Optional[str] = None,
+) -> TTSProvider:
+    """Tyre switch: TTS_PROVIDER=kokoro|smallest|deepgram|elevenlabs|stub (default: kokoro)."""
+    which = (provider or os.environ.get("TTS_PROVIDER", "kokoro")).lower()
+    if which in ("smallest", "smallest-ai", "smallest_ai", "waves"):
+        return SmallestAITTS(
+            api_key=api_key or os.environ.get("SMALLEST_API_KEY"),
+            voice_id=voice or "meher",
+        )
     if which == "kokoro":
-        return KokoroSpacePilotTTS()
+        return KokoroSpacePilotTTS(base_url=base_url or os.environ.get("KOKORO_BASE_URL", "http://127.0.0.1:8088"))
     if which == "elevenlabs":
         return ElevenLabsTTS()
     if which == "deepgram":
         return DeepgramTTS()
-    return StubTTS()
+    if which == "stub":
+        return StubTTS()
+    return KokoroSpacePilotTTS(base_url=base_url or os.environ.get("KOKORO_BASE_URL", "http://127.0.0.1:8088"))
 
 
-def make_stt() -> STTProvider:
-    """Tyre switch: STT_PROVIDER=stub|deepgram (default: stub).
-
-    whisper-local is not wired yet — fail-closed, never silent fallback.
+def make_stt(
+    provider: Optional[str] = None,
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+    model: Optional[str] = None,
+) -> STTProvider:
+    """Tyre switch for STT provider:
+    deepgram | groq | sensevoice | whisperkit | faster-whisper | mlx | openai | stub.
+    Fail-closed: raises ProviderError on unknown provider or missing credentials.
     """
-    which = os.environ.get("STT_PROVIDER", "stub").lower()
+    default_provider = "deepgram" if os.environ.get("DEEPGRAM_API_KEY") else "faster-whisper"
+    which = (provider or os.environ.get("STT_PROVIDER", default_provider)).lower().strip()
+    if which in ("", "stub"):
+        return StubSTT()
     if which == "deepgram":
-        return DeepgramSTT()
-    if which in ("whisper-local", "whisper_local", "whisper", "local"):
-        raise ProviderError("stt_not_wired", "whisper-local not wired")
-    return StubSTT()
+        return DeepgramSTT(
+            model=model or "nova-3",
+            api_key=api_key or os.environ.get("DEEPGRAM_API_KEY", ""),
+        )
+    if which == "groq":
+        return GroqSTT(
+            model=model or "whisper-large-v3-turbo",
+            api_key=api_key or os.environ.get("GROQ_API_KEY", ""),
+            base_url=base_url or os.environ.get("GROQ_BASE_URL", "https://api.groq.com/openai/v1/audio/transcriptions"),
+        )
+    if which in ("openai", "openai-whisper", "whisper-openai"):
+        return OpenAIWhisperSTT(
+            model=model or "whisper-1",
+            api_key=api_key or os.environ.get("OPENAI_API_KEY", ""),
+            base_url=base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1/audio/transcriptions"),
+        )
+    if which in ("whisperkit", "whisper-kit", "coreml", "ane"):
+        return WhisperKitSTT(
+            model=model or "openai/whisper-large-v3_turbo",
+            cli_path=base_url or os.environ.get("WHISPERKIT_CLI_PATH", "whisperkit-cli"),
+        )
+    if which in ("faster-whisper", "faster_whisper", "whisper", "local", "whisper-local"):
+        return FasterWhisperSTT(
+            model_name=model or os.environ.get("WHISPER_MODEL", "tiny.en"),
+        )
+    if which in ("mlx", "mlx-whisper"):
+        return MLXWhisperSTT(
+            model=model or "mlx-community/whisper-large-v3-turbo",
+        )
+    if which in ("sensevoice", "fleet", "sovereign"):
+        return SenseVoiceSTT(
+            base_url=base_url or os.environ.get("SENSEVOICE_BASE_URL", "http://100.99.50.84:8086"),
+        )
+    raise ProviderError("stt_unknown_provider", f"unknown STT provider: {which}")
 
 
-def make_llm() -> LLMProvider:
-    """Tyre switch: LLM_PROVIDER=stub|openai|litellm|fleet (default: stub)."""
-    which = os.environ.get("LLM_PROVIDER", "stub").lower()
-    if which in ("openai", "litellm", "fleet", "local"):
-        base_url = os.environ.get("LLM_BASE_URL", "http://100.99.50.84:8000/v1")
-        model = os.environ.get("LLM_MODEL", "claude-3-7-sonnet")
-        api_key = os.environ.get("LLM_API_KEY", "x")
-        return OpenAICompatibleLLM(base_url=base_url, model=model, api_key=api_key)
-    return StubLLM()
+def make_llm(
+    provider: Optional[str] = None,
+    base_url: Optional[str] = None,
+    model: Optional[str] = None,
+    api_key: Optional[str] = None,
+) -> LLMProvider:
+    """Tyre switch: LLM_PROVIDER=haiku|opencode|zen|gemini|groq|openai|litellm|fleet|stub."""
+    which = (provider or os.environ.get("LLM_PROVIDER", "haiku")).lower()
+
+    if which in ("haiku", "claude-haiku", "claude"):
+        b_url = base_url or os.environ.get("ANTHROPIC_BASE_URL") or "http://100.99.50.84:8000/v1"
+        m = model or os.environ.get("HAIKU_MODEL", "claude-3-5-haiku-20241022")
+        key = (
+            api_key
+            or os.environ.get("ANTHROPIC_API_KEY")
+            or os.environ.get("LITELLM_MASTER_KEY", "sk-3340dc7a5732b32c09a08a86da68b7400a9778d3bbbc574a")
+        )
+        return OpenAICompatibleLLM(base_url=b_url, model=m, api_key=key)
+
+    if which in ("opencode", "zen", "opencode-zen"):
+        b_url = base_url or os.environ.get("OPENCODE_BASE_URL", "https://api.opencode.ai/v1")
+        m = model or os.environ.get("OPENCODE_MODEL", "flash-3.8")
+        key = (
+            api_key
+            or os.environ.get("OPENCODE_GO_KEY")
+            or os.environ.get("OPENCODE_LENOVO_KEY")
+            or os.environ.get("OPENCODE_API_KEY", "")
+        )
+        return OpenAICompatibleLLM(base_url=b_url, model=m, api_key=key)
+
+    if which in ("gemini", "google", "flash"):
+        b_url = base_url or os.environ.get("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai")
+        m = model or os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+        key = (
+            api_key
+            or os.environ.get("GEMINI_PRIMARY_API_KEY")
+            or os.environ.get("GOOGLE_API_KEY", "")
+        )
+        return OpenAICompatibleLLM(base_url=b_url, model=m, api_key=key)
+
+    if which == "groq":
+        b_url = base_url or "https://api.groq.com/openai/v1"
+        m = model or "groq/compound-mini"
+        key = api_key or os.environ.get("GROQ_API_KEY", "")
+        return OpenAICompatibleLLM(base_url=b_url, model=m, api_key=key)
+
+    if which in ("openai", "gpt"):
+        b_url = base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
+        m = model or os.environ.get("OPENAI_MODEL", "gpt-5-nano")
+        key = (
+            api_key
+            or os.environ.get("OPENAI_API_KEY", "")
+        )
+        return OpenAICompatibleLLM(base_url=b_url, model=m, api_key=key)
+
+    if which in ("litellm", "fleet", "local"):
+        b_url = base_url or os.environ.get("LLM_BASE_URL", "http://100.99.50.84:8000/v1")
+        m = model or os.environ.get("LLM_MODEL", "claude-sonnet-4-6")
+        key = (
+            api_key
+            or os.environ.get("LLM_API_KEY")
+            or os.environ.get("LITELLM_MASTER_KEY", "sk-3340dc7a5732b32c09a08a86da68b7400a9778d3bbbc574a")
+        )
+        return OpenAICompatibleLLM(base_url=b_url, model=m, api_key=key)
+
+    if which == "stub":
+        return StubLLM()
+
+    b_url = base_url or os.environ.get("LLM_BASE_URL", "http://100.99.50.84:8000/v1")
+    m = model or os.environ.get("LLM_MODEL", "claude-sonnet-4-6")
+    key = (
+        api_key
+        or os.environ.get("LLM_API_KEY")
+        or os.environ.get("LITELLM_MASTER_KEY", "sk-3340dc7a5732b32c09a08a86da68b7400a9778d3bbbc574a")
+    )
+    return OpenAICompatibleLLM(base_url=b_url, model=m, api_key=key)
 
 
 # ---------------------------------------------------------------- VAD ---

@@ -1,0 +1,43 @@
+{
+  "target": "pet-talk-local",
+  "ws_url": "ws://127.0.0.1:8089/ws",
+  "connected": true,
+  "ttfa_test": {
+    "success": true,
+    "time_to_first_message_ms": 1.0,
+    "first_message_type": "agent.stall",
+    "time_to_first_audio_ms": 1.0,
+    "audio_url": null,
+    "frame_sequence": [
+      "agent.stall",
+      "state.thinking",
+      "agent.sentence",
+      "state.speaking",
+      "agent.sentence",
+      "agent.sentence",
+      "agent.sentence",
+      "agent.done"
+    ]
+  },
+  "cancellation_test": {
+    "success": true,
+    "cancellation_latency_ms": 10.38,
+    "leaked_frames_count": 3,
+    "leaked_frames": [
+      {
+        "type": "state.thinking",
+        "dt_ms": 0.07
+      },
+      {
+        "type": "agent.sentence",
+        "dt_ms": 10.22
+      },
+      {
+        "type": "state.speaking",
+        "dt_ms": 10.23
+      }
+    ],
+    "dropped_queue_count": 0,
+    "barged_turn_ack": "probe-barge-1789111995869"
+  }
+}

@@ -17,7 +17,19 @@ if python3 "$ROOT/qa/test_protocol.py" -v; then :; else FAIL=1; fi
 say "2/4 personas + voices + i18n (stdlib unittest)"
 if python3 "$ROOT/qa/test_persona.py" -v; then :; else FAIL=1; fi
 
-say "2b/4 hippocampus memory ledger (stdlib unittest)"
+say "2b/4 persona studio API & persistence (stdlib unittest)"
+if python3 "$ROOT/qa/test_persona_api.py" -v; then :; else FAIL=1; fi
+
+say "2b2/4 runtime tire switching & settings API (stdlib unittest)"
+if python3 "$ROOT/qa/test_settings_api.py" -v; then :; else FAIL=1; fi
+
+say "2b3/4 transcribe REST API & WS user.text turn frames (stdlib unittest)"
+if python3 "$ROOT/qa/test_transcribe_api.py" -v; then :; else FAIL=1; fi
+
+say "2b4/4 universal dictation matrix & clean prose (stdlib unittest)"
+if python3 "$ROOT/qa/test_dictation_matrix.py" -v; then :; else FAIL=1; fi
+
+say "2c/4 hippocampus memory ledger (stdlib unittest)"
 if python3 "$ROOT/qa/test_memory.py" -v; then :; else FAIL=1; fi
 
 say "3/4 latency budget (honest stub until backend exists)"
@@ -43,13 +55,34 @@ say "6/6 latency sec-8.4 budgets (asserted inside latency.py; drift fails loudly
 # standalone so a sec-6 pass can never mask a sec-8.4 drift.
 if python3 -c "import sys; sys.path.insert(0, '$ROOT/qa'); import latency; sys.exit(0 if latency.check_budgets() else 1)"; then :; else FAIL=1; fi
 
-say "7/7 live WS turn (needs server on :8099 + websockets; SKIP when absent)"
-if python3 -c "import socket; s=socket.socket(); s.settimeout(1.0); s.connect(('127.0.0.1', 8099))" 2>/dev/null; then
+say "7/7 live WS turn (needs server on :8089 + websockets; SKIP when absent)"
+APP_PORT="${APP_PORT:-8089}"
+if python3 -c "import socket; s=socket.socket(); s.settimeout(1.0); s.connect(('127.0.0.1', int('$APP_PORT')))" 2>/dev/null; then
   if python3 "$ROOT/qa/live_ws_turn.py" -v; then :; else FAIL=1; fi
 else
-  echo "SKIP  live WS turn — 127.0.0.1:8099 refused (boot \`python3 -m uvicorn server.app:app --port 8099\` from pet-talk/ to prove it)"
+  echo "SKIP  live WS turn — 127.0.0.1:$APP_PORT refused (boot \`python3 -m uvicorn server.app:app --port $APP_PORT\` from pet-talk/ to prove it)"
 fi
+
+say "8/9 terminal CLI client (audio recording, playback, barge-in <=50ms, WS client)"
+if python3 "$ROOT/qa/test_cli_client.py" -v; then :; else FAIL=1; fi
+
+say "9/10 native macOS global hotkey listener (Carbon Option+Tab, sub-50ms barge kill, daemon lifecycle)"
+if python3 "$ROOT/qa/test_hotkey.py" -v; then :; else FAIL=1; fi
+
+say "10/11 floating glass capsule HUD (NSPanel, Obsidian Zinc, kinetic glyphs, nonactivating)"
+if python3 "$ROOT/qa/test_hud.py" -v; then :; else FAIL=1; fi
+
+say "11/12 acoustic earcons & config engine (sub-2ms CoreAudio/NSSound pre-cached in RAM, sound packs)"
+if python3 "$ROOT/qa/test_earcons.py" -v; then :; else FAIL=1; fi
+
+say "12/13 WebSocket resilience & bounded audio LRU (zero task leaks, dead socket safety)"
+if python3 "$ROOT/qa/test_socket_resilience.py" -v; then :; else FAIL=1; fi
+
+say "13/13 Smallest.ai Lightning TTS & OpenAI reasoning tyres (stdlib unittest)"
+if python3 "$ROOT/qa/test_new_tyres.py" -v; then :; else FAIL=1; fi
 
 say "summary"
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: OK (passes + honest SKIP/NOT-MEASURED only)"; else echo "RESULT: FAIL"; fi
 exit "$FAIL"
+
+

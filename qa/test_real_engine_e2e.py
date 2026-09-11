@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+"""qa/test_real_engine_e2e.py — End-to-end verification of real engine endpoints.
+
+Verifies:
+1. Kokoro TTS on http://127.0.0.1:8088 (real WAV synthesis >10KB).
+2. STT via /transcribe (real transcription of audio input).
+3. LLM via /ws (LiteLLM proxy with Donna persona, returning playable Kokoro audio).
+"""
+import base64
+import os
+import sys
+import unittest
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+from fastapi.testclient import TestClient
+from server import app as server_module
+from server import providers
+
+
+class TestRealEngineEndpoints(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.client = TestClient(server_module.app)
+
+    def test_01_kokoro_tts_synthesis(self):
+        """Verify Kokoro TTS is reachable and produces >10KB valid RIFF WAV."""
+        tts = server_module.tts
+        self.assertIsInstance(
+            tts,
+            providers.KokoroSpacePilotTTS,
+            f"Expected KokoroSpacePilotTTS, got {type(tts).__name__}",
+        )
+        test_text = "Good morning. Donna Paulsen here, executive secretary mode is fully operational."
+        wav_bytes, _ = tts.synth(test_text, voice="af_heart", speed=1.05)
+        self.assertTrue(len(wav_bytes) > 10000, f"Audio too small: {len(wav_bytes)} bytes")
+        self.assertTrue(wav_bytes.startswith(b"RIFF"), "Missing RIFF WAV header")
+
+        receipt_path = "/tmp/kokoro_tts_receipt.wav"
+        with open(receipt_path, "wb") as f:
+            f.write(wav_bytes)
+        print(f"\n[RECEIPT 1] Kokoro TTS Synthesized {len(wav_bytes)} bytes -> {receipt_path}")
+
+    def test_02_stt_transcribe_endpoint(self):
+        """Verify /transcribe endpoint transcribes real audio input."""
+        receipt_path = "/tmp/kokoro_tts_receipt.wav"
+        if not os.path.exists(receipt_path):
+            wav_bytes, _ = server_module.tts.synth("Hello world, testing speech recognition.", voice="af_heart")
+            with open(receipt_path, "wb") as f:
+                f.write(wav_bytes)
+        else:
+            with open(receipt_path, "rb") as f:
+                wav_bytes = f.read()
+
+        b64 = base64.b64encode(wav_bytes).decode("ascii")
+        resp = self.client.post(
+            "/transcribe",
+            json={"pcm_b64": b64, "sample_rate": 24000, "clean_prose": True},
+        )
+        self.assertEqual(resp.status_code, 200, f"Transcribe failed: {resp.text}")
+        data = resp.json()
+        self.assertTrue(data.get("ok"), f"Transcribe not ok: {data}")
+        text = data.get("text", "")
+        self.assertTrue(len(text) > 0, "Empty transcription returned")
+        print(f"\n[RECEIPT 2] STT ({type(server_module.stt).__name__}) Transcribed: {text!r}")
+
+    def test_03_ws_turn_with_donna_and_kokoro(self):
+        """Verify WS turn drives Donna LLM streaming and delivers playable Kokoro WAV."""
+        turn_id = "turn-verify-real-001"
+        prompt_text = "Donna, are the local engines operational?"
+
+        with self.client.websocket_connect("/ws") as ws:
+            idle = ws.receive_json()
+            self.assertEqual(idle.get("type"), "state.idle")
+
+            # Submit prompt with Donna persona
+            ws.send_json({
+                "type": "user.text",
+                "turn_id": turn_id,
+                "text": prompt_text,
+                "persona": "donna",
+            })
+
+            received_frames = []
+            audio_urls = []
+            agent_sentences = []
+
+            # Read frames until agent.done
+            while True:
+                f = ws.receive_json()
+                ftype = f.get("type")
+                received_frames.append(ftype)
+
+                if ftype == "agent.sentence":
+                    agent_sentences.append(f.get("text"))
+                    if f.get("audio_url"):
+                        audio_urls.append(f.get("audio_url"))
+
+                if ftype in ("agent.done", "agent.error"):
+                    break
+
+            self.assertIn("transcript.user", received_frames)
+            self.assertIn("agent.done", received_frames)
+            self.assertTrue(len(agent_sentences) > 0, "No sentences synthesized by LLM")
+            self.assertTrue(len(audio_urls) > 0, "No audio URLs returned in agent.sentence")
+
+            # Download synthesized audio from /audio/<audio_id>
+            first_url = audio_urls[0]
+            audio_resp = self.client.get(first_url)
+            self.assertEqual(audio_resp.status_code, 200)
+            self.assertEqual(audio_resp.headers.get("content-type"), "audio/wav")
+
+            audio_data = audio_resp.content
+            self.assertTrue(len(audio_data) > 10000, f"Synthesized audio too small: {len(audio_data)} bytes")
+            self.assertTrue(audio_data.startswith(b"RIFF"), "Audio does not have RIFF header")
+
+            ws_receipt_path = "/tmp/donna_ws_verified.wav"
+            with open(ws_receipt_path, "wb") as f:
+                f.write(audio_data)
+
+            print(f"\n[RECEIPT 3] WS Donna Turn Completed:")
+            print(f"  User Prompt: {prompt_text}")
+            print(f"  Donna Spoke: {' '.join(agent_sentences)}")
+            print(f"  Audio Output: {len(audio_data)} bytes -> {ws_receipt_path}")
+
+
+if __name__ == "__main__":
+    unittest.main()

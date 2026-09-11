@@ -3,23 +3,59 @@
 // (SpacePilot daemon is :8088 — do NOT collide.)
 
 export const WS_URL =
-  import.meta.env.VITE_WS_URL ?? "ws://127.0.0.1:8089";
+  import.meta.env.VITE_WS_URL ?? "ws://127.0.0.1:8089/ws";
 
 export type AgentState = "idle" | "listening" | "thinking" | "speaking";
 
-export type PersonaId = "donna" | "zuck" | "jarvis";
+export type PersonaId = string;
 
 // ---- Frames: client -> server ----
 export type ClientFrame =
-  | { type: "user.start"; turn_id: string; chunk: string; persona: PersonaId; voice: string; speed: number }
-  | { type: "user.stop"; turn_id: string }
+  | {
+      type: "user.start";
+      turn_id: string;
+      chunk?: string;
+      persona?: PersonaId;
+      voice?: string;
+      speed?: number;
+      custom_voice?: string;
+      custom_speed?: number;
+      custom_tone?: string;
+      custom_stalls?: string[];
+      system_prompt?: string;
+    }
+  | {
+      type: "user.chunk";
+      turn_id: string;
+      chunk: string;
+    }
+  | {
+      type: "user.stop";
+      turn_id: string;
+      pcm_b64?: string;
+      sample_rate?: number;
+    }
+  | {
+      type: "user.text";
+      turn_id: string;
+      text: string;
+      persona?: PersonaId;
+      voice?: string;
+      speed?: number;
+      custom_voice?: string;
+      custom_speed?: number;
+      custom_tone?: string;
+      custom_stalls?: string[];
+      system_prompt?: string;
+    }
   | { type: "barge"; turn_id: string };
 
 // ---- Frames: server -> client ----
 export type ServerFrame =
-  | { type: "agent.stall"; turn_id: string; phrase_id: string; audio_url?: string }
-  | { type: "agent.sentence"; turn_id: string; index: number; text: string; audio_url: string }
-  | { type: "agent.done"; turn_id: string }
+  | { type: "agent.stall"; turn_id: string; phrase_id: string; text?: string; audio_url?: string }
+  | { type: "agent.sentence"; turn_id: string; index?: number; seq?: number; text: string; audio_url: string }
+  | { type: "agent.done"; turn_id: string; path?: string; sentences?: number }
+  | { type: "agent.error"; turn_id: string; reason: string; detail?: string }
   | { type: "state.idle"; turn_id: string }
   | { type: "state.listening"; turn_id: string }
   | { type: "state.thinking"; turn_id: string }

@@ -102,3 +102,62 @@ def load_persona(name: str = "default", personas_dir: str = PERSONAS_DIR) -> Per
     if not isinstance(stalls, list) or not stalls:
         raise ValueError("persona_no_stalls: frontmatter needs a non-empty stalls list")
     return Persona(name=name, voice=str(voice), speed=speed, stalls=[str(s) for s in stalls], tone=tone)
+
+
+BUILTIN_PERSONAS = {"donna", "jarvis", "zuck", "default"}
+
+
+def list_personas(personas_dir: str = PERSONAS_DIR) -> list[Persona]:
+    """Return all available personas sorted by name."""
+    if not os.path.isdir(personas_dir):
+        return [load_persona("default", personas_dir=personas_dir)]
+    names = []
+    for fname in os.listdir(personas_dir):
+        if fname.endswith(".md"):
+            names.append(fname[:-3])
+    if not names:
+        names = ["default"]
+    personas = []
+    for name in sorted(names):
+        try:
+            personas.append(load_persona(name, personas_dir=personas_dir))
+        except Exception:
+            continue
+    return personas
+
+
+def save_persona(persona: Persona, personas_dir: str = PERSONAS_DIR) -> str:
+    """Save or update a persona as a Markdown frontmatter file."""
+    os.makedirs(personas_dir, exist_ok=True)
+    clean_name = "".join(c for c in persona.name if c.isalnum() or c in ("-", "_")).lower()
+    if not clean_name:
+        raise ValueError("persona_invalid_name: name must contain alphanumeric characters")
+    path = os.path.join(personas_dir, f"{clean_name}.md")
+
+    stalls_yaml = "\n".join(f"  - {s}" for s in (persona.stalls or DEFAULT_PERSONA["stalls"]))
+    first_line_tone = (persona.tone.splitlines()[0] if persona.tone else "Direct").strip()
+    content = f"""---
+voice: {persona.voice}
+speed: {persona.speed}
+stalls:
+{stalls_yaml}
+tone: {first_line_tone}
+---
+{persona.tone.strip()}
+"""
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+    return path
+
+
+def delete_persona(name: str, personas_dir: str = PERSONAS_DIR) -> bool:
+    """Delete a custom persona file. Built-ins are protected and fail-closed."""
+    clean_name = name.strip().lower()
+    if clean_name in BUILTIN_PERSONAS:
+        raise ValueError(f"cannot delete built-in persona '{name}'")
+    path = os.path.join(personas_dir, f"{clean_name}.md")
+    if os.path.isfile(path):
+        os.remove(path)
+        return True
+    return False
+

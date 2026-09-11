@@ -35,7 +35,7 @@ def parse_frontmatter(text):
     fm = {}
     for lineno, line in enumerate(m.group(1).splitlines(), 1):
         line = line.strip()
-        if not line or line.startswith("#"):
+        if not line or line.startswith("#") or line.startswith("- "):
             continue
         if ":" not in line:
             return None, "line %d not key: value (%r)" % (lineno, line)
