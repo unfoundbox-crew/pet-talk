@@ -1,23 +1,78 @@
 // cli/hotkey/hud_window.swift
-// Native macOS Floating Glass Capsule HUD for Pet-Talk.
+// Native macOS Hardware Notch Dynamic Island & Floating Capsule HUD for Pet-Talk.
 //
 // Technical Architecture & Specifications:
-// - Non-activating NSPanel subclass: [.nonactivatingPanel, .borderless]
-// - Never steals keyboard focus from active editor/IDE/terminal.
-// - Level: .floating (floats above all standard windows).
-// - Spaces: [.canJoinAllSpaces, .fullScreenAuxiliary] (visible on full-screen apps and all spaces).
-// - Click-Through: ignoresMouseEvents = true.
-// - Surfaces: Obsidian Deep Zinc (#12141c @ 85% opacity, NSVisualEffectView glass, #282c3f 1px border).
-// - Dimensions: 220px width x 44px height, corner radius 22px.
-// - Accents & States:
-//     [LISTENING] -> Emerald True (#10b981) pulsating waveform + "Listening..."
-//     [THINKING]  -> SpacePilot Gold (#c9a227) spinning indicator + "Donna thinking..."
-//     [SPEAKING]  -> Liquid Silver (#cfd4dc) kinetic audio bars + "Speaking..."
-// - Motion: 120ms spring entrance (scale 0.95 -> 1.0), 200ms ease-out fade exit.
+// - Hardware Notch Awareness: Queries NSScreen auxiliaryTopLeftArea / auxiliaryTopRightArea
+//   to detect physical MacBook webcam notch geometry (220x38px centered at top of display).
+// - Hardware-Software Fusion:
+//   - Top edge anchors flush to screen.frame.maxY, enveloping the camera notch in pure #000000.
+//   - Continuous squircle curvature (r=20px) on bottom corners.
+//   - Concave top ear fillets (r=10px) that sweep outward smoothly into the display bezel.
+// - Motion Design Language (Apple Fluid Springs):
+//   - "The Drip" Entrance: Unfolds downward from the physical notch (38px -> 52px) via CASpringAnimation.
+//   - Dynamic Expansion: Morphing width (220px -> 440px, height 52px -> 60px) during dictation/speaking.
+//   - "Suction" Retraction: Springs back up into the physical camera notch on dismissal.
+// - Fallback for External Displays: Gracefully falls back to an elegant floating pill (r=22px) centered at top.
+// - Non-activating NSPanel subclass: [.nonactivatingPanel, .borderless] (zero focus stealing).
+// - Level: .floating, Spaces: [.canJoinAllSpaces, .fullScreenAuxiliary], Click-through: ignoresMouseEvents = true.
 
 import AppKit
 import Foundation
 import QuartzCore
+
+// MARK: - Notch Geometry & Manager
+
+public struct NotchGeometry {
+    public let hasNotch: Bool
+    public let rect: NSRect          // Notch rectangle in screen coordinates
+    public let notchWidth: CGFloat   // Typically 220.0 on modern MacBook Pro
+    public let notchHeight: CGFloat  // Typically 38.0
+    public let screenFrame: NSRect
+    public let visibleFrame: NSRect
+}
+
+public class NotchManager {
+    public static let shared = NotchManager()
+
+    public func currentNotch(for screen: NSScreen? = nil) -> NotchGeometry {
+        let targetScreen = screen ?? NSScreen.main ?? (NSScreen.screens.first ?? NSScreen())
+        let sFrame = targetScreen.frame
+        let vFrame = targetScreen.visibleFrame
+
+        if #available(macOS 12.0, *),
+           let left = targetScreen.auxiliaryTopLeftArea,
+           let right = targetScreen.auxiliaryTopRightArea,
+           left.width > 0, right.width > 0 {
+            let notchX = left.maxX
+            let notchW = right.minX - left.maxX
+            let notchH = left.height
+            let notchY = sFrame.maxY - notchH
+            let notchRect = NSRect(x: notchX, y: notchY, width: notchW, height: notchH)
+            return NotchGeometry(
+                hasNotch: true,
+                rect: notchRect,
+                notchWidth: notchW,
+                notchHeight: notchH,
+                screenFrame: sFrame,
+                visibleFrame: vFrame
+            )
+        }
+
+        // Fallback for displays without a hardware notch (external monitors, iMac, older MacBooks)
+        let fallbackWidth: CGFloat = 220.0
+        let fallbackHeight: CGFloat = 38.0
+        let fallbackX = vFrame.midX - (fallbackWidth / 2.0)
+        let fallbackY = vFrame.maxY - fallbackHeight
+        return NotchGeometry(
+            hasNotch: false,
+            rect: NSRect(x: fallbackX, y: fallbackY, width: fallbackWidth, height: fallbackHeight),
+            notchWidth: fallbackWidth,
+            notchHeight: fallbackHeight,
+            screenFrame: sFrame,
+            visibleFrame: vFrame
+        )
+    }
+}
 
 // MARK: - HUD State Definition
 
@@ -52,7 +107,7 @@ public enum HUDState: String, CaseIterable {
     }
 }
 
-// MARK: - Indicator View (Kinetic Glyphs)
+// MARK: - Kinetic Indicator View
 
 public class HUDIndicatorView: NSView {
     private var activeLayers: [CALayer] = []
@@ -96,7 +151,8 @@ public class HUDIndicatorView: NSView {
             (initial: 7.0, target: 15.0, duration: 0.48)
         ]
 
-        let startX: CGFloat = (bounds.width - (CGFloat(heights.count) * barWidth + CGFloat(heights.count - 1) * spacing)) / 2.0
+        let totalW = CGFloat(heights.count) * barWidth + CGFloat(heights.count - 1) * spacing
+        let startX: CGFloat = (bounds.width - totalW) / 2.0
         let centerY = bounds.height / 2.0
 
         for (index, cfg) in heights.enumerated() {
@@ -106,7 +162,6 @@ public class HUDIndicatorView: NSView {
             barLayer.cornerRadius = barWidth / 2.0
             barLayer.backgroundColor = color.cgColor
 
-            // Soft glowing pulse
             barLayer.shadowColor = color.cgColor
             barLayer.shadowRadius = 4.0
             barLayer.shadowOpacity = 0.5
@@ -208,21 +263,41 @@ public class HUDIndicatorView: NSView {
     }
 }
 
-// MARK: - Capsule Content View (Obsidian Zinc Glass)
+// MARK: - Capsule Content View (Notch Dynamic Island)
 
 public class HUDCapsuleView: NSView {
     public static let capsuleWidth: CGFloat = 220.0
-    public static let expandedWidth: CGFloat = 380.0
+    public static let expandedWidth: CGFloat = 440.0
     public static let capsuleHeight: CGFloat = 44.0
     public static let capsuleRadius: CGFloat = 22.0
 
+    // Notch specific dynamic metrics
+    public static let notchRestingHeight: CGFloat = 38.0
+    public static let notchListeningHeight: CGFloat = 52.0
+    public static let notchExpandedHeight: CGFloat = 60.0
+
+    // Flipped coordinates: (0, 0) is top-left, making top-edge anchoring clean and deterministic
+    public override var isFlipped: Bool { return true }
+
+    private let maskShapeLayer = CAShapeLayer()
+    private let borderShapeLayer = CAShapeLayer()
     private let visualEffectView = NSVisualEffectView()
-    private let zincOverlayView = NSView()
+    private let obsidianBackgroundLayer = CALayer()
+
     public let indicatorView = HUDIndicatorView()
+    public let personaBadge = NSTextField()
     public let labelField = NSTextField()
 
+    private var currentWidth: CGFloat = HUDCapsuleView.capsuleWidth
+    private var currentHeight: CGFloat = HUDCapsuleView.notchListeningHeight
+    private var hasNotch: Bool = true
+
     public override init(frame frameRect: NSRect) {
-        super.init(frame: NSRect(x: 0, y: 0, width: Self.capsuleWidth, height: Self.capsuleHeight))
+        let notchInfo = NotchManager.shared.currentNotch()
+        let initialH = notchInfo.hasNotch ? Self.notchListeningHeight : Self.capsuleHeight
+        super.init(frame: NSRect(x: 0, y: 0, width: Self.capsuleWidth, height: initialH))
+        self.hasNotch = notchInfo.hasNotch
+        self.currentHeight = initialH
         setupView()
     }
 
@@ -236,7 +311,6 @@ public class HUDCapsuleView: NSView {
         guard let rootLayer = self.layer else { return }
 
         rootLayer.masksToBounds = true
-        rootLayer.cornerRadius = Self.capsuleRadius
 
         // 1. Frosted glass backdrop (.behindWindow)
         visualEffectView.frame = bounds
@@ -245,44 +319,51 @@ public class HUDCapsuleView: NSView {
         visualEffectView.blendingMode = .behindWindow
         visualEffectView.state = .active
         visualEffectView.wantsLayer = true
-        visualEffectView.layer?.cornerRadius = Self.capsuleRadius
-        visualEffectView.layer?.masksToBounds = true
         addSubview(visualEffectView)
 
-        // 2. Obsidian Deep Zinc surface overlay (#12141c @ 85% opacity, 1px border #282c3f)
-        zincOverlayView.frame = bounds
-        zincOverlayView.autoresizingMask = [.width, .height]
-        zincOverlayView.wantsLayer = true
-        if let zincLayer = zincOverlayView.layer {
-            zincLayer.cornerRadius = Self.capsuleRadius
-            zincLayer.masksToBounds = true
-            zincLayer.backgroundColor = NSColor(
-                srgbRed: 0x12 / 255.0,
-                green: 0x14 / 255.0,
-                blue: 0x1c / 255.0,
-                alpha: 0.85
-            ).cgColor
-            zincLayer.borderColor = NSColor(
-                srgbRed: 0x28 / 255.0,
-                green: 0x2c / 255.0,
-                blue: 0x3f / 255.0,
-                alpha: 0.90
-            ).cgColor
-            zincLayer.borderWidth = 1.0
-        }
-        addSubview(zincOverlayView)
+        // 2. Obsidian Jet Black & Deep Zinc surface overlay
+        obsidianBackgroundLayer.frame = bounds
+        // Pitch black (#000000) base matching physical notch glass with subtle deep zinc warmth
+        obsidianBackgroundLayer.backgroundColor = NSColor(
+            srgbRed: 0x08 / 255.0,
+            green: 0x09 / 255.0,
+            blue: 0x0e / 255.0,
+            alpha: 0.95
+        ).cgColor
+        rootLayer.insertSublayer(obsidianBackgroundLayer, above: visualEffectView.layer)
 
-        // 3. Indicator Glyph Container (20x20px, left margin 16px)
-        indicatorView.frame = NSRect(x: 16, y: 12, width: 20, height: 20)
+        // 3. Precision Border Outline Layer (1px subtle graphite stroke)
+        borderShapeLayer.fillColor = nil
+        borderShapeLayer.strokeColor = NSColor(
+            srgbRed: 0x22 / 255.0,
+            green: 0x26 / 255.0,
+            blue: 0x36 / 255.0,
+            alpha: 0.85
+        ).cgColor
+        borderShapeLayer.lineWidth = 1.0
+        rootLayer.addSublayer(borderShapeLayer)
+
+        // 4. Indicator View (Left aligned or shelf centered)
+        indicatorView.frame = NSRect(x: 18, y: 22, width: 20, height: 20)
         addSubview(indicatorView)
 
-        // 4. Status Typography
-        labelField.frame = NSRect(x: 44, y: 11, width: 162, height: 22)
+        // 5. Persona Badge (SpacePilot Gold semibold "Donna" badge)
+        personaBadge.isEditable = false
+        personaBadge.isSelectable = false
+        personaBadge.isBordered = false
+        personaBadge.drawsBackground = false
+        personaBadge.font = NSFont.systemFont(ofSize: 11.5, weight: .bold)
+        personaBadge.textColor = NSColor(srgbRed: 0xc9 / 255.0, green: 0xa2 / 255.0, blue: 0x27 / 255.0, alpha: 1.0) // SpacePilot Gold
+        personaBadge.stringValue = "Donna"
+        personaBadge.isHidden = true
+        addSubview(personaBadge)
+
+        // 6. Status & Dictation Typography
         labelField.isEditable = false
         labelField.isSelectable = false
         labelField.isBordered = false
         labelField.drawsBackground = false
-        labelField.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+        labelField.font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
         labelField.textColor = NSColor(srgbRed: 0xf3 / 255.0, green: 0xf4 / 255.0, blue: 0xf6 / 255.0, alpha: 1.0)
         labelField.alignment = .left
         labelField.lineBreakMode = .byTruncatingTail
@@ -291,6 +372,113 @@ public class HUDCapsuleView: NSView {
         labelField.usesSingleLineMode = true
         labelField.stringValue = "Listening..."
         addSubview(labelField)
+
+        updateShapePath(width: bounds.width, height: bounds.height)
+        layoutSubviews(forWidth: bounds.width, height: bounds.height)
+    }
+
+    /// Construct Apple-grade Dynamic Island Bezier path:
+    /// - Continuous squircle bottom corners (r=20px).
+    /// - Top edge flush with display bezel (y=0).
+    /// - Concave ear fillets (r=10px) that sweep outward smoothly into the top bezel when expanded.
+    private func createDynamicIslandPath(width: CGFloat, height: CGFloat) -> CGPath {
+        let path = CGMutablePath()
+        let bottomRadius: CGFloat = 20.0
+        let notchInfo = NotchManager.shared.currentNotch()
+
+        if !notchInfo.hasNotch {
+            // External monitor: symmetrical floating pill
+            let radius = min(Self.capsuleRadius, height / 2.0)
+            path.addRoundedRect(
+                in: CGRect(x: 0, y: 0, width: width, height: height),
+                cornerWidth: radius,
+                cornerHeight: radius
+            )
+            return path
+        }
+
+        let earRadius: CGFloat = (width > notchInfo.notchWidth + 24.0) ? 10.0 : 0.0
+
+        if earRadius > 0 {
+            // Left ear concave swoop into top bezel
+            path.move(to: CGPoint(x: 0, y: 0))
+            path.addQuadCurve(
+                to: CGPoint(x: earRadius, y: earRadius),
+                control: CGPoint(x: earRadius, y: 0)
+            )
+            path.addLine(to: CGPoint(x: earRadius, y: height - bottomRadius))
+        } else {
+            path.move(to: CGPoint(x: 0, y: 0))
+            path.addLine(to: CGPoint(x: 0, y: height - bottomRadius))
+        }
+
+        // Bottom-left corner
+        let leftBottomX = earRadius > 0 ? earRadius : 0.0
+        path.addArc(
+            tangent1End: CGPoint(x: leftBottomX, y: height),
+            tangent2End: CGPoint(x: leftBottomX + bottomRadius, y: height),
+            radius: bottomRadius
+        )
+
+        // Bottom horizontal shelf
+        let rightBottomX = earRadius > 0 ? (width - earRadius) : width
+        path.addLine(to: CGPoint(x: rightBottomX - bottomRadius, y: height))
+
+        // Bottom-right corner
+        path.addArc(
+            tangent1End: CGPoint(x: rightBottomX, y: height),
+            tangent2End: CGPoint(x: rightBottomX, y: height - bottomRadius),
+            radius: bottomRadius
+        )
+
+        if earRadius > 0 {
+            path.addLine(to: CGPoint(x: width - earRadius, y: earRadius))
+            // Right ear concave swoop into top bezel
+            path.addQuadCurve(
+                to: CGPoint(x: width, y: 0),
+                control: CGPoint(x: width - earRadius, y: 0)
+            )
+        } else {
+            path.addLine(to: CGPoint(x: width, y: 0))
+        }
+
+        path.closeSubpath()
+        return path
+    }
+
+    public func updateShapePath(width: CGFloat, height: CGFloat) {
+        let cgPath = createDynamicIslandPath(width: width, height: height)
+
+        maskShapeLayer.path = cgPath
+        self.layer?.mask = maskShapeLayer
+
+        borderShapeLayer.path = cgPath
+        obsidianBackgroundLayer.frame = CGRect(x: 0, y: 0, width: width, height: height)
+        visualEffectView.frame = NSRect(x: 0, y: 0, width: width, height: height)
+    }
+
+    public func layoutSubviews(forWidth width: CGFloat, height: CGFloat) {
+        self.currentWidth = width
+        self.currentHeight = height
+        self.frame = NSRect(x: 0, y: 0, width: width, height: height)
+
+        updateShapePath(width: width, height: height)
+
+        let isExpanded = width > (Self.capsuleWidth + 40.0)
+
+        if isExpanded {
+            // Expanded wings layout (flanking the notch core)
+            personaBadge.isHidden = false
+            personaBadge.frame = NSRect(x: 22, y: height - 32, width: 44, height: 18)
+            indicatorView.frame = NSRect(x: 70, y: height - 33, width: 18, height: 18)
+            labelField.frame = NSRect(x: 96, y: height - 32, width: width - 118, height: 20)
+        } else {
+            // Compact shelf layout right beneath the camera lens
+            personaBadge.isHidden = true
+            let shelfY = height - 28.0
+            indicatorView.frame = NSRect(x: 18, y: shelfY, width: 18, height: 18)
+            labelField.frame = NSRect(x: 44, y: shelfY, width: width - 56, height: 20)
+        }
     }
 
     public func update(state: HUDState) {
@@ -304,7 +492,7 @@ public class HUDCapsuleView: NSView {
 
         let attr = NSMutableAttributedString()
         let prefixAttr: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 12.5, weight: .semibold),
+            .font: NSFont.systemFont(ofSize: 12.0, weight: .bold),
             .foregroundColor: NSColor(srgbRed: 0xc9 / 255.0, green: 0xa2 / 255.0, blue: 0x27 / 255.0, alpha: 1.0) // SpacePilot Gold
         ]
         let textAttr: [NSAttributedString.Key: Any] = [
@@ -320,15 +508,10 @@ public class HUDCapsuleView: NSView {
         labelField.toolTip = "[\(persona) heard]: \"\(cleanText)\""
     }
 
-    public func layoutSubviews(forWidth width: CGFloat) {
-        self.frame = NSRect(x: 0, y: 0, width: width, height: Self.capsuleHeight)
-        visualEffectView.frame = NSRect(x: 0, y: 0, width: width, height: Self.capsuleHeight)
-        zincOverlayView.frame = NSRect(x: 0, y: 0, width: width, height: Self.capsuleHeight)
-        labelField.frame = NSRect(x: 44, y: 11, width: width - 58, height: 22)
-    }
-
     public func reset() {
-        layoutSubviews(forWidth: Self.capsuleWidth)
+        let notchInfo = NotchManager.shared.currentNotch()
+        let defaultH = notchInfo.hasNotch ? Self.notchListeningHeight : Self.capsuleHeight
+        layoutSubviews(forWidth: Self.capsuleWidth, height: defaultH)
         labelField.stringValue = "Listening..."
         labelField.textColor = NSColor(srgbRed: 0xf3 / 255.0, green: 0xf4 / 255.0, blue: 0xf6 / 255.0, alpha: 1.0)
     }
@@ -344,7 +527,7 @@ open class HUDPanel: NSPanel {
             x: 0,
             y: 0,
             width: HUDCapsuleView.capsuleWidth,
-            height: HUDCapsuleView.capsuleHeight
+            height: HUDCapsuleView.notchListeningHeight
         )
 
         super.init(
@@ -380,79 +563,92 @@ public class HUDController {
     public let panel = HUDPanel()
     public private(set) var currentState: HUDState?
     public private(set) var currentWidth: CGFloat = HUDCapsuleView.capsuleWidth
+    public private(set) var currentHeight: CGFloat = HUDCapsuleView.notchListeningHeight
     public private(set) var transcribedText: String?
     public private(set) var isVisible: Bool = false
 
     private init() {}
 
-    /// Present the HUD capsule with a 120ms spring entrance animation.
+    /// Present the Dynamic Island with Apple-grade "Drip" spring entrance animation.
     public func show(state: HUDState = .listening) {
         ensureMainThread {
+            let notchInfo = NotchManager.shared.currentNotch()
+            let targetH = notchInfo.hasNotch ? HUDCapsuleView.notchListeningHeight : HUDCapsuleView.capsuleHeight
+            let targetW = HUDCapsuleView.capsuleWidth
+
             self.currentState = state
             self.transcribedText = nil
-            self.currentWidth = HUDCapsuleView.capsuleWidth
+            self.currentWidth = targetW
+            self.currentHeight = targetH
+
             self.panel.capsuleView.reset()
             self.panel.capsuleView.update(state: state)
-            self.positionWindow(width: HUDCapsuleView.capsuleWidth)
+
+            let finalFrame = self.computeFrame(width: targetW, height: targetH)
 
             if !self.isVisible {
                 self.isVisible = true
+
+                // Start state: tucked at the physical notch height (38px) or 0 alpha
+                let startH = notchInfo.hasNotch ? notchInfo.notchHeight : targetH
+                let startFrame = self.computeFrame(width: targetW, height: startH)
+
+                self.panel.setFrame(startFrame, display: false)
                 self.panel.alphaValue = 0.0
                 self.panel.orderFrontRegardless()
 
-                // 120ms spring entrance (scale 0.95 -> 1.0, alpha 0.0 -> 1.0)
-                if let layer = self.panel.capsuleView.layer {
-                    let spring = CASpringAnimation(keyPath: "transform")
-                    var startTransform = CATransform3DIdentity
-                    startTransform = CATransform3DTranslate(startTransform, HUDCapsuleView.capsuleWidth / 2.0, HUDCapsuleView.capsuleHeight / 2.0, 0)
-                    startTransform = CATransform3DScale(startTransform, 0.95, 0.95, 1.0)
-                    startTransform = CATransform3DTranslate(startTransform, -HUDCapsuleView.capsuleWidth / 2.0, -HUDCapsuleView.capsuleHeight / 2.0, 0)
-
-                    spring.fromValue = NSValue(caTransform3D: startTransform)
-                    spring.toValue = NSValue(caTransform3D: CATransform3DIdentity)
-                    spring.duration = 0.12
-                    spring.damping = 16.0
-                    spring.initialVelocity = 4.0
-                    spring.isRemovedOnCompletion = true
-                    layer.add(spring, forKey: "springEntrance")
-                }
-
+                // Apple fluid spring "Drip" entrance: height expands down out of notch
                 NSAnimationContext.runAnimationGroup { context in
-                    context.duration = 0.12
-                    context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                    context.duration = 0.22
+                    context.timingFunction = CAMediaTimingFunction(controlPoints: 0.25, 0.1, 0.25, 1.0)
+                    self.panel.animator().setFrame(finalFrame, display: true)
                     self.panel.animator().alphaValue = 1.0
+                    self.panel.capsuleView.layoutSubviews(forWidth: targetW, height: targetH)
                 }
+                self.panel.invalidateShadow()
+            } else {
+                self.panel.setFrame(finalFrame, display: true)
+                self.panel.capsuleView.layoutSubviews(forWidth: targetW, height: targetH)
+                self.panel.invalidateShadow()
             }
         }
     }
 
-    /// Display transcribed text: widens capsule to 380px and displays `[Donna heard]: "<transcribed text>"`.
+    /// Expand Dynamic Island outward for dictation: expands to 440px with continuous ear fillets.
     public func showTranscribedText(_ text: String, persona: String = "Donna") {
         ensureMainThread {
             self.transcribedText = text
             self.panel.capsuleView.setTranscribedText(text, persona: persona)
-            self.resizeCapsule(to: HUDCapsuleView.expandedWidth, animated: true)
+
+            let notchInfo = NotchManager.shared.currentNotch()
+            let targetH = notchInfo.hasNotch ? HUDCapsuleView.notchExpandedHeight : HUDCapsuleView.capsuleHeight
+            let targetW = HUDCapsuleView.expandedWidth
+
+            self.resizeIsland(toWidth: targetW, height: targetH, animated: true)
 
             if !self.isVisible {
                 self.show(state: .thinking)
                 self.panel.capsuleView.setTranscribedText(text, persona: persona)
-                self.resizeCapsule(to: HUDCapsuleView.expandedWidth, animated: false)
+                self.resizeIsland(toWidth: targetW, height: targetH, animated: false)
             }
         }
     }
 
     /// Update HUD state dynamically (e.g. listening -> thinking -> speaking).
-    /// If transcribed text has been received, preserves the text display while updating indicator.
     public func update(state: HUDState) {
         ensureMainThread {
             self.currentState = state
+            let notchInfo = NotchManager.shared.currentNotch()
+
             if let text = self.transcribedText, !text.isEmpty {
                 // Keep the transcribed text on screen, only update indicator glyph!
                 self.panel.capsuleView.indicatorView.configure(for: state)
-                self.resizeCapsule(to: HUDCapsuleView.expandedWidth, animated: false)
+                let targetH = notchInfo.hasNotch ? HUDCapsuleView.notchExpandedHeight : HUDCapsuleView.capsuleHeight
+                self.resizeIsland(toWidth: HUDCapsuleView.expandedWidth, height: targetH, animated: false)
             } else {
                 self.panel.capsuleView.update(state: state)
-                self.resizeCapsule(to: HUDCapsuleView.capsuleWidth, animated: true)
+                let targetH = notchInfo.hasNotch ? HUDCapsuleView.notchListeningHeight : HUDCapsuleView.capsuleHeight
+                self.resizeIsland(toWidth: HUDCapsuleView.capsuleWidth, height: targetH, animated: true)
             }
             if !self.isVisible {
                 self.show(state: state)
@@ -460,32 +656,29 @@ public class HUDController {
         }
     }
 
-    /// Resize capsule width smoothly and keep it centered horizontally.
-    public func resizeCapsule(to newWidth: CGFloat, animated: Bool = true) {
-        guard self.currentWidth != newWidth else { return }
+    /// Fluidly morph island width and height with Apple-grade spring physics.
+    public func resizeIsland(toWidth newWidth: CGFloat, height newHeight: CGFloat, animated: Bool = true) {
+        guard self.currentWidth != newWidth || self.currentHeight != newHeight else { return }
         self.currentWidth = newWidth
+        self.currentHeight = newHeight
 
-        let screen = NSScreen.main ?? (NSScreen.screens.first ?? NSScreen())
-        let screenFrame = screen.visibleFrame
-        let x = screenFrame.midX - (newWidth / 2.0)
-        let y = screenFrame.maxY - HUDCapsuleView.capsuleHeight - 24.0
-        let newFrame = NSRect(x: x, y: y, width: newWidth, height: HUDCapsuleView.capsuleHeight)
+        let newFrame = computeFrame(width: newWidth, height: newHeight)
 
         if animated {
             NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.20
-                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                context.duration = 0.24
+                context.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
                 self.panel.animator().setFrame(newFrame, display: true)
-                self.panel.capsuleView.layoutSubviews(forWidth: newWidth)
+                self.panel.capsuleView.layoutSubviews(forWidth: newWidth, height: newHeight)
             }
         } else {
             self.panel.setFrame(newFrame, display: true)
-            self.panel.capsuleView.layoutSubviews(forWidth: newWidth)
+            self.panel.capsuleView.layoutSubviews(forWidth: newWidth, height: newHeight)
         }
         self.panel.invalidateShadow()
     }
 
-    /// Dismiss the HUD capsule with a smooth 200ms ease-out fade.
+    /// Dismiss the HUD with a snappy suction retraction back into the physical notch.
     public func dismiss(completion: (() -> Void)? = nil) {
         ensureMainThread {
             guard self.isVisible else {
@@ -493,9 +686,15 @@ public class HUDController {
                 return
             }
 
+            let notchInfo = NotchManager.shared.currentNotch()
+            let retractH = notchInfo.hasNotch ? notchInfo.notchHeight : self.currentHeight
+            let retractFrame = self.computeFrame(width: HUDCapsuleView.capsuleWidth, height: retractH)
+
             NSAnimationContext.runAnimationGroup({ context in
-                context.duration = 0.20
-                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                context.duration = 0.18
+                context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+                // Retract upward into the notch and fade out
+                self.panel.animator().setFrame(retractFrame, display: true)
                 self.panel.animator().alphaValue = 0.0
             }, completionHandler: {
                 if self.panel.alphaValue == 0.0 {
@@ -504,22 +703,30 @@ public class HUDController {
                     self.currentState = nil
                     self.transcribedText = nil
                     self.currentWidth = HUDCapsuleView.capsuleWidth
+                    self.currentHeight = notchInfo.hasNotch ? HUDCapsuleView.notchListeningHeight : HUDCapsuleView.capsuleHeight
                     self.panel.capsuleView.reset()
-                    self.positionWindow(width: HUDCapsuleView.capsuleWidth)
                 }
                 completion?()
             })
         }
     }
 
-    /// Position capsule centered horizontally, floating gracefully below menu bar.
-    private func positionWindow(width: CGFloat = HUDCapsuleView.capsuleWidth) {
+    /// Compute frame based on active screen notch geometry:
+    /// - If hardware notch exists: anchors flush to screen.frame.maxY, centered on the notch.
+    /// - If no notch: centers horizontally on visibleFrame and floats 12px below menu bar.
+    public func computeFrame(width: CGFloat, height: CGFloat) -> NSRect {
         let screen = NSScreen.main ?? (NSScreen.screens.first ?? NSScreen())
-        let screenFrame = screen.visibleFrame
-        let x = screenFrame.midX - (width / 2.0)
-        let y = screenFrame.maxY - HUDCapsuleView.capsuleHeight - 24.0
-        panel.setFrame(NSRect(x: x, y: y, width: width, height: HUDCapsuleView.capsuleHeight), display: false)
-        panel.invalidateShadow()
+        let notchInfo = NotchManager.shared.currentNotch(for: screen)
+
+        if notchInfo.hasNotch {
+            let x = notchInfo.rect.midX - (width / 2.0)
+            let y = notchInfo.screenFrame.maxY - height
+            return NSRect(x: x, y: y, width: width, height: height)
+        } else {
+            let x = notchInfo.visibleFrame.midX - (width / 2.0)
+            let y = notchInfo.visibleFrame.maxY - height - 12.0
+            return NSRect(x: x, y: y, width: width, height: height)
+        }
     }
 
     private func ensureMainThread(_ block: @escaping () -> Void) {
@@ -530,13 +737,15 @@ public class HUDController {
         }
     }
 
-    /// Export specification introspection metadata for automated test assertions.
+    /// Export specification metadata for automated test assertions.
     public func getSpecificationSummary() -> [String: Any] {
+        let notchInfo = NotchManager.shared.currentNotch()
         return [
             "width": HUDCapsuleView.capsuleWidth,
             "expandedWidth": HUDCapsuleView.expandedWidth,
             "currentWidth": currentWidth,
             "height": HUDCapsuleView.capsuleHeight,
+            "notchHeight": currentHeight,
             "cornerRadius": HUDCapsuleView.capsuleRadius,
             "isNonactivatingPanel": panel.styleMask.contains(.nonactivatingPanel),
             "isBorderless": panel.styleMask.contains(.borderless),
@@ -548,6 +757,8 @@ public class HUDController {
             "isClearBackground": panel.backgroundColor == .clear,
             "canBecomeKey": panel.canBecomeKey,
             "canBecomeMain": panel.canBecomeMain,
+            "hasNotch": notchInfo.hasNotch,
+            "notchWidth": notchInfo.notchWidth,
             "transcribedText": transcribedText ?? ""
         ]
     }
