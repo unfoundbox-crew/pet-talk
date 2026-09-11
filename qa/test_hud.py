@@ -66,38 +66,84 @@ class TestHUDCompilation(unittest.TestCase):
 
 
 class TestHUDWindowSpecifications(unittest.TestCase):
-    """Verify window properties, nonactivating flags, and frame dimensions."""
+    """Verify window properties, nonactivating flags, notch specs, and motion tokens."""
 
-    def test_window_geometry_and_nonactivating_flags(self):
+    @classmethod
+    def setUpClass(cls):
         res = subprocess.run(
             [BIN_PATH, "--dump-hud-spec"],
             capture_output=True,
             text=True,
         )
-        self.assertEqual(res.returncode, 0, f"--dump-hud-spec failed:\n{res.stderr}")
-        
-        data = json.loads(res.stdout)
-        
-        # 1. Visual Capsule Frame Geometry
-        self.assertEqual(data.get("width"), 220.0, "Capsule width must be 220px")
-        self.assertEqual(data.get("height"), 44.0, "Capsule height must be 44px")
-        self.assertEqual(data.get("cornerRadius"), 22.0, "Corner radius must be 22px")
+        assert res.returncode == 0, f"--dump-hud-spec failed:\n{res.stderr}"
+        cls.spec = json.loads(res.stdout)
 
-        # 2. Non-activating style masks (CRUCIAL: never steal keyboard focus)
+    def test_nonactivating_window_properties(self):
+        """CRUCIAL: Ensure window never steals keyboard focus or activates."""
+        data = self.spec
         self.assertTrue(data.get("isNonactivatingPanel"), "Must have .nonactivatingPanel styleMask")
         self.assertTrue(data.get("isBorderless"), "Must have .borderless styleMask")
         self.assertFalse(data.get("canBecomeKey"), "canBecomeKey must be false")
         self.assertFalse(data.get("canBecomeMain"), "canBecomeMain must be false")
 
-        # 3. Floating window level & multi-space visibility
+        # Floating window level & multi-space visibility
         self.assertTrue(data.get("isFloatingLevel"), "Window level must be .floating")
         self.assertTrue(data.get("canJoinAllSpaces"), "collectionBehavior must include .canJoinAllSpaces")
         self.assertTrue(data.get("fullScreenAuxiliary"), "collectionBehavior must include .fullScreenAuxiliary")
 
-        # 4. Click-through and transparency
+        # Click-through and transparency
         self.assertTrue(data.get("ignoresMouseEvents"), "ignoresMouseEvents must be true for click-through")
         self.assertFalse(data.get("isOpaque"), "isOpaque must be false")
         self.assertTrue(data.get("isClearBackground"), "backgroundColor must be .clear")
+
+    def test_hardware_notch_specifications(self):
+        """Verify dynamic island notch dimensions, ear fillets, and squircle curvature."""
+        data = self.spec
+        notch_specs = data.get("notchSpecs")
+        self.assertIsInstance(notch_specs, dict, "Must export notchSpecs dictionary")
+
+        self.assertEqual(notch_specs.get("restingHeight"), 38.0, "Hardware notch resting height is 38px")
+        self.assertEqual(notch_specs.get("listeningHeight"), 52.0, "Listening drip height is 52px")
+        self.assertEqual(notch_specs.get("expandedHeight"), 60.0, "Expanded blossom height is 60px")
+
+        self.assertEqual(notch_specs.get("restingWidth"), 220.0, "Hardware notch resting width is 220px")
+        self.assertEqual(notch_specs.get("expandedWidth"), 440.0, "Blossom expanded width is 440px")
+
+        self.assertEqual(notch_specs.get("earFilletRadius"), 10.0, "Top concave ear fillets radius is 10px")
+        self.assertEqual(notch_specs.get("bottomCornerRadius"), 20.0, "Bottom continuous squircle radius is 20px")
+        self.assertEqual(notch_specs.get("fallbackCornerRadius"), 22.0, "External monitor pill radius is 22px")
+        self.assertEqual(notch_specs.get("hoverPeekHeight"), 6.0, "Hover peek shelf height is 6px")
+
+        self.assertIn("hasNotch", data, "Must detect whether active screen has hardware notch")
+        self.assertGreaterEqual(data.get("notchWidth", 0), 220.0, "Notch width must be >= 220px")
+
+    def test_apple_motion_tokens(self):
+        """Verify Apple fluid spring physics and timing tokens (SPEC-PET-TALK-004 Sec 3)."""
+        data = self.spec
+        motion = data.get("motionTokens")
+        self.assertIsInstance(motion, dict, "Must export motionTokens dictionary")
+
+        # Apple Fluid Spring Parameters
+        self.assertEqual(motion.get("springStiffness"), 220.0, "Apple spring stiffness must be 220.0")
+        self.assertEqual(motion.get("springDamping"), 21.0, "Apple spring damping must be 21.0")
+        self.assertEqual(motion.get("springMass"), 1.0, "Apple spring mass must be 1.0")
+
+        # Duration Tokens
+        self.assertAlmostEqual(motion.get("dripDuration"), 0.22, places=2, msg="Drip entrance must be 220ms")
+        self.assertAlmostEqual(motion.get("blossomDuration"), 0.24, places=2, msg="Island blossom must be 240ms")
+        self.assertAlmostEqual(motion.get("stateTransitionDuration"), 0.16, places=2, msg="State transition must be 160ms")
+        self.assertAlmostEqual(motion.get("suctionRetractionDuration"), 0.18, places=2, msg="Suction retraction must be 180ms")
+        self.assertAlmostEqual(motion.get("reduceMotionDuration"), 0.08, places=2, msg="Reduce motion crossfade must be 80ms")
+
+        # Error Shake Tokens
+        self.assertAlmostEqual(motion.get("errorShakeDuration"), 0.12, places=2, msg="Error shake duration must be 120ms")
+        self.assertEqual(motion.get("errorShakeAmplitude"), 3.0, "Error shake amplitude must be ±3px")
+        self.assertEqual(motion.get("errorShakeCycles"), 3, "Error shake must be 3 cycles")
+
+    def test_error_shake_capability(self):
+        """Verify dynamic island error shake feedback capability is enabled."""
+        data = self.spec
+        self.assertTrue(data.get("errorShakeSupported"), "errorShakeSupported must be true")
 
 
 class TestHUDInteractiveSequence(unittest.TestCase):
@@ -114,7 +160,9 @@ class TestHUDInteractiveSequence(unittest.TestCase):
         self.assertIn("Testing Pet-Talk Floating Glass Capsule HUD", res.stdout)
         self.assertIn("[LISTENING] Emerald True (#10b981)", res.stdout)
         self.assertIn("[THINKING] SpacePilot Gold (#c9a227)", res.stdout)
+        self.assertIn("[EXPANDED DICTATION]", res.stdout)
         self.assertIn("[SPEAKING] Liquid Silver (#cfd4dc)", res.stdout)
+        self.assertIn("[ERROR SHAKE]", res.stdout)
         self.assertIn("PASS: HUD visual test sequence completed.", res.stdout)
 
 

@@ -112,19 +112,28 @@ class HotkeyListener {
     }
 
     func logCliOutput(_ text: String) {
+        // Suppress high-frequency acoustic telemetry lines ([RMS: ...]) from polluting the log
+        let cleaned = text.components(separatedBy: .newlines).filter { line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            return !trimmed.hasPrefix("[RMS:") && !trimmed.hasPrefix("[rms:")
+        }.joined(separator: "\n")
+        let trimmedCleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedCleaned.isEmpty else { return }
+
+        let payload = cleaned.hasSuffix("\n") ? cleaned : cleaned + "\n"
         if isDaemon {
             if !FileManager.default.fileExists(atPath: HotkeyConfig.logFile) {
                 FileManager.default.createFile(atPath: HotkeyConfig.logFile, contents: nil)
             }
             if let handle = FileHandle(forWritingAtPath: HotkeyConfig.logFile) {
                 handle.seekToEndOfFile()
-                if let data = text.data(using: .utf8) {
+                if let data = payload.data(using: .utf8) {
                     handle.write(data)
                 }
                 handle.closeFile()
             }
         } else {
-            fputs(text, stdout)
+            fputs(payload, stdout)
             fflush(stdout)
         }
     }
@@ -170,6 +179,51 @@ class HotkeyListener {
             }
         }
         return nil
+    }
+
+    /// Extract real-time microphone acoustic energy levels (RMS / Peak amplitude) from pet-talk-cli stdout stream.
+    /// Supports:
+    ///   [RMS: 0.245, PEAK: 0.512]
+    ///   [RMS: 0.245, peak: 0.512]
+    ///   [RMS: 0.245, 0.512]
+    ///   [RMS: rms=0.245, peak=0.512]
+    ///   [RMS: 0.245]
+    static func parseRMSTelemetry(from text: String) -> [(rms: Float, peak: Float)] {
+        let pattern = #"(?i)\[RMS:\s*(?:rms=)?([0-9.]+)(?:[,\s]+(?:(?:PEAK|peak)=?|peak:?)?\s*([0-9.]+))?\]"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return [] }
+        let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
+        let matches = regex.matches(in: text, options: [], range: nsRange)
+
+        var results: [(rms: Float, peak: Float)] = []
+        for match in matches {
+            guard let rmsRange = Range(match.range(at: 1), in: text),
+                  let rmsVal = Float(text[rmsRange]) else { continue }
+
+            var peakVal = rmsVal
+            if match.numberOfRanges > 2 && match.range(at: 2).location != NSNotFound,
+               let peakRange = Range(match.range(at: 2), in: text),
+               let parsedPeak = Float(text[peakRange]) {
+                peakVal = parsedPeak
+            } else {
+                peakVal = min(1.0, rmsVal * 1.5)
+            }
+            results.append((rms: rmsVal, peak: peakVal))
+        }
+        return results
+    }
+
+    func handleBargeKill() {
+        log("+-- [ESCAPE] Barge-kill triggered")
+        let (killedAfplay, bargeMs) = ProcessManager.killAfplay()
+        if killedAfplay > 0 {
+            log("| [barge-in] Killed \(killedAfplay) afplay process(es) in \(String(format: "%.2f", bargeMs))ms")
+        }
+        if let proc = activeCliProc, proc.isRunning {
+            proc.terminate()
+            activeCliProc = nil
+            log("| [barge-in] Terminated active pet-talk-cli process")
+        }
+        EarconEngine.shared.playBargeKill()
     }
 
     func handleHotKeyTrigger() {
@@ -231,6 +285,12 @@ class HotkeyListener {
             self?.logCliOutput(text)
             outputBuffer += text
 
+            // Parse live RMS acoustic telemetry emitted from pet-talk-cli and forward immediately
+            let telemetry = HotkeyListener.parseRMSTelemetry(from: text)
+            if let latest = telemetry.last {
+                HUDController.shared.updateAudioLevel(rms: latest.rms, peak: latest.peak)
+            }
+
             // Detect turn transitions from pet-talk-cli output
             if !silenceCutoffFired && (text.contains("[THINKING]") || text.contains("Transcribing") || text.contains("user.stop")) {
                 silenceCutoffFired = true
@@ -263,6 +323,7 @@ class HotkeyListener {
             }
             if text.contains("[ERROR]") || text.contains("Error:") {
                 EarconEngine.shared.playError()
+                HUDController.shared.triggerErrorShake()
             }
         }
 
@@ -349,6 +410,18 @@ class HotkeyListener {
         log("| Paste Injection: \(pasteEnabled ? "ENABLED (Wispr Flow style -> Cmd+V)" : "disabled (use --paste to enable)")")
         log("| Mode: \(isDaemon ? "Daemon (background)" : "Foreground")")
         log("| Ready for global Option+Tab barge-in turns (<0.1% CPU)...")
+
+        // Wire HUD Sensory Callbacks & Event Monitors (Escape barge-in, notch hover tracking)
+        HUDController.shared.onBargeKill = { [weak self] in
+            self?.handleBargeKill()
+        }
+        HUDController.shared.onErrorAudio = {
+            EarconEngine.shared.playError()
+        }
+        HUDController.shared.onTriggerTurn = { [weak self] in
+            self?.handleHotKeyTrigger()
+        }
+        HUDController.shared.setupEventMonitors()
 
         // 1. Install Carbon Event Handler on Event Dispatcher Target
         let eventHandler: EventHandlerUPP = { (_, _, _) -> OSStatus in
@@ -601,6 +674,19 @@ func doTestHUD() -> Int32 {
 
     HUDController.shared.show(state: .listening)
 
+    // Simulate acoustic microphone energy levels bouncing to speech
+    var pulseStep = 0
+    _ = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { timer in
+        pulseStep += 1
+        if pulseStep > 10 {
+            timer.invalidate()
+            return
+        }
+        let simRMS = Float(0.25 + 0.60 * sin(Double(pulseStep) * 0.7))
+        let simPeak = Float(min(1.0, simRMS * 1.35))
+        HUDController.shared.updateAudioLevel(rms: simRMS, peak: simPeak)
+    }
+
     DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
         print("| State 2 (1.2s): [THINKING] SpacePilot Gold (#c9a227) + 'Donna thinking...' (220px)")
         HUDController.shared.update(state: .thinking)
@@ -615,10 +701,15 @@ func doTestHUD() -> Int32 {
                 HUDController.shared.update(state: .speaking)
 
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                    print("| Dismissing HUD (200ms ease-out fade)...")
-                    HUDController.shared.dismiss {
-                        print("+-- PASS: HUD visual test sequence completed. (dictation & text preview)")
-                        CFRunLoopStop(CFRunLoopGetMain())
+                    print("| State 5 (0.5s): [ERROR SHAKE] 3-cycle ±3px micro-shake + Basso chime")
+                    HUDController.shared.shakeError {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                            print("| Dismissing HUD (200ms ease-out fade)...")
+                            HUDController.shared.dismiss {
+                                print("+-- PASS: HUD visual test sequence completed. (dictation & text preview)")
+                                CFRunLoopStop(CFRunLoopGetMain())
+                            }
+                        }
                     }
                 }
             }

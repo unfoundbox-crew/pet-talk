@@ -20,6 +20,29 @@ import AppKit
 import Foundation
 import QuartzCore
 
+// MARK: - Motion Design Language & Physics Tokens
+
+public struct HUDMotionTokens {
+    public static let springStiffness: Double = 220.0
+    public static let springDamping: Double = 21.0
+    public static let springMass: Double = 1.0
+    public static let dripDuration: Double = 0.22 // 220ms
+    public static let blossomDuration: Double = 0.24 // 240ms
+    public static let stateTransitionDuration: Double = 0.16 // 160ms
+    public static let suctionRetractionDuration: Double = 0.18 // 180ms
+    public static let errorShakeDuration: Double = 0.12 // 120ms
+    public static let errorShakeAmplitude: Double = 3.0 // ±3px
+    public static let errorShakeCycles: Int = 3
+    public static let reduceMotionDuration: Double = 0.08 // 80ms
+    public static let escapeDismissDuration: Double = 0.04 // 40ms (<= 50ms budget)
+
+    public static let blossomTimingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
+    public static let stateTransitionTimingFunction = CAMediaTimingFunction(name: .easeOut)
+    public static let suctionRetractionTimingFunction = CAMediaTimingFunction(name: .easeIn)
+}
+
+public typealias AppleMotionTokens = HUDMotionTokens
+
 // MARK: - Notch Geometry & Manager
 
 public struct NotchGeometry {
@@ -111,6 +134,11 @@ public enum HUDState: String, CaseIterable {
 
 public class HUDIndicatorView: NSView {
     private var activeLayers: [CALayer] = []
+    private var waveformBars: [CALayer] = []
+    private var smoothedRMS: Float = 0.0
+    private var smoothedPeak: Float = 0.0
+    private var decayTimer: Timer?
+    private var isAcousticListening: Bool = false
 
     public override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -124,8 +152,26 @@ public class HUDIndicatorView: NSView {
         self.layer?.masksToBounds = false
     }
 
+    deinit {
+        decayTimer?.invalidate()
+    }
+
+    public override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        if isAcousticListening {
+            applyBarHeights()
+        }
+    }
+
     public func configure(for state: HUDState) {
         guard let layer = self.layer else { return }
+
+        decayTimer?.invalidate()
+        decayTimer = nil
+        smoothedRMS = 0.0
+        smoothedPeak = 0.0
+        isAcousticListening = false
+        waveformBars.removeAll()
 
         // Remove existing sublayers and active animations
         activeLayers.forEach { $0.removeAllAnimations(); $0.removeFromSuperlayer() }
@@ -141,43 +187,131 @@ public class HUDIndicatorView: NSView {
         }
     }
 
-    // [LISTENING] Emerald True pulsating waveform
+    // [LISTENING] Emerald True acoustic waveform bars (Acoustic Truth: zero fake looping animations)
     private func setupListeningWaveform(parentLayer: CALayer, color: NSColor) {
-        let barWidth: CGFloat = 2.5
-        let spacing: CGFloat = 3.5
-        let heights: [(initial: CGFloat, target: CGFloat, duration: Double)] = [
-            (initial: 6.0, target: 14.0, duration: 0.42),
-            (initial: 12.0, target: 18.0, duration: 0.32),
-            (initial: 7.0, target: 15.0, duration: 0.48)
-        ]
+        isAcousticListening = true
+        waveformBars.removeAll()
 
-        let totalW = CGFloat(heights.count) * barWidth + CGFloat(heights.count - 1) * spacing
+        let barCount = 4
+        let barWidth: CGFloat = 2.0
+        let spacing: CGFloat = 2.0
+        let minHeight: CGFloat = 3.5
+
+        let totalW = CGFloat(barCount) * barWidth + CGFloat(barCount - 1) * spacing
         let startX: CGFloat = (bounds.width - totalW) / 2.0
         let centerY = bounds.height / 2.0
 
-        for (index, cfg) in heights.enumerated() {
+        for index in 0..<barCount {
             let barLayer = CALayer()
             let x = startX + CGFloat(index) * (barWidth + spacing)
-            barLayer.frame = CGRect(x: x, y: centerY - cfg.initial / 2.0, width: barWidth, height: cfg.initial)
+            barLayer.frame = CGRect(x: x, y: centerY - minHeight / 2.0, width: barWidth, height: minHeight)
             barLayer.cornerRadius = barWidth / 2.0
             barLayer.backgroundColor = color.cgColor
 
             barLayer.shadowColor = color.cgColor
-            barLayer.shadowRadius = 4.0
-            barLayer.shadowOpacity = 0.5
+            barLayer.shadowRadius = 3.0
+            barLayer.shadowOpacity = 0.55
             barLayer.shadowOffset = .zero
 
-            let anim = CABasicAnimation(keyPath: "bounds.size.height")
-            anim.fromValue = cfg.initial
-            anim.toValue = cfg.target
-            anim.duration = cfg.duration
-            anim.autoreverses = true
-            anim.repeatCount = .infinity
-            anim.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-
-            barLayer.add(anim, forKey: "pulseWaveform")
             parentLayer.addSublayer(barLayer)
             activeLayers.append(barLayer)
+            waveformBars.append(barLayer)
+        }
+    }
+
+    /// Update live acoustic energy levels (RMS and Peak amplitude, normalized 0.0 ... 1.0)
+    public func updateAudioLevel(rms: Float, peak: Float) {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.updateAudioLevel(rms: rms, peak: peak)
+            }
+            return
+        }
+
+        guard isAcousticListening, !waveformBars.isEmpty else { return }
+
+        // Normalize inputs (safely handles raw 16-bit PCM scale or 0.0 ... 1.0)
+        let normRMS: Float = rms > 1.0 ? min(1.0, max(0.0, rms / 8000.0)) : min(1.0, max(0.0, rms))
+        let normPeak: Float = peak > 1.0 ? min(1.0, max(0.0, peak / 32768.0)) : min(1.0, max(0.0, peak))
+
+        // Vocal cord acoustic filtering:
+        // Fast attack (~15ms) for crisp vocal onset, smooth springy decay to eliminate digital jitter
+        if normRMS > smoothedRMS {
+            smoothedRMS = smoothedRMS * 0.22 + normRMS * 0.78
+        } else {
+            smoothedRMS = smoothedRMS * 0.76 + normRMS * 0.24
+        }
+
+        if normPeak > smoothedPeak {
+            smoothedPeak = normPeak
+        } else {
+            smoothedPeak = smoothedPeak * 0.80
+        }
+
+        applyBarHeights()
+        startDecayTimerIfNeeded()
+    }
+
+    private func applyBarHeights() {
+        guard isAcousticListening, !waveformBars.isEmpty else { return }
+
+        let barCount = waveformBars.count
+        let barWidth: CGFloat = 2.0
+        let spacing: CGFloat = 2.0
+        let totalW = CGFloat(barCount) * barWidth + CGFloat(barCount - 1) * spacing
+        let startX = (bounds.width - totalW) / 2.0
+        let centerY = bounds.height / 2.0
+        let minHeight: CGFloat = 3.5
+        let maxHeight: CGFloat = max(minHeight, bounds.height > 4 ? bounds.height - 3.0 : 15.0)
+
+        // Vocal formant frequency weights across 4 bars (low resonance, core vocal 1 & 2, high sibilance)
+        let weights: [(rms: Float, peak: Float)] = [
+            (rms: 0.65, peak: 0.25),
+            (rms: 1.00, peak: 0.35),
+            (rms: 0.90, peak: 0.45),
+            (rms: 0.55, peak: 0.35)
+        ]
+
+        CATransaction.begin()
+        CATransaction.setAnimationDuration(0.04)
+        CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeOut))
+
+        for (index, bar) in waveformBars.enumerated() {
+            let w = index < weights.count ? weights[index] : (rms: 0.8, peak: 0.3)
+            let energy = min(1.0, max(0.0, smoothedRMS * w.rms + smoothedPeak * w.peak))
+            let barH = minHeight + CGFloat(energy) * (maxHeight - minHeight)
+            let x = startX + CGFloat(index) * (barWidth + spacing)
+            let y = centerY - (barH / 2.0)
+            bar.frame = CGRect(x: x, y: y, width: barWidth, height: barH)
+        }
+
+        CATransaction.commit()
+    }
+
+    private func startDecayTimerIfNeeded() {
+        guard decayTimer == nil else { return }
+        decayTimer = Timer.scheduledTimer(withTimeInterval: 0.033, repeats: true) { [weak self] timer in
+            guard let self = self else {
+                timer.invalidate()
+                return
+            }
+            if !self.isAcousticListening || self.waveformBars.isEmpty {
+                timer.invalidate()
+                self.decayTimer = nil
+                return
+            }
+
+            if self.smoothedRMS > 0.005 || self.smoothedPeak > 0.005 {
+                self.smoothedRMS *= 0.78
+                self.smoothedPeak *= 0.80
+                self.applyBarHeights()
+            } else {
+                self.smoothedRMS = 0.0
+                self.smoothedPeak = 0.0
+                self.applyBarHeights()
+                timer.invalidate()
+                self.decayTimer = nil
+            }
         }
     }
 
@@ -275,6 +409,9 @@ public class HUDCapsuleView: NSView {
     public static let notchRestingHeight: CGFloat = 38.0
     public static let notchListeningHeight: CGFloat = 52.0
     public static let notchExpandedHeight: CGFloat = 60.0
+    public static let earFilletRadius: CGFloat = 10.0
+    public static let bottomCornerRadius: CGFloat = 20.0
+    public static let hoverPeekHeight: CGFloat = 6.0
 
     // Flipped coordinates: (0, 0) is top-left, making top-edge anchoring clean and deterministic
     public override var isFlipped: Bool { return true }
@@ -287,6 +424,8 @@ public class HUDCapsuleView: NSView {
     public let indicatorView = HUDIndicatorView()
     public let personaBadge = NSTextField()
     public let labelField = NSTextField()
+    public let goldDotLayer = CALayer()
+    private var trackingArea: NSTrackingArea?
 
     private var currentWidth: CGFloat = HUDCapsuleView.capsuleWidth
     private var currentHeight: CGFloat = HUDCapsuleView.notchListeningHeight
@@ -373,8 +512,50 @@ public class HUDCapsuleView: NSView {
         labelField.stringValue = "Listening..."
         addSubview(labelField)
 
+        // 7. SpacePilot Gold Dot Layer for Subtle Notch Peek
+        goldDotLayer.bounds = CGRect(x: 0, y: 0, width: 6.0, height: 6.0)
+        goldDotLayer.cornerRadius = 3.0
+        let goldColor = NSColor(srgbRed: 0xc9 / 255.0, green: 0xa2 / 255.0, blue: 0x27 / 255.0, alpha: 1.0)
+        goldDotLayer.backgroundColor = goldColor.cgColor
+        goldDotLayer.shadowColor = goldColor.cgColor
+        goldDotLayer.shadowRadius = 3.0
+        goldDotLayer.shadowOpacity = 0.8
+        goldDotLayer.shadowOffset = .zero
+        goldDotLayer.opacity = 0.0
+        rootLayer.addSublayer(goldDotLayer)
+
         updateShapePath(width: bounds.width, height: bounds.height)
         layoutSubviews(forWidth: bounds.width, height: bounds.height)
+    }
+
+    public override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let existing = trackingArea {
+            removeTrackingArea(existing)
+        }
+        let options: NSTrackingArea.Options = [
+            .mouseEnteredAndExited,
+            .activeAlways,
+            .inVisibleRect
+        ]
+        let newArea = NSTrackingArea(rect: bounds, options: options, owner: self, userInfo: nil)
+        addTrackingArea(newArea)
+        trackingArea = newArea
+    }
+
+    public override func mouseEntered(with event: NSEvent) {
+        super.mouseEntered(with: event)
+        HUDController.shared.handleMouseEntered()
+    }
+
+    public override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        HUDController.shared.handleMouseExited()
+    }
+
+    public override func mouseDown(with event: NSEvent) {
+        super.mouseDown(with: event)
+        HUDController.shared.handleCapsuleClick()
     }
 
     /// Construct Apple-grade Dynamic Island Bezier path:
@@ -479,6 +660,9 @@ public class HUDCapsuleView: NSView {
             indicatorView.frame = NSRect(x: 18, y: shelfY, width: 18, height: 18)
             labelField.frame = NSRect(x: 44, y: shelfY, width: width - 56, height: 20)
         }
+
+        // Gold dot positioned at bottom center of the shelf
+        goldDotLayer.position = CGPoint(x: width / 2.0, y: height - 5.0)
     }
 
     public func update(state: HUDState) {
@@ -514,6 +698,12 @@ public class HUDCapsuleView: NSView {
         layoutSubviews(forWidth: Self.capsuleWidth, height: defaultH)
         labelField.stringValue = "Listening..."
         labelField.textColor = NSColor(srgbRed: 0xf3 / 255.0, green: 0xf4 / 255.0, blue: 0xf6 / 255.0, alpha: 1.0)
+        goldDotLayer.opacity = 0.0
+        indicatorView.isHidden = false
+    }
+
+    public func updateAudioLevel(rms: Float, peak: Float) {
+        indicatorView.updateAudioLevel(rms: rms, peak: peak)
     }
 }
 
@@ -566,12 +756,193 @@ public class HUDController {
     public private(set) var currentHeight: CGFloat = HUDCapsuleView.notchListeningHeight
     public private(set) var transcribedText: String?
     public private(set) var isVisible: Bool = false
+    public private(set) var isHoverPeekActive: Bool = false
+
+    // Sensory & Execution Callbacks
+    public var onBargeKill: (() -> Void)?
+    public var onErrorAudio: (() -> Void)?
+    public var onTriggerTurn: (() -> Void)?
+
+    private var localKeyMonitor: Any?
+    private var globalMouseMonitor: Any?
 
     private init() {}
+
+    /// Register local Escape monitor and global notch hover tracking
+    public func setupEventMonitors() {
+        ensureMainThread {
+            if self.localKeyMonitor == nil {
+                self.localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                    guard let self = self else { return event }
+                    // Escape key (keycode 53): instant <= 50ms dismiss and barge-kill
+                    if event.keyCode == 53 && (self.isVisible || self.isHoverPeekActive) {
+                        self.dismissWithBargeKill()
+                        return nil
+                    }
+                    return event
+                }
+            }
+
+            if self.globalMouseMonitor == nil {
+                self.globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: .mouseMoved) { [weak self] _ in
+                    guard let self = self else { return }
+                    let mouseLoc = NSEvent.mouseLocation
+                    let notchInfo = NotchManager.shared.currentNotch()
+                    guard notchInfo.hasNotch else { return }
+
+                    let notchH = notchInfo.notchHeight
+                    let notchW = HUDCapsuleView.capsuleWidth
+                    let notchX = notchInfo.screenFrame.midX - (notchW / 2.0)
+                    let notchY = notchInfo.screenFrame.maxY - notchH - HUDCapsuleView.hoverPeekHeight
+                    let notchZone = NSRect(
+                        x: notchX,
+                        y: notchY,
+                        width: notchW,
+                        height: notchH + HUDCapsuleView.hoverPeekHeight + 4.0
+                    )
+
+                    if notchZone.contains(mouseLoc) {
+                        if !self.isVisible && !self.isHoverPeekActive {
+                            self.showHoverPeek()
+                        }
+                    } else {
+                        if self.isHoverPeekActive {
+                            self.hideHoverPeek()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Subtle notch hover peek (6px downward expansion revealing SpacePilot Gold dot)
+    public func showHoverPeek() {
+        ensureMainThread {
+            guard !self.isVisible, !self.isHoverPeekActive else { return }
+            let notchInfo = NotchManager.shared.currentNotch()
+            guard notchInfo.hasNotch else { return }
+
+            self.isHoverPeekActive = true
+            let peekH = notchInfo.notchHeight + HUDCapsuleView.hoverPeekHeight
+            let frame = self.computeFrame(width: HUDCapsuleView.capsuleWidth, height: peekH)
+
+            self.panel.ignoresMouseEvents = false
+            self.panel.setFrame(frame, display: true)
+            self.panel.alphaValue = 1.0
+            self.panel.capsuleView.goldDotLayer.opacity = 1.0
+            self.panel.capsuleView.indicatorView.isHidden = true
+            self.panel.capsuleView.labelField.stringValue = ""
+            self.panel.orderFrontRegardless()
+        }
+    }
+
+    /// Snap hover peek back into the physical notch
+    public func hideHoverPeek() {
+        ensureMainThread {
+            guard self.isHoverPeekActive else { return }
+            self.isHoverPeekActive = false
+            self.panel.ignoresMouseEvents = true
+            self.panel.capsuleView.goldDotLayer.opacity = 0.0
+            self.panel.capsuleView.indicatorView.isHidden = false
+            self.panel.orderOut(nil)
+        }
+    }
+
+    public func handleMouseEntered() {
+        showHoverPeek()
+    }
+
+    public func handleMouseExited() {
+        hideHoverPeek()
+    }
+
+    public func handleCapsuleClick() {
+        ensureMainThread {
+            if self.isHoverPeekActive {
+                self.hideHoverPeek()
+                if let trigger = self.onTriggerTurn {
+                    trigger()
+                } else {
+                    self.show(state: .listening)
+                }
+            }
+        }
+    }
+
+    /// Instant Escape dismiss: terminates active speech/processes in <= 50ms
+    public func dismissWithBargeKill() {
+        ensureMainThread {
+            self.onBargeKill?()
+            if self.isHoverPeekActive {
+                self.hideHoverPeek()
+            }
+            if self.isVisible {
+                self.dismiss(immediate: true)
+            }
+        }
+    }
+
+    /// 3-cycle horizontal micro-shake feedback (±3px over 120ms) + Basso chime
+    public func triggerErrorShake(completion: (() -> Void)? = nil) {
+        ensureMainThread {
+            guard self.isVisible else {
+                completion?()
+                return
+            }
+
+            if let audio = self.onErrorAudio {
+                audio()
+            } else {
+                NSSound(named: "Basso")?.play()
+            }
+
+            guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+                completion?()
+                return
+            }
+
+            let shake = CAKeyframeAnimation(keyPath: "transform.translation.x")
+            shake.duration = HUDMotionTokens.errorShakeDuration
+            shake.values = [
+                0.0,
+                -HUDMotionTokens.errorShakeAmplitude,
+                HUDMotionTokens.errorShakeAmplitude,
+                -HUDMotionTokens.errorShakeAmplitude,
+                HUDMotionTokens.errorShakeAmplitude,
+                -2.0,
+                2.0,
+                0.0
+            ]
+            shake.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            shake.isRemovedOnCompletion = true
+            self.panel.capsuleView.layer?.add(shake, forKey: "errorShake")
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + HUDMotionTokens.errorShakeDuration) {
+                completion?()
+            }
+        }
+    }
+
+    /// Alias for triggerErrorShake
+    public func shakeError(completion: (() -> Void)? = nil) {
+        triggerErrorShake(completion: completion)
+    }
+
+    /// Real-time microphone acoustic energy levels (RMS / peak, normalized 0.0 ... 1.0)
+    public func updateAudioLevel(rms: Float, peak: Float) {
+        ensureMainThread {
+            guard self.isVisible, self.currentState == .listening else { return }
+            self.panel.capsuleView.updateAudioLevel(rms: rms, peak: peak)
+        }
+    }
 
     /// Present the Dynamic Island with Apple-grade "Drip" spring entrance animation.
     public func show(state: HUDState = .listening) {
         ensureMainThread {
+            if self.isHoverPeekActive {
+                self.hideHoverPeek()
+            }
+
             let notchInfo = NotchManager.shared.currentNotch()
             let targetH = notchInfo.hasNotch ? HUDCapsuleView.notchListeningHeight : HUDCapsuleView.capsuleHeight
             let targetW = HUDCapsuleView.capsuleWidth
@@ -589,21 +960,32 @@ public class HUDController {
             if !self.isVisible {
                 self.isVisible = true
 
-                // Start state: tucked at the physical notch height (38px) or 0 alpha
-                let startH = notchInfo.hasNotch ? notchInfo.notchHeight : targetH
-                let startFrame = self.computeFrame(width: targetW, height: startH)
+                if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                    self.panel.setFrame(finalFrame, display: false)
+                    self.panel.alphaValue = 0.0
+                    self.panel.orderFrontRegardless()
 
-                self.panel.setFrame(startFrame, display: false)
-                self.panel.alphaValue = 0.0
-                self.panel.orderFrontRegardless()
+                    NSAnimationContext.runAnimationGroup { context in
+                        context.duration = HUDMotionTokens.reduceMotionDuration
+                        context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                        self.panel.animator().alphaValue = 1.0
+                        self.panel.capsuleView.layoutSubviews(forWidth: targetW, height: targetH)
+                    }
+                } else {
+                    let startH = notchInfo.hasNotch ? notchInfo.notchHeight : targetH
+                    let startFrame = self.computeFrame(width: targetW, height: startH)
 
-                // Apple fluid spring "Drip" entrance: height expands down out of notch
-                NSAnimationContext.runAnimationGroup { context in
-                    context.duration = 0.22
-                    context.timingFunction = CAMediaTimingFunction(controlPoints: 0.25, 0.1, 0.25, 1.0)
-                    self.panel.animator().setFrame(finalFrame, display: true)
-                    self.panel.animator().alphaValue = 1.0
-                    self.panel.capsuleView.layoutSubviews(forWidth: targetW, height: targetH)
+                    self.panel.setFrame(startFrame, display: false)
+                    self.panel.alphaValue = 0.0
+                    self.panel.orderFrontRegardless()
+
+                    NSAnimationContext.runAnimationGroup { context in
+                        context.duration = HUDMotionTokens.dripDuration
+                        context.timingFunction = CAMediaTimingFunction(controlPoints: 0.25, 0.1, 0.25, 1.0)
+                        self.panel.animator().setFrame(finalFrame, display: true)
+                        self.panel.animator().alphaValue = 1.0
+                        self.panel.capsuleView.layoutSubviews(forWidth: targetW, height: targetH)
+                    }
                 }
                 self.panel.invalidateShadow()
             } else {
@@ -641,7 +1023,6 @@ public class HUDController {
             let notchInfo = NotchManager.shared.currentNotch()
 
             if let text = self.transcribedText, !text.isEmpty {
-                // Keep the transcribed text on screen, only update indicator glyph!
                 self.panel.capsuleView.indicatorView.configure(for: state)
                 let targetH = notchInfo.hasNotch ? HUDCapsuleView.notchExpandedHeight : HUDCapsuleView.capsuleHeight
                 self.resizeIsland(toWidth: HUDCapsuleView.expandedWidth, height: targetH, animated: false)
@@ -665,11 +1046,16 @@ public class HUDController {
         let newFrame = computeFrame(width: newWidth, height: newHeight)
 
         if animated {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.24
-                context.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
-                self.panel.animator().setFrame(newFrame, display: true)
+            if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                self.panel.setFrame(newFrame, display: true)
                 self.panel.capsuleView.layoutSubviews(forWidth: newWidth, height: newHeight)
+            } else {
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = HUDMotionTokens.blossomDuration
+                    context.timingFunction = HUDMotionTokens.blossomTimingFunction
+                    self.panel.animator().setFrame(newFrame, display: true)
+                    self.panel.capsuleView.layoutSubviews(forWidth: newWidth, height: newHeight)
+                }
             }
         } else {
             self.panel.setFrame(newFrame, display: true)
@@ -679,10 +1065,42 @@ public class HUDController {
     }
 
     /// Dismiss the HUD with a snappy suction retraction back into the physical notch.
-    public func dismiss(completion: (() -> Void)? = nil) {
+    public func dismiss(immediate: Bool = false, completion: (() -> Void)? = nil) {
         ensureMainThread {
             guard self.isVisible else {
                 completion?()
+                return
+            }
+
+            let cleanup: () -> Void = {
+                self.panel.orderOut(nil)
+                self.isVisible = false
+                self.currentState = nil
+                self.transcribedText = nil
+                let notchInfo = NotchManager.shared.currentNotch()
+                self.currentWidth = HUDCapsuleView.capsuleWidth
+                self.currentHeight = notchInfo.hasNotch ? HUDCapsuleView.notchListeningHeight : HUDCapsuleView.capsuleHeight
+                self.panel.capsuleView.reset()
+                completion?()
+            }
+
+            if immediate {
+                NSAnimationContext.runAnimationGroup({ context in
+                    context.duration = HUDMotionTokens.escapeDismissDuration
+                    self.panel.animator().alphaValue = 0.0
+                }, completionHandler: {
+                    cleanup()
+                })
+                return
+            }
+
+            if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                NSAnimationContext.runAnimationGroup({ context in
+                    context.duration = HUDMotionTokens.reduceMotionDuration
+                    self.panel.animator().alphaValue = 0.0
+                }, completionHandler: {
+                    cleanup()
+                })
                 return
             }
 
@@ -691,22 +1109,12 @@ public class HUDController {
             let retractFrame = self.computeFrame(width: HUDCapsuleView.capsuleWidth, height: retractH)
 
             NSAnimationContext.runAnimationGroup({ context in
-                context.duration = 0.18
-                context.timingFunction = CAMediaTimingFunction(name: .easeIn)
-                // Retract upward into the notch and fade out
+                context.duration = HUDMotionTokens.suctionRetractionDuration
+                context.timingFunction = HUDMotionTokens.suctionRetractionTimingFunction
                 self.panel.animator().setFrame(retractFrame, display: true)
                 self.panel.animator().alphaValue = 0.0
             }, completionHandler: {
-                if self.panel.alphaValue == 0.0 {
-                    self.panel.orderOut(nil)
-                    self.isVisible = false
-                    self.currentState = nil
-                    self.transcribedText = nil
-                    self.currentWidth = HUDCapsuleView.capsuleWidth
-                    self.currentHeight = notchInfo.hasNotch ? HUDCapsuleView.notchListeningHeight : HUDCapsuleView.capsuleHeight
-                    self.panel.capsuleView.reset()
-                }
-                completion?()
+                cleanup()
             })
         }
     }
@@ -759,7 +1167,35 @@ public class HUDController {
             "canBecomeMain": panel.canBecomeMain,
             "hasNotch": notchInfo.hasNotch,
             "notchWidth": notchInfo.notchWidth,
-            "transcribedText": transcribedText ?? ""
+            "transcribedText": transcribedText ?? "",
+            "errorShakeSupported": true,
+            "isHoverPeekActive": isHoverPeekActive,
+            "reduceMotion": NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+            "motionTokens": [
+                "springStiffness": HUDMotionTokens.springStiffness,
+                "springDamping": HUDMotionTokens.springDamping,
+                "springMass": HUDMotionTokens.springMass,
+                "dripDuration": HUDMotionTokens.dripDuration,
+                "blossomDuration": HUDMotionTokens.blossomDuration,
+                "stateTransitionDuration": HUDMotionTokens.stateTransitionDuration,
+                "suctionRetractionDuration": HUDMotionTokens.suctionRetractionDuration,
+                "errorShakeDuration": HUDMotionTokens.errorShakeDuration,
+                "errorShakeAmplitude": HUDMotionTokens.errorShakeAmplitude,
+                "errorShakeCycles": HUDMotionTokens.errorShakeCycles,
+                "reduceMotionDuration": HUDMotionTokens.reduceMotionDuration,
+                "escapeDismissDuration": HUDMotionTokens.escapeDismissDuration
+            ],
+            "notchSpecs": [
+                "restingHeight": HUDCapsuleView.notchRestingHeight,
+                "listeningHeight": HUDCapsuleView.notchListeningHeight,
+                "expandedHeight": HUDCapsuleView.notchExpandedHeight,
+                "restingWidth": HUDCapsuleView.capsuleWidth,
+                "expandedWidth": HUDCapsuleView.expandedWidth,
+                "earFilletRadius": HUDCapsuleView.earFilletRadius,
+                "bottomCornerRadius": HUDCapsuleView.bottomCornerRadius,
+                "fallbackCornerRadius": HUDCapsuleView.capsuleRadius,
+                "hoverPeekHeight": HUDCapsuleView.hoverPeekHeight
+            ]
         ]
     }
 }

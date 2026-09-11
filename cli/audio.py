@@ -45,6 +45,28 @@ def calculate_rms(pcm_bytes: bytes) -> float:
     return math.sqrt(sum_sq / count)
 
 
+def calculate_rms_and_peak(pcm_bytes: bytes) -> tuple[float, float]:
+    """Calculate Root Mean Square (RMS) energy and peak amplitude of 16-bit linear PCM audio.
+
+    Returns:
+        (rms, peak): raw RMS and peak amplitude in range [0.0, 32768.0].
+    """
+    if not pcm_bytes or len(pcm_bytes) < 2:
+        return 0.0, 0.0
+    count = len(pcm_bytes) // 2
+    shorts = array.array("h")
+    shorts.frombytes(pcm_bytes[: count * 2])
+    sum_sq = 0
+    max_peak = 0
+    for s in shorts:
+        abs_s = abs(s)
+        if abs_s > max_peak:
+            max_peak = abs_s
+        sum_sq += s * s
+    rms = math.sqrt(sum_sq / count)
+    return rms, float(max_peak)
+
+
 class EnergyVAD:
     """Lightweight Voice Activity Detector based on energy (RMS) thresholds.
 
