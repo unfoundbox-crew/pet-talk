@@ -1156,13 +1156,46 @@ def make_llm(
     model: Optional[str] = None,
     api_key: Optional[str] = None,
 ) -> LLMProvider:
-    """Tyre switch: LLM_PROVIDER=groq|openai|litellm|fleet|local|stub."""
-    which = (provider or os.environ.get("LLM_PROVIDER", "litellm")).lower()
+    """Tyre switch: LLM_PROVIDER=haiku|opencode|zen|gemini|groq|openai|litellm|fleet|stub."""
+    which = (provider or os.environ.get("LLM_PROVIDER", "haiku")).lower()
+
+    if which in ("haiku", "claude-haiku", "claude"):
+        b_url = base_url or os.environ.get("ANTHROPIC_BASE_URL") or "http://100.99.50.84:8000/v1"
+        m = model or os.environ.get("HAIKU_MODEL", "claude-3-5-haiku-20241022")
+        key = (
+            api_key
+            or os.environ.get("ANTHROPIC_API_KEY")
+            or os.environ.get("LITELLM_MASTER_KEY", "sk-3340dc7a5732b32c09a08a86da68b7400a9778d3bbbc574a")
+        )
+        return OpenAICompatibleLLM(base_url=b_url, model=m, api_key=key)
+
+    if which in ("opencode", "zen", "opencode-zen"):
+        b_url = base_url or os.environ.get("OPENCODE_BASE_URL", "https://api.opencode.ai/v1")
+        m = model or os.environ.get("OPENCODE_MODEL", "flash-3.8")
+        key = (
+            api_key
+            or os.environ.get("OPENCODE_GO_KEY")
+            or os.environ.get("OPENCODE_LENOVO_KEY")
+            or os.environ.get("OPENCODE_API_KEY", "")
+        )
+        return OpenAICompatibleLLM(base_url=b_url, model=m, api_key=key)
+
+    if which in ("gemini", "google", "flash"):
+        b_url = base_url or os.environ.get("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai")
+        m = model or os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+        key = (
+            api_key
+            or os.environ.get("GEMINI_PRIMARY_API_KEY")
+            or os.environ.get("GOOGLE_API_KEY", "")
+        )
+        return OpenAICompatibleLLM(base_url=b_url, model=m, api_key=key)
+
     if which == "groq":
         b_url = base_url or "https://api.groq.com/openai/v1"
         m = model or "groq/compound-mini"
         key = api_key or os.environ.get("GROQ_API_KEY", "")
         return OpenAICompatibleLLM(base_url=b_url, model=m, api_key=key)
+
     if which in ("openai", "gpt"):
         b_url = base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
         m = model or os.environ.get("OPENAI_MODEL", "gpt-5-nano")
@@ -1171,6 +1204,7 @@ def make_llm(
             or os.environ.get("OPENAI_API_KEY", "")
         )
         return OpenAICompatibleLLM(base_url=b_url, model=m, api_key=key)
+
     if which in ("litellm", "fleet", "local"):
         b_url = base_url or os.environ.get("LLM_BASE_URL", "http://100.99.50.84:8000/v1")
         m = model or os.environ.get("LLM_MODEL", "claude-sonnet-4-6")
@@ -1180,8 +1214,10 @@ def make_llm(
             or os.environ.get("LITELLM_MASTER_KEY", "sk-3340dc7a5732b32c09a08a86da68b7400a9778d3bbbc574a")
         )
         return OpenAICompatibleLLM(base_url=b_url, model=m, api_key=key)
+
     if which == "stub":
         return StubLLM()
+
     b_url = base_url or os.environ.get("LLM_BASE_URL", "http://100.99.50.84:8000/v1")
     m = model or os.environ.get("LLM_MODEL", "claude-sonnet-4-6")
     key = (

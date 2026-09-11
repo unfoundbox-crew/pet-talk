@@ -112,5 +112,52 @@ class TestOpenAIGPT5NanoTyre(unittest.TestCase):
         self.assertNotIn("max_completion_tokens", payload)
 
 
+class TestHaikuAndOpenCodeTyres(unittest.TestCase):
+    """Test Claude Haiku, OpenCode Zen, and Gemini Flash LLM tyres."""
+
+    def test_haiku_factory_routing(self):
+        llm = make_llm("haiku", api_key="sk-ant-test")
+        self.assertIsInstance(llm, OpenAICompatibleLLM)
+        self.assertEqual(llm.model, "claude-3-5-haiku-20241022")
+        self.assertEqual(llm.api_key, "sk-ant-test")
+
+    def test_opencode_zen_factory_routing(self):
+        llm = make_llm("opencode", api_key="zen-key-test")
+        self.assertIsInstance(llm, OpenAICompatibleLLM)
+        self.assertEqual(llm.model, "flash-3.8")
+        self.assertEqual(llm.base_url, "https://api.opencode.ai/v1")
+        self.assertEqual(llm.api_key, "zen-key-test")
+
+    def test_opencode_zen_alias_routing(self):
+        llm = make_llm("zen", model="meta-spark-1.3", api_key="zen-key-test")
+        self.assertIsInstance(llm, OpenAICompatibleLLM)
+        self.assertEqual(llm.model, "meta-spark-1.3")
+        self.assertEqual(llm.base_url, "https://api.opencode.ai/v1")
+
+    def test_gemini_flash_factory_routing(self):
+        llm = make_llm("gemini", api_key="gemini-key-test")
+        self.assertIsInstance(llm, OpenAICompatibleLLM)
+        self.assertEqual(llm.model, "gemini-2.5-flash")
+        self.assertEqual(llm.base_url, "https://generativelanguage.googleapis.com/v1beta/openai")
+        self.assertEqual(llm.api_key, "gemini-key-test")
+
+
+class TestSessionGrounding(unittest.TestCase):
+    """Test compact session grounding doesn't leak heredocs or blow up prompts."""
+
+    def test_grounding_bounded_and_clean(self):
+        from server.app import get_session_grounding
+
+        grounding = get_session_grounding()
+        self.assertIsInstance(grounding, str)
+        # Must not contain bash heredocs or full file dumps
+        self.assertNotIn("cat << 'EOF'", grounding)
+        self.assertNotIn("# Pet-Talk — Full-Duplex", grounding)
+        self.assertNotIn("# Persona: Donna", grounding)
+        # Strictly bounded length (under 500 characters)
+        self.assertLess(len(grounding), 500)
+
+
 if __name__ == "__main__":
     unittest.main()
+

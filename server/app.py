@@ -110,24 +110,27 @@ RUNTIME_SETTINGS = {
     "groq_api_key": os.environ.get("GROQ_API_KEY", ""),
     "openai_api_key": os.environ.get("OPENAI_API_KEY", ""),
     "smallest_api_key": os.environ.get("SMALLEST_API_KEY", ""),
+    "opencode_api_key": os.environ.get("OPENCODE_GO_KEY") or os.environ.get("OPENCODE_LENOVO_KEY") or os.environ.get("OPENCODE_API_KEY", ""),
+    "gemini_api_key": os.environ.get("GEMINI_PRIMARY_API_KEY") or os.environ.get("GOOGLE_API_KEY", ""),
+    "anthropic_api_key": os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("LITELLM_MASTER_KEY", "sk-3340dc7a5732b32c09a08a86da68b7400a9778d3bbbc574a"),
     "sensevoice_base_url": os.environ.get("SENSEVOICE_BASE_URL", "http://100.99.50.84:8086"),
     "llm_provider": os.environ.get(
         "LLM_PROVIDER",
-        "groq" if os.environ.get("GROQ_API_KEY") else "litellm",
+        "haiku" if (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("LITELLM_MASTER_KEY")) else ("groq" if os.environ.get("GROQ_API_KEY") else "litellm"),
     ).lower(),
     "llm_base_url": os.environ.get(
         "LLM_BASE_URL",
-        "https://api.groq.com/openai/v1" if os.environ.get("GROQ_API_KEY") else "http://100.99.50.84:8000/v1",
+        "http://100.99.50.84:8000/v1" if (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("LITELLM_MASTER_KEY")) else ("https://api.groq.com/openai/v1" if os.environ.get("GROQ_API_KEY") else "http://100.99.50.84:8000/v1"),
     ),
     "llm_model": os.environ.get(
         "LLM_MODEL",
-        "groq/compound-mini" if os.environ.get("GROQ_API_KEY") else "claude-sonnet-4-6",
+        "claude-3-5-haiku-20241022" if (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("LITELLM_MASTER_KEY")) else ("groq/compound-mini" if os.environ.get("GROQ_API_KEY") else "claude-sonnet-4-6"),
     ),
     "llm_api_key": os.environ.get(
         "LLM_API_KEY",
-        os.environ.get("GROQ_API_KEY", os.environ.get("LITELLM_MASTER_KEY", "sk-3340dc7a5732b32c09a08a86da68b7400a9778d3bbbc574a")),
+        os.environ.get("ANTHROPIC_API_KEY", os.environ.get("LITELLM_MASTER_KEY", os.environ.get("GROQ_API_KEY", "sk-3340dc7a5732b32c09a08a86da68b7400a9778d3bbbc574a"))),
     ),
-    "tts_provider": os.environ.get("TTS_PROVIDER", "kokoro").lower(),
+    "tts_provider": os.environ.get("TTS_PROVIDER", "smallest" if os.environ.get("SMALLEST_API_KEY") else "kokoro").lower(),
     "kokoro_base_url": os.environ.get("KOKORO_BASE_URL", "http://127.0.0.1:8088"),
     "vad_silence_ms": int(os.environ.get("VAD_SILENCE_MS", "600")),
 }
@@ -360,21 +363,39 @@ async def settings_post(req: dict) -> Response:
             RUNTIME_SETTINGS["llm_provider"] = new_llm
             if new_llm != old_llm:
                 if "llm_base_url" not in req:
-                    if new_llm == "groq":
+                    if new_llm in ("haiku", "claude-haiku", "claude"):
+                        RUNTIME_SETTINGS["llm_base_url"] = os.environ.get("ANTHROPIC_BASE_URL", "http://100.99.50.84:8000/v1")
+                    elif new_llm in ("opencode", "zen", "opencode-zen"):
+                        RUNTIME_SETTINGS["llm_base_url"] = os.environ.get("OPENCODE_BASE_URL", "https://api.opencode.ai/v1")
+                    elif new_llm in ("gemini", "google", "flash"):
+                        RUNTIME_SETTINGS["llm_base_url"] = os.environ.get("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai")
+                    elif new_llm == "groq":
                         RUNTIME_SETTINGS["llm_base_url"] = "https://api.groq.com/openai/v1"
                     elif new_llm in ("openai", "gpt"):
                         RUNTIME_SETTINGS["llm_base_url"] = "https://api.openai.com/v1"
-                    elif new_llm == "litellm":
+                    elif new_llm in ("litellm", "fleet", "local"):
                         RUNTIME_SETTINGS["llm_base_url"] = "http://100.99.50.84:8000/v1"
                 if "llm_model" not in req:
-                    if new_llm == "groq":
+                    if new_llm in ("haiku", "claude-haiku", "claude"):
+                        RUNTIME_SETTINGS["llm_model"] = os.environ.get("HAIKU_MODEL", "claude-3-5-haiku-20241022")
+                    elif new_llm in ("opencode", "zen", "opencode-zen"):
+                        RUNTIME_SETTINGS["llm_model"] = os.environ.get("OPENCODE_MODEL", "flash-3.8")
+                    elif new_llm in ("gemini", "google", "flash"):
+                        RUNTIME_SETTINGS["llm_model"] = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+                    elif new_llm == "groq":
                         RUNTIME_SETTINGS["llm_model"] = "groq/compound-mini"
                     elif new_llm in ("openai", "gpt"):
                         RUNTIME_SETTINGS["llm_model"] = "gpt-5-nano"
-                    elif new_llm == "litellm":
+                    elif new_llm in ("litellm", "fleet", "local"):
                         RUNTIME_SETTINGS["llm_model"] = "claude-sonnet-4-6"
                 if "llm_api_key" not in req:
-                    if new_llm == "groq":
+                    if new_llm in ("haiku", "claude-haiku", "claude"):
+                        RUNTIME_SETTINGS["llm_api_key"] = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("LITELLM_MASTER_KEY", "sk-3340dc7a5732b32c09a08a86da68b7400a9778d3bbbc574a")
+                    elif new_llm in ("opencode", "zen", "opencode-zen"):
+                        RUNTIME_SETTINGS["llm_api_key"] = os.environ.get("OPENCODE_GO_KEY") or os.environ.get("OPENCODE_LENOVO_KEY") or os.environ.get("OPENCODE_API_KEY", "")
+                    elif new_llm in ("gemini", "google", "flash"):
+                        RUNTIME_SETTINGS["llm_api_key"] = os.environ.get("GEMINI_PRIMARY_API_KEY") or os.environ.get("GOOGLE_API_KEY", "")
+                    elif new_llm == "groq":
                         RUNTIME_SETTINGS["llm_api_key"] = RUNTIME_SETTINGS.get("groq_api_key") or os.environ.get("GROQ_API_KEY", "")
                     elif new_llm in ("openai", "gpt"):
                         RUNTIME_SETTINGS["llm_api_key"] = RUNTIME_SETTINGS.get("openai_api_key") or os.environ.get("OPENAI_API_KEY", "")
@@ -411,7 +432,13 @@ async def settings_post(req: dict) -> Response:
 
         llm_key = req.get("llm_api_key") or RUNTIME_SETTINGS.get("llm_api_key")
         if not llm_key:
-            if RUNTIME_SETTINGS["llm_provider"] == "groq":
+            if RUNTIME_SETTINGS["llm_provider"] in ("haiku", "claude-haiku", "claude"):
+                llm_key = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("LITELLM_MASTER_KEY", "sk-3340dc7a5732b32c09a08a86da68b7400a9778d3bbbc574a")
+            elif RUNTIME_SETTINGS["llm_provider"] in ("opencode", "zen", "opencode-zen"):
+                llm_key = os.environ.get("OPENCODE_GO_KEY") or os.environ.get("OPENCODE_LENOVO_KEY") or os.environ.get("OPENCODE_API_KEY", "")
+            elif RUNTIME_SETTINGS["llm_provider"] in ("gemini", "google", "flash"):
+                llm_key = os.environ.get("GEMINI_PRIMARY_API_KEY") or os.environ.get("GOOGLE_API_KEY", "")
+            elif RUNTIME_SETTINGS["llm_provider"] == "groq":
                 llm_key = RUNTIME_SETTINGS.get("groq_api_key") or os.environ.get("GROQ_API_KEY", "")
             elif RUNTIME_SETTINGS["llm_provider"] in ("openai", "gpt"):
                 llm_key = RUNTIME_SETTINGS.get("openai_api_key") or os.environ.get("OPENAI_API_KEY", "")
@@ -606,67 +633,39 @@ async def handle_turn_task(
 
 
 def get_session_grounding() -> str:
-    """Collect real-time grounding from active Antigravity session and git checkouts."""
-    import json
+    """Collect compact, real-time grounding for spoken voice context (strictly bounded)."""
     import os
     import subprocess
 
     grounding_parts = []
 
-    # 1. Try Archie wake hook for live session grounding & persona
-    hook_path = os.path.expanduser("~/.gemini/config/hooks/archie-wake.sh")
-    if os.path.isfile(hook_path):
-        try:
-            payload = {
-                "conversationId": os.environ.get("AGY_CONVERSATION_ID", "c466f375-c0da-4491-993d-7eb36d468e23"),
-                "workspacePaths": ["/Users/saurabh"],
-            }
-            res = subprocess.run(
-                ["bash", hook_path],
-                input=json.dumps(payload),
-                capture_output=True,
-                text=True,
-                timeout=1.5,
-            )
-            if res.returncode == 0 and res.stdout.strip():
-                data = json.loads(res.stdout)
-                steps = data.get("injectSteps", [])
-                for s in steps:
-                    msg = s.get("ephemeralMessage", "")
-                    if msg:
-                        # Clean out raw git command lines to prevent reciting code aloud
-                        clean_lines = [
-                            line for line in msg.splitlines()
-                            if not line.strip().startswith(("git ", "[", "$", "#", "Active"))
-                        ]
-                        if clean_lines:
-                            grounding_parts.append("\n".join(clean_lines[:4]))
-        except Exception:
-            pass
-
-    # 2. Add local workspace git checkout grounding
-    try:
-        sp_out = subprocess.check_output(
-            ["git", "-C", "/Users/saurabh/code/motionvector/spacepilot", "log", "-n", "1", "--oneline"],
-            text=True, timeout=1, stderr=subprocess.DEVNULL
-        ).strip()
-        grounding_parts.append(f"SpacePilot recent commit: {sp_out}")
-    except Exception:
-        pass
+    # 1. Local workspace git checkout grounding (1 line each)
     try:
         pt_out = subprocess.check_output(
             ["git", "-C", "/Users/saurabh/code/unfoundbox-crew/pet-talk", "log", "-n", "1", "--oneline"],
             text=True, timeout=1, stderr=subprocess.DEVNULL
         ).strip()
-        grounding_parts.append(f"Pet-Talk recent commit: {pt_out}")
+        if pt_out:
+            grounding_parts.append(f"Pet-Talk repo: {pt_out[:60]}")
     except Exception:
         pass
 
-    grounding_parts.append("Active services: Kokoro TTS (:8088), Pet-Talk WS (:8089), LiteLLM Fleet Proxy (:8000)")
+    try:
+        sp_out = subprocess.check_output(
+            ["git", "-C", "/Users/saurabh/code/motionvector/spacepilot", "log", "-n", "1", "--oneline"],
+            text=True, timeout=1, stderr=subprocess.DEVNULL
+        ).strip()
+        if sp_out:
+            grounding_parts.append(f"SpacePilot repo: {sp_out[:60]}")
+    except Exception:
+        pass
+
+    grounding_parts.append("Active services: Kokoro TTS (:8088), Pet-Talk WS (:8089), LiteLLM Fleet (:8000)")
     grounding_parts.append(
         "(INTERNAL CONTEXT ONLY — NEVER RECITE FILE PATHS, GIT COMMANDS, OR RAW PORTS ALOUD. "
         "Keep reply strictly under 20 words in natural spoken prose.)"
     )
+    return "\n".join(grounding_parts)
     return "\n\n".join(grounding_parts)
 
 
