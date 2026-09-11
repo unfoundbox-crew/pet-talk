@@ -167,5 +167,78 @@ class TestDaemonLifecycle(unittest.TestCase):
         self.assertIn("stopped", res_final.stdout)
 
 
+class TestKillSwitchAndPause(unittest.TestCase):
+    """Verify kill switch, pause mode, resume, and toggle CLI commands."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not os.path.exists(BIN_PATH):
+            subprocess.run(["swiftc", "-O"] + SWIFT_SRCS + ["-o", BIN_PATH], check=True)
+
+    def setUp(self):
+        # Guarantee clean state
+        subprocess.run([BIN_PATH, "stop"], capture_output=True)
+        subprocess.run([BIN_PATH, "resume"], capture_output=True)
+
+    def tearDown(self):
+        subprocess.run([BIN_PATH, "stop"], capture_output=True)
+        subprocess.run([BIN_PATH, "resume"], capture_output=True)
+
+    def test_kill_switch_command(self):
+        res = subprocess.run([BIN_PATH, "kill"], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0)
+        self.assertIn("Instant kill switch executed", res.stdout)
+
+    def test_pause_resume_toggle_lifecycle(self):
+        # 1. Start daemon
+        res_start = subprocess.run([BIN_PATH, "start"], capture_output=True, text=True)
+        self.assertEqual(res_start.returncode, 0)
+        time.sleep(0.15)
+
+        # 2. Check initial status is [ACTIVE]
+        res_active = subprocess.run([BIN_PATH, "status"], capture_output=True, text=True)
+        self.assertEqual(res_active.returncode, 0)
+        self.assertIn("[ACTIVE]", res_active.stdout)
+
+        # 3. Pause Donna
+        res_pause = subprocess.run([BIN_PATH, "pause"], capture_output=True, text=True)
+        self.assertEqual(res_pause.returncode, 0)
+        self.assertIn("paused", res_pause.stdout.lower())
+        time.sleep(0.15)
+
+        # 4. Status reflects [PAUSED / SLEEP MODE]
+        res_paused = subprocess.run([BIN_PATH, "status"], capture_output=True, text=True)
+        self.assertEqual(res_paused.returncode, 0)
+        self.assertIn("[PAUSED", res_paused.stdout)
+
+        # 5. Resume Donna
+        res_resume = subprocess.run([BIN_PATH, "resume"], capture_output=True, text=True)
+        self.assertEqual(res_resume.returncode, 0)
+        self.assertIn("resumed", res_resume.stdout.lower())
+        time.sleep(0.15)
+
+        # 6. Status reflects [ACTIVE] again
+        res_resumed = subprocess.run([BIN_PATH, "status"], capture_output=True, text=True)
+        self.assertEqual(res_resumed.returncode, 0)
+        self.assertIn("[ACTIVE]", res_resumed.stdout)
+
+        # 7. Toggle into Pause
+        res_toggle1 = subprocess.run([BIN_PATH, "toggle"], capture_output=True, text=True)
+        self.assertEqual(res_toggle1.returncode, 0)
+        time.sleep(0.15)
+
+        res_tog_paused = subprocess.run([BIN_PATH, "status"], capture_output=True, text=True)
+        self.assertIn("[PAUSED", res_tog_paused.stdout)
+
+        # 8. Toggle back into Active
+        res_toggle2 = subprocess.run([BIN_PATH, "toggle"], capture_output=True, text=True)
+        self.assertEqual(res_toggle2.returncode, 0)
+        time.sleep(0.15)
+
+        res_tog_active = subprocess.run([BIN_PATH, "status"], capture_output=True, text=True)
+        self.assertIn("[ACTIVE]", res_tog_active.stdout)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+

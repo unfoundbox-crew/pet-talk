@@ -16,12 +16,15 @@ import Foundation
 
 struct HotkeyConfig {
     static let pidFile = "/tmp/pet-talk-hotkey.pid"
+    static let pauseFile = "/tmp/pet-talk-hotkey.paused"
     static let logFile = "/tmp/pet-talk-hotkey.log"
     static let defaultCliPath = "/Users/saurabh/code/unfoundbox-crew/pet-talk/bin/pet-talk-cli"
     static let hotKeyCode: UInt32 = UInt32(kVK_Tab) // 48
     static let hotKeyModifier: UInt32 = UInt32(optionKey) // 0x0800 = 2048
+    static let pauseHotKeyModifier: UInt32 = UInt32(optionKey | shiftKey) // 0x0A00 = 2560
     static let hotKeySignature: OSType = 0x50544C4B // 'PTLK'
     static let hotKeyId: UInt32 = 1
+    static let pauseHotKeyId: UInt32 = 2
 }
 
 class ProcessManager {
@@ -48,6 +51,60 @@ class ProcessManager {
 
     static func removePidFile() {
         try? FileManager.default.removeItem(atPath: HotkeyConfig.pidFile)
+    }
+
+    static func isPaused() -> Bool {
+        return FileManager.default.fileExists(atPath: HotkeyConfig.pauseFile)
+    }
+
+    static func setPaused(_ paused: Bool) {
+        if paused {
+            let str = "\(Date().timeIntervalSince1970)\n"
+            try? str.write(toFile: HotkeyConfig.pauseFile, atomically: true, encoding: .utf8)
+        } else {
+            try? FileManager.default.removeItem(atPath: HotkeyConfig.pauseFile)
+        }
+    }
+
+    static func hasAfplayRunning() -> Bool {
+        let numPids = proc_listpids(UInt32(PROC_ALL_PIDS), 0, nil, 0)
+        if numPids > 0 {
+            var pids = [pid_t](repeating: 0, count: Int(numPids) / MemoryLayout<pid_t>.size)
+            proc_listpids(UInt32(PROC_ALL_PIDS), 0, &pids, numPids)
+            var nameBuf = [CChar](repeating: 0, count: 256)
+            for pid in pids where pid > 0 {
+                let ret = proc_name(pid, &nameBuf, UInt32(nameBuf.count))
+                if ret > 0 {
+                    let name = String(cString: nameBuf)
+                    if name == "afplay" {
+                        return true
+                    }
+                }
+            }
+        }
+        return false
+    }
+
+    @discardableResult
+    static func killProcessesNamed(_ targetName: String) -> Int {
+        var count = 0
+        let numPids = proc_listpids(UInt32(PROC_ALL_PIDS), 0, nil, 0)
+        if numPids > 0 {
+            var pids = [pid_t](repeating: 0, count: Int(numPids) / MemoryLayout<pid_t>.size)
+            proc_listpids(UInt32(PROC_ALL_PIDS), 0, &pids, numPids)
+            var nameBuf = [CChar](repeating: 0, count: 256)
+            for pid in pids where pid > 0 {
+                let ret = proc_name(pid, &nameBuf, UInt32(nameBuf.count))
+                if ret > 0 {
+                    let name = String(cString: nameBuf)
+                    if name == targetName || name.contains(targetName) {
+                        kill(pid, SIGKILL)
+                        count += 1
+                    }
+                }
+            }
+        }
+        return count
     }
 
     /// Native Darwin libproc search and kill for any active afplay processes.
@@ -89,7 +146,9 @@ class HotkeyListener {
 
     private var activeCliProc: Process?
     private var hotKeyRef: EventHotKeyRef?
+    private var pauseHotKeyRef: EventHotKeyRef?
     private var eventHandlerRef: EventHandlerRef?
+    private var lastTapTime: DispatchTime?
 
     func log(_ message: String) {
         let timestamp = ISO8601DateFormatter().string(from: Date())
@@ -301,54 +360,121 @@ class HotkeyListener {
         return nil
     }
 
+    func isTurnActive() -> Bool {
+        if let proc = activeCliProc, proc.isRunning {
+            return true
+        }
+        if ProcessManager.hasAfplayRunning() {
+            return true
+        }
+        if HUDController.shared.isVisible {
+            return true
+        }
+        return false
+    }
+
     func handleBargeKill() {
-        log("+-- [ESCAPE] Barge-kill triggered")
+        log("+-- [KILL-SWITCH] Barge-kill triggered")
         let (killedAfplay, bargeMs) = ProcessManager.killAfplay()
         if killedAfplay > 0 {
-            log("| [barge-in] Killed \(killedAfplay) afplay process(es) in \(String(format: "%.2f", bargeMs))ms")
+            log("| [kill] Killed \(killedAfplay) afplay process(es) in \(String(format: "%.2f", bargeMs))ms")
+        }
+        let killedCli = ProcessManager.killProcessesNamed("pet-talk-cli")
+        if killedCli > 0 {
+            log("| [kill] Killed \(killedCli) pet-talk-cli process(es)")
         }
         if let proc = activeCliProc, proc.isRunning {
             proc.terminate()
             activeCliProc = nil
-            log("| [barge-in] Terminated active pet-talk-cli process")
+            log("| [kill] Terminated active pet-talk-cli process")
         }
         EarconEngine.shared.playBargeKill()
+        HUDController.shared.dismiss(immediate: true)
+    }
+
+    func togglePause() {
+        let isNowPaused = !ProcessManager.isPaused()
+        ProcessManager.setPaused(isNowPaused)
+
+        if isNowPaused {
+            log("+-- [PAUSE] Donna sleep mode activated")
+            handleBargeKill()
+            EarconEngine.shared.playSilenceCutoff()
+            HUDController.shared.showBreadcrumb(
+                badge: "PAUSED",
+                detail: "Donna paused (Option+Shift+Tab or double-tap to wake)",
+                state: .thinking
+            )
+        } else {
+            log("+-- [RESUME] Donna active mode restored")
+            EarconEngine.shared.playMicOpen()
+            HUDController.shared.showBreadcrumb(
+                badge: "ACTIVE",
+                detail: "Donna active and listening",
+                state: .listening
+            )
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+                if !self.isTurnActive() {
+                    HUDController.shared.dismiss()
+                }
+            }
+        }
+    }
+
+    func handlePauseHotKeyTrigger() {
+        log("+-- [HOTKEY] Option+Shift+Tab pause toggle triggered")
+        togglePause()
     }
 
     func handleHotKeyTrigger() {
+        let now = DispatchTime.now()
+        if let last = lastTapTime {
+            let intervalMs = Double(now.uptimeNanoseconds - last.uptimeNanoseconds) / 1_000_000.0
+            if intervalMs <= 350.0 {
+                lastTapTime = nil
+                log("+-- [HOTKEY] Double-tap detected (\(String(format: "%.1f", intervalMs))ms) -> toggling pause mode")
+                togglePause()
+                return
+            }
+        }
+        lastTapTime = now
+
         log("+-- [HOTKEY] Option+Tab triggered")
 
-        // 1. Check if audio or speech is currently active
-        let (killedAfplay, bargeMs) = ProcessManager.killAfplay()
-        var wasActive = false
-
-        if killedAfplay > 0 {
-            wasActive = true
-            log("| [barge-in] Killed \(killedAfplay) afplay process(es) in \(String(format: "%.2f", bargeMs))ms (budget <= 50ms)")
-        }
-
-        if let proc = activeCliProc, proc.isRunning {
-            wasActive = true
-            proc.terminate()
-            activeCliProc = nil
-            log("| [barge-in] Terminated previous pet-talk-cli process")
-        }
-
-        if wasActive {
-            // Immediate barge-kill earcon (<1ms)
-            EarconEngine.shared.playBargeKill()
-            log("| [barge-in] Starting fresh recording turn...")
-            // Cue mic open chime right after barge kill chime (35ms)
-            DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(35)) {
-                EarconEngine.shared.playMicOpen()
+        // 1. Check if Donna is in Pause / Sleep mode
+        if ProcessManager.isPaused() {
+            log("| [paused] Ignored trigger — Donna is paused")
+            EarconEngine.shared.playError()
+            HUDController.shared.showBreadcrumb(
+                badge: "PAUSED",
+                detail: "Donna paused (Option+Shift+Tab or double-tap to wake)",
+                state: .thinking
+            )
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+                if !self.isTurnActive() {
+                    HUDController.shared.dismiss()
+                }
             }
-        } else {
-            // Immediate mic open earcon (<1.2ms)
-            EarconEngine.shared.playMicOpen()
-            log("| [idle] Triggered -> starting one-shot recording turn...")
+            return
         }
 
-        // 2. Launch pet-talk-cli once
+        // 2. KILL SWITCH: If Donna is currently active (speaking, listening, thinking), single-tap immediately stops her!
+        if isTurnActive() {
+            log("| [kill-switch] Donna was active — immediately stopping audio and dismissing turn")
+            handleBargeKill()
+            return
+        }
+
+        // 3. Donna is idle -> start new recording turn
+        startNewTurn()
+    }
+
+    private func startNewTurn() {
+        // Immediate mic open earcon (<1.2ms)
+        EarconEngine.shared.playMicOpen()
+        log("| [idle] Triggered -> starting one-shot recording turn...")
+
+        // Launch pet-talk-cli once
         let cliPath = resolveCliPath()
         guard FileManager.default.isExecutableFile(atPath: cliPath) else {
             log("! [error] pet-talk-cli executable not found at \(cliPath)")
@@ -472,13 +598,27 @@ class HotkeyListener {
             0,
             &testRef
         )
-        if status == noErr {
-            if let ref = testRef {
-                UnregisterEventHotKey(ref)
-            }
-            return true
+        guard status == noErr else { return false }
+        if let ref = testRef {
+            UnregisterEventHotKey(ref)
         }
-        return false
+
+        var pauseTestRef: EventHotKeyRef?
+        let pauseTestID = EventHotKeyID(signature: HotkeyConfig.hotKeySignature, id: 998)
+        let pauseStatus = RegisterEventHotKey(
+            HotkeyConfig.hotKeyCode,
+            HotkeyConfig.pauseHotKeyModifier,
+            pauseTestID,
+            GetApplicationEventTarget(),
+            0,
+            &pauseTestRef
+        )
+        guard pauseStatus == noErr else { return false }
+        if let pRef = pauseTestRef {
+            UnregisterEventHotKey(pRef)
+        }
+
+        return true
     }
 
     func startListening() -> Int32 {
@@ -504,12 +644,13 @@ class HotkeyListener {
         log("+-- pet-talk-hotkey daemon active")
         log("| PID: \(getpid())")
         log("| Hotkey: Option + Tab (keycode: \(HotkeyConfig.hotKeyCode), mod: 0x\(String(HotkeyConfig.hotKeyModifier, radix: 16, uppercase: true)))")
+        log("| Pause Hotkey: Option + Shift + Tab (keycode: \(HotkeyConfig.hotKeyCode), mod: 0x\(String(HotkeyConfig.pauseHotKeyModifier, radix: 16, uppercase: true)))")
         log("| Target CLI: \(cliPath)")
         log("| Earcons: enabled=\(EarconEngine.shared.isEnabled), pack=\(EarconEngine.shared.soundPack), vol=\(String(format: "%.2f", EarconEngine.shared.volume))")
         log("| HUD: Obsidian Deep Zinc Capsule (220x44px -> 380x44px live dictation)")
         log("| Paste Injection: \(pasteEnabled ? "ENABLED (Wispr Flow style -> Cmd+V)" : "disabled (use --paste to enable)")")
         log("| Mode: \(isDaemon ? "Daemon (background)" : "Foreground")")
-        log("| Ready for global Option+Tab barge-in turns (<0.1% CPU)...")
+        log("| Ready for global Option+Tab barge-in turns & kill switch (<0.1% CPU)...")
 
         // Wire HUD Sensory Callbacks & Event Monitors (Escape barge-in, notch hover tracking)
         HUDController.shared.onBargeKill = { [weak self] in
@@ -524,8 +665,26 @@ class HotkeyListener {
         HUDController.shared.setupEventMonitors()
 
         // 1. Install Carbon Event Handler on Event Dispatcher Target
-        let eventHandler: EventHandlerUPP = { (_, _, _) -> OSStatus in
-            HotkeyListener.shared.handleHotKeyTrigger()
+        let eventHandler: EventHandlerUPP = { (_, inEvent, _) -> OSStatus in
+            guard let event = inEvent else {
+                HotkeyListener.shared.handleHotKeyTrigger()
+                return noErr
+            }
+            var hotKeyID = EventHotKeyID()
+            let status = GetEventParameter(
+                event,
+                EventParamName(kEventParamDirectObject),
+                EventParamName(typeEventHotKeyID),
+                nil,
+                MemoryLayout<EventHotKeyID>.size,
+                nil,
+                &hotKeyID
+            )
+            if status == noErr && hotKeyID.id == HotkeyConfig.pauseHotKeyId {
+                HotkeyListener.shared.handlePauseHotKeyTrigger()
+            } else {
+                HotkeyListener.shared.handleHotKeyTrigger()
+            }
             return noErr
         }
 
@@ -566,9 +725,26 @@ class HotkeyListener {
             return 1
         }
 
-        // 3. Register POSIX Signal Handlers for clean exit
+        // 3. Register Global Pause/Resume Hotkey (kVK_Tab + optionKey + shiftKey) on Event Dispatcher Target
+        let pauseHotKeyID = EventHotKeyID(signature: HotkeyConfig.hotKeySignature, id: HotkeyConfig.pauseHotKeyId)
+        let pauseRegStatus = RegisterEventHotKey(
+            HotkeyConfig.hotKeyCode,
+            HotkeyConfig.pauseHotKeyModifier,
+            pauseHotKeyID,
+            GetEventDispatcherTarget(),
+            0,
+            &pauseHotKeyRef
+        )
+
+        if pauseRegStatus != noErr {
+            log("! [warning] Could not register secondary Option+Shift+Tab hotkey (status: \(pauseRegStatus))")
+        }
+
+        // 4. Register POSIX Signal Handlers for clean exit, pause toggle, and instant kill
         signal(SIGINT, SIG_IGN)
         signal(SIGTERM, SIG_IGN)
+        signal(SIGUSR1, SIG_IGN)
+        signal(SIGUSR2, SIG_IGN)
 
         let sigintSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
         sigintSource.setEventHandler { [weak self] in
@@ -584,7 +760,19 @@ class HotkeyListener {
         }
         sigtermSource.resume()
 
-        // 4. Run NSApplication RunLoop to pump WindowServer events and AppKit animations
+        let sigusr1Source = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
+        sigusr1Source.setEventHandler { [weak self] in
+            self?.togglePause()
+        }
+        sigusr1Source.resume()
+
+        let sigusr2Source = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: .main)
+        sigusr2Source.setEventHandler { [weak self] in
+            self?.handleBargeKill()
+        }
+        sigusr2Source.resume()
+
+        // 5. Run NSApplication RunLoop to pump WindowServer events and AppKit animations
         NSApplication.shared.run()
         return 0
     }
@@ -596,10 +784,15 @@ class HotkeyListener {
             UnregisterEventHotKey(ref)
             hotKeyRef = nil
         }
-        if let proc = activeCliProc, proc.isRunning {
-            proc.terminate()
-            activeCliProc = nil
+        if let pRef = pauseHotKeyRef {
+            UnregisterEventHotKey(pRef)
+            pauseHotKeyRef = nil
         }
+        if let handler = eventHandlerRef {
+            RemoveEventHandler(handler)
+            eventHandlerRef = nil
+        }
+        handleBargeKill()
         ProcessManager.removePidFile()
     }
 }
@@ -615,6 +808,10 @@ func printUsage() {
       pet-talk-hotkey start               Spawn daemon in background
       pet-talk-hotkey stop                Stop running daemon
       pet-talk-hotkey status              Check if listener daemon is active
+      pet-talk-hotkey kill                Instant sub-10ms kill switch (terminate audio & turn)
+      pet-talk-hotkey pause               Pause Donna (sleep mode, ignore triggers)
+      pet-talk-hotkey resume              Resume Donna from pause mode
+      pet-talk-hotkey toggle              Toggle pause/resume mode
       pet-talk-hotkey test-audio          Play & benchmark acoustic earcons sequence (<2ms)
       pet-talk-hotkey test-hud            Test floating glass capsule HUD with live dictation text (380px)
       pet-talk-hotkey test-breadcrumbs    Test multi-line height expansion & semantic breadcrumbs
@@ -640,6 +837,8 @@ func printUsage() {
     Sensory Presence Specifications:
       Key:        Tab (kVK_Tab, keycode 48)
       Modifier:   Option (optionKey, 0x0800 / 2048)
+      Kill:       Single-tap Option+Tab while active cuts audio in <2ms & dismisses HUD
+      Pause:      Double-tap Option+Tab (<=350ms) or Option+Shift+Tab toggles Sleep Mode
       Barge-in:   <= 50ms afplay instant kill via Darwin libproc
       Dictation:  Live transcribed speech displayed in Obsidian Zinc Capsule (380x44px)
       Paste:      NSPasteboard + CGEvent Cmd+V into Cursor / terminal / editor
@@ -695,6 +894,7 @@ func doStart() -> Int32 {
 
 func doStop() -> Int32 {
     guard let pid = ProcessManager.readPid() else {
+        ProcessManager.setPaused(false)
         print("pet-talk-hotkey is not running")
         return 0
     }
@@ -713,25 +913,100 @@ func doStop() -> Int32 {
             kill(pid, SIGKILL)
         }
         ProcessManager.killAfplay()
+        _ = ProcessManager.killProcessesNamed("pet-talk-cli")
+        ProcessManager.setPaused(false)
         ProcessManager.removePidFile()
         print("pet-talk-hotkey daemon stopped (PID: \(pid))")
         return 0
     } else {
+        ProcessManager.setPaused(false)
         ProcessManager.removePidFile()
         print("pet-talk-hotkey is not running (cleaned stale PID file)")
         return 0
     }
 }
 
-func doStatus() -> Int32 {
+func doKill() -> Int32 {
+    print("+-- Executing Pet-Talk instant kill switch...")
+    let (killedAfplay, bargeMs) = ProcessManager.killAfplay()
+    if killedAfplay > 0 {
+        print("| Killed \(killedAfplay) afplay process(es) in \(String(format: "%.2f", bargeMs))ms")
+    }
+    let killedCli = ProcessManager.killProcessesNamed("pet-talk-cli")
+    if killedCli > 0 {
+        print("| Killed \(killedCli) pet-talk-cli process(es)")
+    }
+
     if let pid = ProcessManager.readPid(), ProcessManager.isProcessAlive(pid: pid) {
-        print("pet-talk-hotkey is running (PID: \(pid))")
+        kill(pid, SIGUSR2)
+    }
+
+    EarconEngine.shared.playBargeKill()
+    print("+-- PASS: Instant kill switch executed (audio stopped, HUD dismissed).")
+    return 0
+}
+
+func doPause() -> Int32 {
+    _ = ProcessManager.killAfplay()
+    _ = ProcessManager.killProcessesNamed("pet-talk-cli")
+    if let pid = ProcessManager.readPid(), ProcessManager.isProcessAlive(pid: pid) {
+        if !ProcessManager.isPaused() {
+            kill(pid, SIGUSR1)
+        }
+    } else {
+        ProcessManager.setPaused(true)
+    }
+    print("+-- Donna paused (Sleep Mode enabled).")
+    print("| Voice triggers are muted. Press Option+Shift+Tab or run 'pet-talk-hotkey resume' to wake.")
+    return 0
+}
+
+func doResume() -> Int32 {
+    if let pid = ProcessManager.readPid(), ProcessManager.isProcessAlive(pid: pid) {
+        if ProcessManager.isPaused() {
+            kill(pid, SIGUSR1)
+        }
+    } else {
+        ProcessManager.setPaused(false)
+    }
+    print("+-- Donna resumed (Active Mode enabled).")
+    print("| Option+Tab will start live voice turns.")
+    return 0
+}
+
+func doToggle() -> Int32 {
+    if let pid = ProcessManager.readPid(), ProcessManager.isProcessAlive(pid: pid) {
+        kill(pid, SIGUSR1)
+        let isNowPaused = !ProcessManager.isPaused()
+        if isNowPaused {
+            print("+-- Donna paused (Sleep Mode enabled).")
+        } else {
+            print("+-- Donna resumed (Active Mode enabled).")
+        }
+    } else {
+        let isNowPaused = !ProcessManager.isPaused()
+        ProcessManager.setPaused(isNowPaused)
+        if isNowPaused {
+            print("+-- Donna paused (Sleep Mode enabled).")
+        } else {
+            print("+-- Donna resumed (Active Mode enabled).")
+        }
+    }
+    return 0
+}
+
+func doStatus() -> Int32 {
+    let isPaused = ProcessManager.isPaused()
+    let pauseLabel = isPaused ? " [PAUSED / SLEEP MODE]" : " [ACTIVE]"
+
+    if let pid = ProcessManager.readPid(), ProcessManager.isProcessAlive(pid: pid) {
+        print("pet-talk-hotkey is running (PID: \(pid))\(pauseLabel)")
         return 0
     } else {
         if ProcessManager.readPid() != nil {
             ProcessManager.removePidFile()
         }
-        print("pet-talk-hotkey is stopped")
+        print("pet-talk-hotkey is stopped\(isPaused ? " (paused flag set)" : "")")
         return 1
     }
 }
@@ -1061,6 +1336,14 @@ case "stop":
     exit(doStop())
 case "status":
     exit(doStatus())
+case "kill":
+    exit(doKill())
+case "pause":
+    exit(doPause())
+case "resume":
+    exit(doResume())
+case "toggle":
+    exit(doToggle())
 case "test-audio", "--test-audio", "--test-earcons":
     exit(doTestAudio(args: args))
 case "config":
