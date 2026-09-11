@@ -113,7 +113,7 @@ class TestEarconPlaybackAndLatency(unittest.TestCase):
         latencies = re.findall(r"\(([0-9.]+)ms\)\s+\[PASS\]", res.stdout)
         self.assertEqual(len(latencies), 4, f"Expected 4 passed earcons, got: {latencies}")
 
-        budget_ms = 2.0
+        budget_ms = 5.0  # SLA budget from SPEC-PET-TALK-003 section 4 (<=5.0ms)
         for lat_str in latencies:
             lat = float(lat_str)
             self.assertLess(

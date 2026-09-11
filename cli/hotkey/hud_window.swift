@@ -237,8 +237,6 @@ public class HUDCapsuleView: NSView {
 
         rootLayer.masksToBounds = true
         rootLayer.cornerRadius = Self.capsuleRadius
-        rootLayer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
-        rootLayer.position = CGPoint(x: Self.capsuleWidth / 2.0, y: Self.capsuleHeight / 2.0)
 
         // 1. Frosted glass backdrop (.behindWindow)
         visualEffectView.frame = bounds
@@ -324,10 +322,6 @@ public class HUDCapsuleView: NSView {
 
     public func layoutSubviews(forWidth width: CGFloat) {
         self.frame = NSRect(x: 0, y: 0, width: width, height: Self.capsuleHeight)
-        if let layer = self.layer {
-            layer.bounds = CGRect(x: 0, y: 0, width: width, height: Self.capsuleHeight)
-            layer.position = CGPoint(x: width / 2.0, y: Self.capsuleHeight / 2.0)
-        }
         visualEffectView.frame = NSRect(x: 0, y: 0, width: width, height: Self.capsuleHeight)
         zincOverlayView.frame = NSRect(x: 0, y: 0, width: width, height: Self.capsuleHeight)
         labelField.frame = NSRect(x: 44, y: 11, width: width - 58, height: 22)
@@ -408,9 +402,14 @@ public class HUDController {
 
                 // 120ms spring entrance (scale 0.95 -> 1.0, alpha 0.0 -> 1.0)
                 if let layer = self.panel.capsuleView.layer {
-                    let spring = CASpringAnimation(keyPath: "transform.scale")
-                    spring.fromValue = 0.95
-                    spring.toValue = 1.0
+                    let spring = CASpringAnimation(keyPath: "transform")
+                    var startTransform = CATransform3DIdentity
+                    startTransform = CATransform3DTranslate(startTransform, HUDCapsuleView.capsuleWidth / 2.0, HUDCapsuleView.capsuleHeight / 2.0, 0)
+                    startTransform = CATransform3DScale(startTransform, 0.95, 0.95, 1.0)
+                    startTransform = CATransform3DTranslate(startTransform, -HUDCapsuleView.capsuleWidth / 2.0, -HUDCapsuleView.capsuleHeight / 2.0, 0)
+
+                    spring.fromValue = NSValue(caTransform3D: startTransform)
+                    spring.toValue = NSValue(caTransform3D: CATransform3DIdentity)
                     spring.duration = 0.12
                     spring.damping = 16.0
                     spring.initialVelocity = 4.0
@@ -469,7 +468,7 @@ public class HUDController {
         let screen = NSScreen.main ?? (NSScreen.screens.first ?? NSScreen())
         let screenFrame = screen.visibleFrame
         let x = screenFrame.midX - (newWidth / 2.0)
-        let y = screenFrame.minY + 72.0
+        let y = screenFrame.maxY - HUDCapsuleView.capsuleHeight - 24.0
         let newFrame = NSRect(x: x, y: y, width: newWidth, height: HUDCapsuleView.capsuleHeight)
 
         if animated {
@@ -483,6 +482,7 @@ public class HUDController {
             self.panel.setFrame(newFrame, display: true)
             self.panel.capsuleView.layoutSubviews(forWidth: newWidth)
         }
+        self.panel.invalidateShadow()
     }
 
     /// Dismiss the HUD capsule with a smooth 200ms ease-out fade.
@@ -512,13 +512,14 @@ public class HUDController {
         }
     }
 
-    /// Position capsule centered horizontally, floating gracefully near bottom of active screen.
+    /// Position capsule centered horizontally, floating gracefully below menu bar.
     private func positionWindow(width: CGFloat = HUDCapsuleView.capsuleWidth) {
         let screen = NSScreen.main ?? (NSScreen.screens.first ?? NSScreen())
         let screenFrame = screen.visibleFrame
         let x = screenFrame.midX - (width / 2.0)
-        let y = screenFrame.minY + 72.0 // Floating 72px above bottom Dock margin
+        let y = screenFrame.maxY - HUDCapsuleView.capsuleHeight - 24.0
         panel.setFrame(NSRect(x: x, y: y, width: width, height: HUDCapsuleView.capsuleHeight), display: false)
+        panel.invalidateShadow()
     }
 
     private func ensureMainThread(_ block: @escaping () -> Void) {
