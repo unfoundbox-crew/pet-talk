@@ -24,6 +24,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
+from .dictation import CleanProseFormatter
 from .memory import Hippocampus
 from .persona import (
     Persona,
@@ -92,6 +93,10 @@ TURNS_PATH = os.path.join(SERVER_DIR, "turns.jsonl")
 
 RUNTIME_SETTINGS = {
     "stt_provider": os.environ.get("STT_PROVIDER", "stub").lower(),
+    "deepgram_api_key": os.environ.get("DEEPGRAM_API_KEY", ""),
+    "groq_api_key": os.environ.get("GROQ_API_KEY", ""),
+    "openai_api_key": os.environ.get("OPENAI_API_KEY", ""),
+    "sensevoice_base_url": os.environ.get("SENSEVOICE_BASE_URL", "http://127.0.0.1:8086"),
     "llm_provider": os.environ.get("LLM_PROVIDER", "stub").lower(),
     "llm_base_url": os.environ.get("LLM_BASE_URL", "http://100.99.50.84:8000/v1"),
     "llm_model": os.environ.get("LLM_MODEL", "claude-3-7-sonnet"),
@@ -100,7 +105,19 @@ RUNTIME_SETTINGS = {
     "vad_silence_ms": int(os.environ.get("VAD_SILENCE_MS", "600")),
 }
 
-stt = make_stt(provider=RUNTIME_SETTINGS["stt_provider"])
+stt = make_stt(
+    provider=RUNTIME_SETTINGS["stt_provider"],
+    api_key=(
+        RUNTIME_SETTINGS["deepgram_api_key"]
+        if RUNTIME_SETTINGS["stt_provider"] == "deepgram"
+        else RUNTIME_SETTINGS["groq_api_key"]
+        if RUNTIME_SETTINGS["stt_provider"] == "groq"
+        else RUNTIME_SETTINGS["openai_api_key"]
+        if RUNTIME_SETTINGS["stt_provider"] in ("openai", "openai-whisper")
+        else None
+    ),
+    base_url=RUNTIME_SETTINGS["sensevoice_base_url"],
+)
 llm = make_llm(
     provider=RUNTIME_SETTINGS["llm_provider"],
     base_url=RUNTIME_SETTINGS["llm_base_url"],
@@ -297,6 +314,14 @@ async def settings_post(req: dict) -> Response:
     global stt, llm, tts
     if "stt_provider" in req:
         RUNTIME_SETTINGS["stt_provider"] = str(req["stt_provider"]).lower()
+    if "deepgram_api_key" in req:
+        RUNTIME_SETTINGS["deepgram_api_key"] = str(req["deepgram_api_key"])
+    if "groq_api_key" in req:
+        RUNTIME_SETTINGS["groq_api_key"] = str(req["groq_api_key"])
+    if "openai_api_key" in req:
+        RUNTIME_SETTINGS["openai_api_key"] = str(req["openai_api_key"])
+    if "sensevoice_base_url" in req:
+        RUNTIME_SETTINGS["sensevoice_base_url"] = str(req["sensevoice_base_url"])
     if "llm_provider" in req:
         RUNTIME_SETTINGS["llm_provider"] = str(req["llm_provider"]).lower()
     if "llm_base_url" in req:
@@ -313,9 +338,18 @@ async def settings_post(req: dict) -> Response:
         except (ValueError, TypeError):
             pass
 
+    stt_key = None
+    if RUNTIME_SETTINGS["stt_provider"] == "deepgram":
+        stt_key = req.get("deepgram_api_key") or RUNTIME_SETTINGS.get("deepgram_api_key")
+    elif RUNTIME_SETTINGS["stt_provider"] == "groq":
+        stt_key = req.get("groq_api_key") or RUNTIME_SETTINGS.get("groq_api_key")
+    elif RUNTIME_SETTINGS["stt_provider"] in ("openai", "openai-whisper", "whisper-openai"):
+        stt_key = req.get("openai_api_key") or RUNTIME_SETTINGS.get("openai_api_key")
+
     stt = make_stt(
         provider=RUNTIME_SETTINGS["stt_provider"],
-        api_key=req.get("deepgram_api_key"),
+        api_key=stt_key,
+        base_url=req.get("sensevoice_base_url") or RUNTIME_SETTINGS.get("sensevoice_base_url"),
     )
     llm = make_llm(
         provider=RUNTIME_SETTINGS["llm_provider"],
@@ -373,9 +407,14 @@ async def transcribe_endpoint(req: dict) -> Response:
     except (ValueError, TypeError):
         sample_rate = 16000
 
+    clean_prose = req.get("clean_prose", True)
+    if isinstance(clean_prose, str):
+        clean_prose = clean_prose.lower() not in ("false", "0", "no")
+
     try:
-        text = stt.transcribe(audio_bytes, sample_rate=sample_rate)
-        return JSONResponse({"ok": True, "text": text})
+        raw_text = stt.transcribe(audio_bytes, sample_rate=sample_rate)
+        text = CleanProseFormatter.format(raw_text) if clean_prose else raw_text
+        return JSONResponse({"ok": True, "text": text, "raw_text": raw_text})
     except ProviderError as e:
         status_code = 400 if "empty" in e.reason else 502
         return JSONResponse({"ok": False, "error": str(e), "reason": e.reason}, status_code=status_code)

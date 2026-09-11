@@ -19,6 +19,7 @@ export const PromptComposer: React.FC<PromptComposerProps> = ({
   const [text, setText] = useState("");
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
+  const [cleanProse, setCleanProse] = useState(true);
   const [recordSeconds, setRecordSeconds] = useState(0);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -168,6 +169,7 @@ export const PromptComposer: React.FC<PromptComposerProps> = ({
         body: JSON.stringify({
           pcm_b64: pcmB64,
           sample_rate: 16000,
+          clean_prose: cleanProse,
         }),
       });
 
@@ -208,7 +210,7 @@ export const PromptComposer: React.FC<PromptComposerProps> = ({
     } finally {
       setIsTranscribing(false);
     }
-  }, [isRecording, text, serverUrl]);
+  }, [isRecording, text, serverUrl, cleanProse]);
 
   const formatTimer = (sec: number) => {
     const m = Math.floor(sec / 60)
@@ -406,49 +408,76 @@ export const PromptComposer: React.FC<PromptComposerProps> = ({
             borderTop: "1px solid #1a1e2b",
           }}
         >
-          {/* Left: Dictate Mic Button */}
-          <div>
+          {/* Left: Dictate Mic Button + Clean Prose Badge */}
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
             {!isRecording ? (
-              <button
-                type="button"
-                data-testid="dictate-mic-button"
-                onClick={startDictation}
-                disabled={disabled || !connected || isTranscribing}
-                title={t["dictate"] || "Dictate"}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "0.45rem",
-                  background: "#191c26",
-                  border: "1px solid #282c3f",
-                  borderRadius: "999px",
-                  padding: "0.4rem 0.85rem",
-                  color: "#e2e8f0",
-                  fontSize: "0.8rem",
-                  fontWeight: 600,
-                  cursor: disabled || !connected || isTranscribing ? "not-allowed" : "pointer",
-                  transition: "background 0.15s, border-color 0.15s",
-                  opacity: disabled || !connected || isTranscribing ? 0.5 : 1,
-                }}
-              >
-                {/* Clean Mic SVG */}
-                <svg
-                  width="14"
-                  height="14"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="#24c1e0"
-                  strokeWidth="2.2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
+              <>
+                <button
+                  type="button"
+                  data-testid="dictate-mic-button"
+                  onClick={startDictation}
+                  disabled={disabled || !connected || isTranscribing}
+                  title={t["dictate"] || "Dictate"}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "0.45rem",
+                    background: "#191c26",
+                    border: "1px solid #282c3f",
+                    borderRadius: "999px",
+                    padding: "0.4rem 0.85rem",
+                    color: "#e2e8f0",
+                    fontSize: "0.8rem",
+                    fontWeight: 600,
+                    cursor: disabled || !connected || isTranscribing ? "not-allowed" : "pointer",
+                    transition: "background 0.15s, border-color 0.15s",
+                    opacity: disabled || !connected || isTranscribing ? 0.5 : 1,
+                  }}
                 >
-                  <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z" />
-                  <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-                  <line x1="12" y1="19" x2="12" y2="23" />
-                  <line x1="8" y1="23" x2="16" y2="23" />
-                </svg>
-                <span>{t["dictate"] || "Dictate"}</span>
-              </button>
+                  {/* Clean Mic SVG */}
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="#24c1e0"
+                    strokeWidth="2.2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z" />
+                    <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                    <line x1="12" y1="19" x2="12" y2="23" />
+                    <line x1="8" y1="23" x2="16" y2="23" />
+                  </svg>
+                  <span>{t["dictate"] || "Dictate"}</span>
+                </button>
+
+                <button
+                  type="button"
+                  data-testid="clean-prose-toggle"
+                  onClick={() => setCleanProse((prev) => !prev)}
+                  title={cleanProse ? "Clean Prose enabled" : "Clean Prose disabled"}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "0.35rem",
+                    background: cleanProse ? "rgba(36, 193, 224, 0.12)" : "rgba(255, 255, 255, 0.04)",
+                    border: `1px solid ${cleanProse ? "rgba(36, 193, 224, 0.4)" : "#282c3f"}`,
+                    borderRadius: "999px",
+                    padding: "0.35rem 0.65rem",
+                    fontSize: "0.72rem",
+                    fontWeight: cleanProse ? 600 : 400,
+                    color: cleanProse ? "#24c1e0" : "#718096",
+                    cursor: "pointer",
+                    transition: "all 0.15s ease",
+                    userSelect: "none",
+                  }}
+                >
+                  <span style={{ fontSize: "0.75rem" }}>{cleanProse ? "✨" : "○"}</span>
+                  <span>{t["clean_prose"] || "Clean Prose"}</span>
+                </button>
+              </>
             ) : (
               <span style={{ fontSize: "0.75rem", color: "#9ba3b8", fontStyle: "italic" }}>
                 Speak clearly into microphone…

@@ -26,6 +26,9 @@ if python3 "$ROOT/qa/test_settings_api.py" -v; then :; else FAIL=1; fi
 say "2b3/4 transcribe REST API & WS user.text turn frames (stdlib unittest)"
 if python3 "$ROOT/qa/test_transcribe_api.py" -v; then :; else FAIL=1; fi
 
+say "2b4/4 universal dictation matrix & clean prose (stdlib unittest)"
+if python3 "$ROOT/qa/test_dictation_matrix.py" -v; then :; else FAIL=1; fi
+
 say "2c/4 hippocampus memory ledger (stdlib unittest)"
 if python3 "$ROOT/qa/test_memory.py" -v; then :; else FAIL=1; fi
 

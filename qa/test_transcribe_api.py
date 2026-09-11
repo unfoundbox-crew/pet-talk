@@ -44,6 +44,14 @@ class TestTranscribeApi(unittest.TestCase):
         data = r.json()
         self.assertTrue(data.get("ok"))
         self.assertIn("text", data)
+        self.assertEqual(data["text"], "Hello agent, what is the weather.")
+        self.assertEqual(data.get("raw_text"), "hello agent, what is the weather")
+
+    def test_transcribe_clean_prose_disabled(self):
+        r = self.client.post("/transcribe", json={"pcm_b64": self.pcm_b64, "clean_prose": False})
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertTrue(data.get("ok"))
         self.assertEqual(data["text"], "hello agent, what is the weather")
 
     def test_transcribe_audio_alias_key(self):

@@ -11,10 +11,14 @@ import asyncio
 import io
 import math
 import os
+import shutil
 import struct
+import subprocess
+import tempfile
 import time
 import urllib.parse
 import urllib.request
+import uuid
 import wave
 from typing import AsyncIterator, Optional
 
@@ -368,11 +372,45 @@ class ElevenLabsTTS(TTSProvider):
         return audio, []
 
 
-# -------------------------------------------------- Deepgram (swappable tyre) ---
+# -------------------------------------------------- STT Helpers & Providers ---
+
+
+def pcm16_to_wav_bytes(pcm16_bytes: bytes, sample_rate: int = 16000) -> bytes:
+    """Pack PCM16 mono bytes into a compliant in-memory RIFF WAV container."""
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sample_rate)
+        w.writeframes(pcm16_bytes)
+    return buf.getvalue()
+
+
+def encode_multipart_formdata(
+    fields: dict[str, str], files: dict[str, tuple[str, bytes, str]]
+) -> tuple[bytes, str]:
+    """Pure stdlib multipart/form-data encoder (RFC 7578) with zero extra deps."""
+    boundary = f"----PetTalkBoundary{uuid.uuid4().hex}"
+    body = bytearray()
+    for name, val in fields.items():
+        body.extend(f"--{boundary}\r\n".encode("utf-8"))
+        body.extend(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"))
+        body.extend(str(val).encode("utf-8"))
+        body.extend(b"\r\n")
+    for name, (fname, content, ctype) in files.items():
+        body.extend(f"--{boundary}\r\n".encode("utf-8"))
+        body.extend(
+            f'Content-Disposition: form-data; name="{name}"; filename="{fname}"\r\n'.encode("utf-8")
+        )
+        body.extend(f"Content-Type: {ctype}\r\n\r\n".encode("utf-8"))
+        body.extend(content)
+        body.extend(b"\r\n")
+    body.extend(f"--{boundary}--\r\n".encode("utf-8"))
+    return bytes(body), f"multipart/form-data; boundary={boundary}"
 
 
 class DeepgramSTT(STTProvider):
-    """Cloud tyre: Deepgram listen API. Same interface, env-selected.
+    """Cloud flagship: Deepgram listen API. Same interface, env-selected.
 
     Select with STT_PROVIDER=deepgram. Key from DEEPGRAM_API_KEY env.
     Default model nova-3. Uses only stdlib (urllib).
@@ -395,13 +433,7 @@ class DeepgramSTT(STTProvider):
 
         if not pcm16_bytes:
             raise ProviderError("stt_empty_audio", "no bytes to transcribe")
-        buf = io.BytesIO()
-        with wave.open(buf, "wb") as w:
-            w.setnchannels(1)
-            w.setsampwidth(2)
-            w.setframerate(sample_rate)
-            w.writeframes(pcm16_bytes)
-        wav = buf.getvalue()
+        wav = pcm16_to_wav_bytes(pcm16_bytes, sample_rate=sample_rate)
         url = (
             f"{self.LISTEN_URL}?model={urllib.parse.quote(self.model)}"
             f"&encoding=linear16&sample_rate={sample_rate}&channels=1&punctuate=true"
@@ -430,6 +462,274 @@ class DeepgramSTT(STTProvider):
             raise ProviderError("stt_bad_response", f"deepgram: {e}")
         if not text:
             raise ProviderError("stt_empty_result", "deepgram returned no text")
+        return text
+
+
+class GroqSTT(STTProvider):
+    """Ultra-fast Groq LPU Whisper. Same interface, env or param selected.
+
+    Select with STT_PROVIDER=groq. Key from GROQ_API_KEY env or param.
+    Default model whisper-large-v3-turbo. Uses only stdlib (urllib).
+    """
+
+    DEFAULT_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+
+    def __init__(
+        self,
+        model: str = "whisper-large-v3-turbo",
+        api_key: str = "",
+        base_url: Optional[str] = None,
+    ) -> None:
+        self.model = model
+        self.api_key = api_key
+        self.base_url = (base_url or os.environ.get("GROQ_BASE_URL", self.DEFAULT_URL)).strip()
+
+    def _key(self) -> str:
+        key = self.api_key or os.environ.get("GROQ_API_KEY", "")
+        if not key:
+            raise ProviderError("stt_no_key", "GROQ_API_KEY env not set")
+        return key
+
+    def transcribe(self, pcm16_bytes: bytes, sample_rate: int = 16000) -> str:
+        import json as _json
+
+        if not pcm16_bytes:
+            raise ProviderError("stt_empty_audio", "no bytes to transcribe")
+        wav = pcm16_to_wav_bytes(pcm16_bytes, sample_rate=sample_rate)
+        body, ctype = encode_multipart_formdata(
+            fields={"model": self.model, "response_format": "json"},
+            files={"file": ("audio.wav", wav, "audio/wav")},
+        )
+        req = urllib.request.Request(
+            self.base_url,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": ctype,
+                "Authorization": f"Bearer {self._key()}",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = _json.loads(resp.read().decode())
+        except ProviderError:
+            raise
+        except Exception as e:
+            raise ProviderError("stt_request_failed", f"groq: {e}")
+        text = (data.get("text") or "").strip()
+        if not text:
+            raise ProviderError("stt_empty_result", "groq returned no text")
+        return text
+
+
+class OpenAIWhisperSTT(STTProvider):
+    """OpenAI Whisper API. Same interface.
+
+    Select with STT_PROVIDER=openai. Key from OPENAI_API_KEY env or param.
+    Default model whisper-1. Uses only stdlib (urllib).
+    """
+
+    DEFAULT_URL = "https://api.openai.com/v1/audio/transcriptions"
+
+    def __init__(
+        self,
+        model: str = "whisper-1",
+        api_key: str = "",
+        base_url: Optional[str] = None,
+    ) -> None:
+        self.model = model
+        self.api_key = api_key
+        self.base_url = (base_url or os.environ.get("OPENAI_BASE_URL", self.DEFAULT_URL)).strip()
+
+    def _key(self) -> str:
+        key = self.api_key or os.environ.get("OPENAI_API_KEY", "")
+        if not key:
+            raise ProviderError("stt_no_key", "OPENAI_API_KEY env not set")
+        return key
+
+    def transcribe(self, pcm16_bytes: bytes, sample_rate: int = 16000) -> str:
+        import json as _json
+
+        if not pcm16_bytes:
+            raise ProviderError("stt_empty_audio", "no bytes to transcribe")
+        wav = pcm16_to_wav_bytes(pcm16_bytes, sample_rate=sample_rate)
+        body, ctype = encode_multipart_formdata(
+            fields={"model": self.model},
+            files={"file": ("audio.wav", wav, "audio/wav")},
+        )
+        req = urllib.request.Request(
+            self.base_url,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": ctype,
+                "Authorization": f"Bearer {self._key()}",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = _json.loads(resp.read().decode())
+        except ProviderError:
+            raise
+        except Exception as e:
+            raise ProviderError("stt_request_failed", f"openai: {e}")
+        text = (data.get("text") or "").strip()
+        if not text:
+            raise ProviderError("stt_empty_result", "openai returned no text")
+        return text
+
+
+class WhisperKitSTT(STTProvider):
+    """Apple Neural Engine CoreML via CLI process.
+
+    Select with STT_PROVIDER=whisperkit.
+    Default model openai/whisper-large-v3_turbo.
+    """
+
+    def __init__(
+        self,
+        model: str = "openai/whisper-large-v3_turbo",
+        cli_path: str = "whisperkit-cli",
+    ) -> None:
+        self.model = model
+        self.cli_path = cli_path
+
+    def transcribe(self, pcm16_bytes: bytes, sample_rate: int = 16000) -> str:
+        import json as _json
+
+        if not pcm16_bytes:
+            raise ProviderError("stt_empty_audio", "no bytes to transcribe")
+
+        resolved_cli = shutil.which(self.cli_path) or (self.cli_path if os.path.exists(self.cli_path) else None)
+        if not resolved_cli:
+            raise ProviderError(
+                "stt_whisperkit_not_found",
+                f"whisperkit-cli executable not found at '{self.cli_path}'",
+            )
+
+        wav = pcm16_to_wav_bytes(pcm16_bytes, sample_rate=sample_rate)
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as f:
+            f.write(wav)
+            f.flush()
+
+            cmd = [
+                resolved_cli,
+                "transcribe",
+                "--audio-path",
+                f.name,
+                "--model",
+                self.model,
+                "--report",
+            ]
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=60,
+                )
+            except Exception as e:
+                raise ProviderError("stt_whisperkit_failed", str(e))
+
+            if proc.returncode != 0:
+                raise ProviderError(
+                    "stt_whisperkit_failed",
+                    f"exit {proc.returncode}: {proc.stderr.strip() or proc.stdout.strip()}",
+                )
+
+            out = proc.stdout.strip()
+            text = ""
+            if out.startswith("{") and out.endswith("}"):
+                try:
+                    data = _json.loads(out)
+                    text = data.get("text", "")
+                except Exception:
+                    text = out
+            else:
+                text = out
+
+            if not text:
+                raise ProviderError("stt_empty_result", "whisperkit returned no text")
+            return text
+
+
+class MLXWhisperSTT(STTProvider):
+    """Apple Silicon GPU via MLX. Lazy import of mlx_whisper.
+
+    Select with STT_PROVIDER=mlx.
+    Default model mlx-community/whisper-large-v3-turbo.
+    """
+
+    def __init__(
+        self,
+        model: str = "mlx-community/whisper-large-v3-turbo",
+    ) -> None:
+        self.model = model
+
+    def transcribe(self, pcm16_bytes: bytes, sample_rate: int = 16000) -> str:
+        if not pcm16_bytes:
+            raise ProviderError("stt_empty_audio", "no bytes to transcribe")
+
+        try:
+            import mlx_whisper  # type: ignore  # lazy
+        except ImportError as e:
+            raise ProviderError("stt_mlx_not_installed", str(e))
+
+        wav = pcm16_to_wav_bytes(pcm16_bytes, sample_rate=sample_rate)
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as f:
+            f.write(wav)
+            f.flush()
+            try:
+                result = mlx_whisper.transcribe(f.name, path_or_hf_repo=self.model)
+            except Exception as e:
+                raise ProviderError("stt_mlx_failed", str(e))
+
+        text = (result.get("text") or "").strip()
+        if not text:
+            raise ProviderError("stt_empty_result", "mlx returned no text")
+        return text
+
+
+class SenseVoiceSTT(STTProvider):
+    """Sovereign Fleet SenseVoice HTTP adapter (:8086).
+
+    Select with STT_PROVIDER=sensevoice. Base URL from SENSEVOICE_BASE_URL.
+    """
+
+    DEFAULT_URL = "http://127.0.0.1:8086"
+
+    def __init__(
+        self,
+        base_url: Optional[str] = None,
+    ) -> None:
+        self.base_url = (base_url or os.environ.get("SENSEVOICE_BASE_URL", self.DEFAULT_URL)).rstrip("/")
+
+    def transcribe(self, pcm16_bytes: bytes, sample_rate: int = 16000) -> str:
+        import json as _json
+
+        if not pcm16_bytes:
+            raise ProviderError("stt_empty_audio", "no bytes to transcribe")
+
+        wav = pcm16_to_wav_bytes(pcm16_bytes, sample_rate=sample_rate)
+        url = f"{self.base_url}/api/transcribe"
+        req = urllib.request.Request(
+            url,
+            data=wav,
+            method="POST",
+            headers={"Content-Type": "audio/wav"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = _json.loads(resp.read().decode())
+        except ProviderError:
+            raise
+        except Exception as e:
+            raise ProviderError("stt_request_failed", f"sensevoice: {e}")
+
+        text = (data.get("text") or "").strip()
+        if not text:
+            raise ProviderError("stt_empty_result", "sensevoice returned no text")
         return text
 
 
@@ -498,17 +798,52 @@ def make_tts(provider: Optional[str] = None, base_url: Optional[str] = None) -> 
     return StubTTS()
 
 
-def make_stt(provider: Optional[str] = None, api_key: Optional[str] = None) -> STTProvider:
-    """Tyre switch: STT_PROVIDER=stub|deepgram (default: stub).
-
-    whisper-local is not wired yet — fail-closed, never silent fallback.
+def make_stt(
+    provider: Optional[str] = None,
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+    model: Optional[str] = None,
+) -> STTProvider:
+    """Tyre switch for STT provider:
+    stub | deepgram | groq | openai | whisperkit | mlx | sensevoice (default: stub).
+    Fail-closed: raises ProviderError on unknown provider or missing credentials.
     """
-    which = (provider or os.environ.get("STT_PROVIDER", "stub")).lower()
+    which = (provider or os.environ.get("STT_PROVIDER", "stub")).lower().strip()
+    if which in ("", "stub"):
+        return StubSTT()
     if which == "deepgram":
-        return DeepgramSTT(api_key=api_key or os.environ.get("DEEPGRAM_API_KEY", ""))
+        return DeepgramSTT(
+            model=model or "nova-3",
+            api_key=api_key or os.environ.get("DEEPGRAM_API_KEY", ""),
+        )
+    if which == "groq":
+        return GroqSTT(
+            model=model or "whisper-large-v3-turbo",
+            api_key=api_key or os.environ.get("GROQ_API_KEY", ""),
+            base_url=base_url or os.environ.get("GROQ_BASE_URL", "https://api.groq.com/openai/v1/audio/transcriptions"),
+        )
+    if which in ("openai", "openai-whisper", "whisper-openai"):
+        return OpenAIWhisperSTT(
+            model=model or "whisper-1",
+            api_key=api_key or os.environ.get("OPENAI_API_KEY", ""),
+            base_url=base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1/audio/transcriptions"),
+        )
+    if which in ("whisperkit", "whisper-kit", "coreml", "ane"):
+        return WhisperKitSTT(
+            model=model or "openai/whisper-large-v3_turbo",
+            cli_path=base_url or os.environ.get("WHISPERKIT_CLI_PATH", "whisperkit-cli"),
+        )
+    if which in ("mlx", "mlx-whisper"):
+        return MLXWhisperSTT(
+            model=model or "mlx-community/whisper-large-v3-turbo",
+        )
+    if which in ("sensevoice", "fleet", "sovereign"):
+        return SenseVoiceSTT(
+            base_url=base_url or os.environ.get("SENSEVOICE_BASE_URL", "http://127.0.0.1:8086"),
+        )
     if which in ("whisper-local", "whisper_local", "whisper", "local"):
         raise ProviderError("stt_not_wired", "whisper-local not wired")
-    return StubSTT()
+    raise ProviderError("stt_unknown_provider", f"unknown STT provider: {which}")
 
 
 def make_llm(
