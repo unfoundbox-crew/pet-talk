@@ -3,7 +3,7 @@
 // (SpacePilot daemon is :8088 — do NOT collide.)
 
 export const WS_URL =
-  import.meta.env.VITE_WS_URL ?? "ws://127.0.0.1:8089";
+  import.meta.env.VITE_WS_URL ?? "ws://127.0.0.1:8089/ws";
 
 export type AgentState = "idle" | "listening" | "thinking" | "speaking";
 

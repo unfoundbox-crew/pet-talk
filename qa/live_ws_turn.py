@@ -34,8 +34,9 @@ try:
 except ImportError:
     HAVE_WS = False
 
-WS_URL = os.environ.get("LIVE_WS_URL", "ws://127.0.0.1:8099/ws")
-HTTP_BASE = os.environ.get("LIVE_HTTP_BASE", "http://127.0.0.1:8099")
+PORT = os.environ.get("LIVE_WS_PORT", "8089")
+WS_URL = os.environ.get("LIVE_WS_URL", f"ws://127.0.0.1:{PORT}/ws")
+HTTP_BASE = os.environ.get("LIVE_HTTP_BASE", f"http://127.0.0.1:{PORT}")
 
 # Lenient ceiling for stub providers; report the actual, gate on the ceiling.
 STALL_LENIENT_MS = 4000.0

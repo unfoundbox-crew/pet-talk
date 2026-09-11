@@ -3,6 +3,7 @@ import {
   AgentState,
   PersonaId,
   ServerFrame,
+  WS_URL,
   float32ToBase64Pcm16,
   newTurnId,
   socket,
@@ -35,6 +36,15 @@ interface QueuedSentence {
 
 function httpBaseFromWs(wsUrl: string): string {
   return wsUrl.replace(/^ws/, "http").replace(/\/ws\/?$/, "");
+}
+
+function resolveAudioUrl(url?: string): string {
+  if (!url) return "";
+  if (url.startsWith("http://") || url.startsWith("https://") || url.startsWith("blob:")) {
+    return url;
+  }
+  const base = httpBaseFromWs(WS_URL);
+  return `${base}${url.startsWith("/") ? "" : "/"}${url}`;
 }
 
 export default function App() {
@@ -200,7 +210,7 @@ export default function App() {
             queueRef.current.unshift({
               index: -1,
               text: "",
-              audio_url: frame.audio_url,
+              audio_url: resolveAudioUrl(frame.audio_url),
             });
             pumpQueue();
           }
@@ -211,7 +221,7 @@ export default function App() {
             queueRef.current.push({
               index: frame.index,
               text: frame.text,
-              audio_url: frame.audio_url,
+              audio_url: resolveAudioUrl(frame.audio_url),
             });
             // Keep queue ordered by sentence index (worker may stream fast).
             queueRef.current.sort((a, b) => a.index - b.index);
@@ -229,9 +239,7 @@ export default function App() {
   // --- Voices: try backend, keep static fallback ---
   useEffect(() => {
     let cancelled = false;
-    const base = httpBaseFromWs(
-      import.meta.env.VITE_WS_URL ?? "ws://127.0.0.1:8089",
-    );
+    const base = httpBaseFromWs(WS_URL);
     fetch(`${base}/voices`)
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error("no /voices"))))
       .then((data: unknown) => {

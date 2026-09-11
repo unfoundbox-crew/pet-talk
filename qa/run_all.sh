@@ -43,11 +43,12 @@ say "6/6 latency sec-8.4 budgets (asserted inside latency.py; drift fails loudly
 # standalone so a sec-6 pass can never mask a sec-8.4 drift.
 if python3 -c "import sys; sys.path.insert(0, '$ROOT/qa'); import latency; sys.exit(0 if latency.check_budgets() else 1)"; then :; else FAIL=1; fi
 
-say "7/7 live WS turn (needs server on :8099 + websockets; SKIP when absent)"
-if python3 -c "import socket; s=socket.socket(); s.settimeout(1.0); s.connect(('127.0.0.1', 8099))" 2>/dev/null; then
+say "7/7 live WS turn (needs server on :8089 + websockets; SKIP when absent)"
+APP_PORT="${APP_PORT:-8089}"
+if python3 -c "import socket; s=socket.socket(); s.settimeout(1.0); s.connect(('127.0.0.1', int('$APP_PORT')))" 2>/dev/null; then
   if python3 "$ROOT/qa/live_ws_turn.py" -v; then :; else FAIL=1; fi
 else
-  echo "SKIP  live WS turn — 127.0.0.1:8099 refused (boot \`python3 -m uvicorn server.app:app --port 8099\` from pet-talk/ to prove it)"
+  echo "SKIP  live WS turn — 127.0.0.1:$APP_PORT refused (boot \`python3 -m uvicorn server.app:app --port $APP_PORT\` from pet-talk/ to prove it)"
 fi
 
 say "summary"

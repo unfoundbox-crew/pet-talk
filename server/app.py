@@ -168,6 +168,16 @@ def _load_voices() -> list[dict]:
     return out
 
 
+@app.get("/")
+def root() -> dict[str, str]:
+    return {"service": "pet-talk", "status": "ok", "ws": "/ws"}
+
+
+@app.get("/health")
+def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
 @app.get("/voices")
 def voices() -> Response:
     try:
