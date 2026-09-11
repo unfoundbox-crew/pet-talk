@@ -2,6 +2,10 @@ import React, { useState } from "react";
 
 export interface RuntimeSettings {
   stt_provider: string;
+  deepgram_api_key?: string;
+  groq_api_key?: string;
+  openai_api_key?: string;
+  sensevoice_base_url?: string;
   llm_provider: string;
   llm_base_url: string;
   llm_model: string;
@@ -21,7 +25,15 @@ interface SettingsModalProps {
   onClose: () => void;
   settings: RuntimeSettings;
   activeProviders: ActiveProviders;
-  onApplySettings: (newSettings: Partial<RuntimeSettings> & { deepgram_api_key?: string; llm_api_key?: string }) => Promise<void>;
+  onApplySettings: (
+    newSettings: Partial<RuntimeSettings> & {
+      deepgram_api_key?: string;
+      groq_api_key?: string;
+      openai_api_key?: string;
+      sensevoice_base_url?: string;
+      llm_api_key?: string;
+    }
+  ) => Promise<void>;
   t: Record<string, string>;
 }
 
@@ -34,7 +46,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   t,
 }) => {
   const [sttProvider, setSttProvider] = useState(settings.stt_provider || "stub");
-  const [deepgramKey, setDeepgramKey] = useState("");
+  const [deepgramKey, setDeepgramKey] = useState(settings.deepgram_api_key || "");
+  const [groqKey, setGroqKey] = useState(settings.groq_api_key || "");
+  const [openaiKey, setOpenaiKey] = useState(settings.openai_api_key || "");
+  const [sensevoiceUrl, setSensevoiceUrl] = useState(settings.sensevoice_base_url || "http://127.0.0.1:8086");
   const [llmProvider, setLlmProvider] = useState(settings.llm_provider || "stub");
   const [llmBaseUrl, setLlmBaseUrl] = useState(settings.llm_base_url || "http://100.99.50.84:8000/v1");
   const [llmModel, setLlmModel] = useState(settings.llm_model || "claude-3-7-sonnet");
@@ -47,24 +62,29 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   if (!isOpen) return null;
 
-  const applyPreset = (preset: "mocks" | "fleet" | "cloud") => {
+  const applyPreset = (preset: "mocks" | "fleet" | "cloud" | "apple") => {
     if (preset === "mocks") {
       setSttProvider("stub");
       setLlmProvider("stub");
       setTtsProvider("stub");
     } else if (preset === "fleet") {
-      setSttProvider("deepgram");
+      setSttProvider("sensevoice");
+      setSensevoiceUrl("http://127.0.0.1:8086");
       setLlmProvider("litellm");
       setLlmBaseUrl("http://100.99.50.84:8000/v1");
       setLlmModel("claude-3-7-sonnet");
       setTtsProvider("kokoro");
       setKokoroUrl("http://127.0.0.1:8088");
     } else if (preset === "cloud") {
-      setSttProvider("deepgram");
+      setSttProvider("groq");
       setLlmProvider("openai");
       setLlmBaseUrl("https://api.openai.com/v1");
       setLlmModel("gpt-4o");
       setTtsProvider("elevenlabs");
+    } else if (preset === "apple") {
+      setSttProvider("whisperkit");
+      setLlmProvider("stub");
+      setTtsProvider("kokoro");
     }
   };
 
@@ -76,6 +96,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       await onApplySettings({
         stt_provider: sttProvider,
         deepgram_api_key: deepgramKey || undefined,
+        groq_api_key: groqKey || undefined,
+        openai_api_key: openaiKey || undefined,
+        sensevoice_base_url: sensevoiceUrl || undefined,
         llm_provider: llmProvider,
         llm_base_url: llmBaseUrl,
         llm_model: llmModel,
@@ -231,7 +254,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           {/* STT Settings */}
           <div style={{ marginBottom: "1rem", padding: "0.75rem", background: "#191c26", borderRadius: 8 }}>
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "0.4rem" }}>
-              <label style={{ fontSize: "0.8rem", fontWeight: 600, color: "#f1f3f9" }}>STT (Speech to Text)</label>
+              <label style={{ fontSize: "0.8rem", fontWeight: 600, color: "#f1f3f9" }}>STT (Speech to Text Matrix)</label>
+              <span style={{ fontSize: "0.7rem", color: "#636c84" }}>Cloud • Apple Silicon • Fleet</span>
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem" }}>
               <select
@@ -246,8 +270,21 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   fontSize: "0.8rem",
                 }}
               >
-                <option value="stub">StubSTT (Zero download)</option>
-                <option value="deepgram">Deepgram Nova-2 (Live)</option>
+                <optgroup label="Cloud Flagships">
+                  <option value="deepgram">Deepgram Nova-3 (Cloud)</option>
+                  <option value="groq">Groq Whisper LPU (Ultra-Fast)</option>
+                  <option value="openai">OpenAI Whisper (Cloud)</option>
+                </optgroup>
+                <optgroup label="Apple Silicon (Local)">
+                  <option value="whisperkit">WhisperKit (CoreML ANE)</option>
+                  <option value="mlx">MLX Whisper (Apple GPU)</option>
+                </optgroup>
+                <optgroup label="Sovereign Fleet">
+                  <option value="sensevoice">SenseVoice Fleet (:8086)</option>
+                </optgroup>
+                <optgroup label="Zero-Cost Mock">
+                  <option value="stub">StubSTT (Zero download)</option>
+                </optgroup>
               </select>
               {sttProvider === "deepgram" && (
                 <input
@@ -264,6 +301,69 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     fontSize: "0.8rem",
                   }}
                 />
+              )}
+              {sttProvider === "groq" && (
+                <input
+                  type="password"
+                  placeholder="Groq API Key (gsk_...)"
+                  value={groqKey}
+                  onChange={(e) => setGroqKey(e.target.value)}
+                  style={{
+                    padding: "0.4rem 0.6rem",
+                    borderRadius: 6,
+                    border: "1px solid #282c3f",
+                    background: "#090a0f",
+                    color: "#f1f3f9",
+                    fontSize: "0.8rem",
+                  }}
+                />
+              )}
+              {sttProvider === "openai" && (
+                <input
+                  type="password"
+                  placeholder="OpenAI API Key (sk-...)"
+                  value={openaiKey}
+                  onChange={(e) => setOpenaiKey(e.target.value)}
+                  style={{
+                    padding: "0.4rem 0.6rem",
+                    borderRadius: 6,
+                    border: "1px solid #282c3f",
+                    background: "#090a0f",
+                    color: "#f1f3f9",
+                    fontSize: "0.8rem",
+                  }}
+                />
+              )}
+              {sttProvider === "sensevoice" && (
+                <input
+                  type="text"
+                  placeholder="SenseVoice URL (http://...)"
+                  value={sensevoiceUrl}
+                  onChange={(e) => setSensevoiceUrl(e.target.value)}
+                  style={{
+                    padding: "0.4rem 0.6rem",
+                    borderRadius: 6,
+                    border: "1px solid #282c3f",
+                    background: "#090a0f",
+                    color: "#f1f3f9",
+                    fontSize: "0.8rem",
+                  }}
+                />
+              )}
+              {sttProvider === "whisperkit" && (
+                <div style={{ display: "flex", alignItems: "center", fontSize: "0.75rem", color: "#9ba3b8", paddingLeft: "0.25rem" }}>
+                  <span>⚡ Apple Neural Engine CoreML</span>
+                </div>
+              )}
+              {sttProvider === "mlx" && (
+                <div style={{ display: "flex", alignItems: "center", fontSize: "0.75rem", color: "#9ba3b8", paddingLeft: "0.25rem" }}>
+                  <span>🚀 Apple Silicon GPU via MLX</span>
+                </div>
+              )}
+              {sttProvider === "stub" && (
+                <div style={{ display: "flex", alignItems: "center", fontSize: "0.75rem", color: "#9ba3b8", paddingLeft: "0.25rem" }}>
+                  <span>✓ In-memory mock ($0)</span>
+                </div>
               )}
             </div>
           </div>
