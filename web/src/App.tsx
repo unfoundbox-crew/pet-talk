@@ -2,9 +2,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AgentState,
   PersonaId,
+  ScreenGrounding,
   ServerFrame,
   WS_URL,
+  fileToAttachment,
   float32ToBase64Pcm16,
+  newAttachRef,
   newTurnId,
   socket,
 } from "./ws";
@@ -16,6 +19,7 @@ import { PersonaData, PersonaStudio } from "./components/PersonaStudio";
 import { MemoryDrawer, MemoryTurn } from "./components/MemoryDrawer";
 import { ActiveProviders, RuntimeSettings, SettingsModal } from "./components/SettingsModal";
 import { PromptComposer } from "./components/PromptComposer";
+import { EyesAttachDock, EyesBlock, EyesEntry, ScreenGroundingLine } from "./components/EyesAttach";
 
 type Strings = typeof en;
 const STRINGS: Record<"en" | "hi", Strings> = { en, hi };
@@ -53,10 +57,16 @@ const DEFAULT_PERSONAS: PersonaData[] = [
 
 interface TranscriptLine {
   id: string;
-  who: "user" | "agent";
+  who: "user" | "agent" | "eyes";
   text: string;
   audio_url?: string;
   time: string;
+  /** Set when who === "eyes": key into the eyes entry map. */
+  eyesRef?: string;
+}
+
+function clockNow(): string {
+  return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
 interface QueuedSentence {
@@ -139,6 +149,11 @@ export default function App() {
   const [memoryTurns, setMemoryTurns] = useState<MemoryTurn[]>([]);
   const [lines, setLines] = useState<TranscriptLine[]>([]);
 
+  // Eyes lane (WAVE3 §1): one entry per attachment, keyed by ref.
+  const [eyesMap, setEyesMap] = useState<Record<string, EyesEntry>>({});
+  const [eyesNotice, setEyesNotice] = useState("");
+  const [screenGround, setScreenGround] = useState<ScreenGrounding | null>(null);
+
   // Refs for audio and streaming
   const turnRef = useRef<string>(newTurnId());
   const turnStartTimeRef = useRef<number>(0);
@@ -183,6 +198,55 @@ export default function App() {
       },
     ]);
   }, []);
+
+  const patchEyes = useCallback((ref: string, patch: Partial<EyesEntry>) => {
+    setEyesMap((prev) => (prev[ref] ? { ...prev, [ref]: { ...prev[ref], ...patch } } : prev));
+  }, []);
+
+  /** Read the file locally, show it in the transcript, then send user.attach. */
+  const handleAttach = useCallback(
+    async (file: File | Blob, hint?: "screenshot") => {
+      setEyesNotice("");
+      const ref = newAttachRef();
+      try {
+        const att = await fileToAttachment(file, ref, hint);
+        setEyesMap((prev) => ({
+          ...prev,
+          [ref]: {
+            ref,
+            kind: att.kind,
+            filename: att.filename,
+            bytes: att.bytes,
+            status: "sent",
+            time: clockNow(),
+          },
+        }));
+        setLines((prev) => [
+          ...prev,
+          {
+            id: `eyes-${ref}`,
+            who: "eyes",
+            text: "",
+            time: clockNow(),
+            eyesRef: ref,
+          },
+        ]);
+        socket.send({
+          type: "user.attach",
+          turn_id: turnRef.current,
+          ref,
+          kind: att.kind,
+          mime: att.mime,
+          b64: att.b64,
+          filename: att.filename,
+        });
+      } catch (e) {
+        // Same reason vocabulary as the server, so one UI covers both.
+        setEyesNotice((e as Error)?.message || "eyes_bad_kind");
+      }
+    },
+    [],
+  );
 
   // --- Playback queue: play sentence N while prefetching N+1 ---
   const pumpQueue = useCallback(() => {
@@ -403,6 +467,8 @@ export default function App() {
           break;
         case "state.thinking":
           setState("thinking");
+          // Optional AX grounding (lane C). Absent on most builds; ignore then.
+          setScreenGround(frame.screen ?? null);
           break;
         case "state.speaking":
           setState("speaking");
@@ -465,8 +531,33 @@ export default function App() {
             })
             .catch(() => {});
           break;
+        case "eyes.received":
+          patchEyes(frame.ref, {
+            status: "received",
+            task: frame.task,
+            kind: frame.kind ?? "image",
+            bytes: frame.bytes,
+          });
+          break;
+        case "eyes.text":
+          patchEyes(frame.ref, {
+            status: "text",
+            text: frame.text,
+            truncated: Boolean(frame.truncated),
+            task: frame.task,
+            engine: frame.engine,
+            source: frame.source,
+          });
+          break;
         case "agent.error":
           console.warn("[pet-talk] Agent error frame:", frame.reason);
+          if (frame.ref) {
+            patchEyes(frame.ref, {
+              status: "error",
+              reason: frame.reason,
+              detail: frame.detail,
+            });
+          }
           break;
       }
     });
@@ -475,7 +566,7 @@ export default function App() {
       off();
       socket.close();
     };
-  }, [pushLine, pumpQueue]);
+  }, [pushLine, pumpQueue, patchEyes]);
 
   // --- Fetch Voices, Personas, and Memory Ledger on load ---
   useEffect(() => {
@@ -983,6 +1074,11 @@ export default function App() {
             </span>
           </div>
 
+          <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", marginBottom: "0.85rem" }}>
+            <ScreenGroundingLine screen={screenGround} />
+            <EyesAttachDock onAttach={handleAttach} disabled={!connected} notice={eyesNotice} />
+          </div>
+
           <div
             data-testid="transcript"
             style={{
@@ -998,7 +1094,12 @@ export default function App() {
                 Hold spacebar to talk. Transcripts and sentence audio will stream live here.
               </div>
             ) : (
-              lines.map((line) => (
+              lines.map((line) =>
+                line.who === "eyes" ? (
+                  eyesMap[line.eyesRef ?? ""] ? (
+                    <EyesBlock key={line.id} entry={eyesMap[line.eyesRef as string]} />
+                  ) : null
+                ) : (
                 <div
                   key={line.id}
                   style={{
@@ -1050,7 +1151,8 @@ export default function App() {
                     </div>
                   )}
                 </div>
-              ))
+                ),
+              )
             )}
           </div>
         </section>
