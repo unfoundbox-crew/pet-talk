@@ -114,6 +114,13 @@ RESEARCH_TRIGGERS = (
     "deep dive",
     "what is the weather",
     "weather",
+    "what is going on",
+    "what's going on",
+    "how are things",
+    "status report",
+    "check on",
+    "explain",
+    "analyze",
 )
 
 
@@ -202,6 +209,8 @@ class OpenAICompatibleLLM(LLMProvider):
             "model": self.model,
             "messages": messages,
             "stream": True,
+            "max_tokens": 50,
+            "temperature": 0.7,
         }
 
         if httpx is not None:
@@ -226,9 +235,12 @@ class OpenAICompatibleLLM(LLMProvider):
                                 delta = chunk["choices"][0]["delta"].get("content") or ""
                             except Exception:
                                 continue
-                            if not delta:
-                                continue
                             buf += delta
+                            if "<think>" in buf and "</think>" in buf:
+                                import re
+                                buf = re.sub(r"<think>[\s\S]*?</think>", "", buf).lstrip()
+                            elif "<think>" in buf and "</think>" not in buf:
+                                continue
                             while True:
                                 split_idx = -1
                                 for i, ch in enumerate(buf):
@@ -236,6 +248,12 @@ class OpenAICompatibleLLM(LLMProvider):
                                         if i + 1 == len(buf) or buf[i + 1].isspace():
                                             split_idx = i + 1
                                             break
+                                    elif ch in (";", "—") and len(buf[:i].split()) >= 5:
+                                        split_idx = i + 1
+                                        break
+                                    elif ch == "," and len(buf[:i].split()) >= 8:
+                                        split_idx = i + 1
+                                        break
                                 if split_idx != -1:
                                     sentence = buf[:split_idx].strip()
                                     buf = buf[split_idx:].lstrip()
@@ -244,7 +262,13 @@ class OpenAICompatibleLLM(LLMProvider):
                                 else:
                                     break
                         if buf.strip():
-                            yield buf.strip()
+                            if "<think>" in buf and "</think>" in buf:
+                                import re
+                                buf = re.sub(r"<think>[\s\S]*?</think>", "", buf).strip()
+                            elif "<think>" in buf:
+                                buf = ""
+                            if buf.strip():
+                                yield buf.strip()
             except ProviderError:
                 raise
             except Exception as e:
@@ -254,13 +278,24 @@ class OpenAICompatibleLLM(LLMProvider):
                 from openai import AsyncOpenAI  # type: ignore
 
                 client = AsyncOpenAI(base_url=endpoint, api_key=self.api_key or "x")
-                resp = await client.chat.completions.create(model=self.model, messages=messages, stream=True)
+                resp = await client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    stream=True,
+                    max_tokens=50,
+                    temperature=0.7,
+                )
                 buf = ""
                 async for chunk in resp:
                     delta = chunk.choices[0].delta.content if chunk.choices else None
                     if not delta:
                         continue
                     buf += delta
+                    if "<think>" in buf and "</think>" in buf:
+                        import re
+                        buf = re.sub(r"<think>[\s\S]*?</think>", "", buf).lstrip()
+                    elif "<think>" in buf and "</think>" not in buf:
+                        continue
                     while True:
                         split_idx = -1
                         for i, ch in enumerate(buf):
@@ -268,6 +303,12 @@ class OpenAICompatibleLLM(LLMProvider):
                                 if i + 1 == len(buf) or buf[i + 1].isspace():
                                     split_idx = i + 1
                                     break
+                            elif ch in (";", "—") and len(buf[:i].split()) >= 5:
+                                split_idx = i + 1
+                                break
+                            elif ch == "," and len(buf[:i].split()) >= 8:
+                                split_idx = i + 1
+                                break
                         if split_idx != -1:
                             sentence = buf[:split_idx].strip()
                             buf = buf[split_idx:].lstrip()
@@ -276,7 +317,13 @@ class OpenAICompatibleLLM(LLMProvider):
                         else:
                             break
                 if buf.strip():
-                    yield buf.strip()
+                    if "<think>" in buf and "</think>" in buf:
+                        import re
+                        buf = re.sub(r"<think>[\s\S]*?</think>", "", buf).strip()
+                    elif "<think>" in buf:
+                        buf = ""
+                    if buf.strip():
+                        yield buf.strip()
             except Exception as e:
                 raise ProviderError("llm_stream_failed", str(e))
 
@@ -1004,8 +1051,13 @@ def make_llm(
     model: Optional[str] = None,
     api_key: Optional[str] = None,
 ) -> LLMProvider:
-    """Tyre switch: LLM_PROVIDER=litellm|openai|fleet|local|stub (default: litellm)."""
+    """Tyre switch: LLM_PROVIDER=groq|litellm|openai|fleet|local|stub."""
     which = (provider or os.environ.get("LLM_PROVIDER", "litellm")).lower()
+    if which == "groq":
+        b_url = base_url or "https://api.groq.com/openai/v1"
+        m = model or "groq/compound-mini"
+        key = api_key or os.environ.get("GROQ_API_KEY", "")
+        return OpenAICompatibleLLM(base_url=b_url, model=m, api_key=key)
     if which in ("openai", "litellm", "fleet", "local"):
         b_url = base_url or os.environ.get("LLM_BASE_URL", "http://100.99.50.84:8000/v1")
         m = model or os.environ.get("LLM_MODEL", "claude-sonnet-4-6")

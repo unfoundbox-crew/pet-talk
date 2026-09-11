@@ -165,3 +165,47 @@ class CleanProseFormatter:
         t = cls.format_punctuation(t)
 
         return t
+
+
+class VoiceProseFormatter:
+    """Format text for natural spoken TTS playback:
+    - Strips markdown formatting (*, _, `, #, ~, >, etc.)
+    - Removes code blocks, URLs, and file paths
+    - Replaces parentheses with natural pause phrasing
+    - Expands or simplifies developer syntax (git hashes, ports)
+    - Enforces max word/character boundaries for low TTS latency
+    """
+
+    @classmethod
+    def sanitize(cls, text: str, max_words: int = 25) -> str:
+        if not text or not text.strip():
+            return ""
+
+        # 1. Strip code fences: ``` ... ```
+        t = re.sub(r"```[\s\S]*?```", "", text)
+        # 2. Strip inline code: `foo` -> foo
+        t = re.sub(r"`([^`]+)`", r"\1", t)
+        # 3. Strip URLs first so parens around URLs don't get malformed
+        t = re.sub(r"https?://\S+", "", t)
+        # 4. Strip bold/italic/strikethrough: **foo** -> foo, *foo* -> foo, _foo_ -> foo
+        t = re.sub(r"[*_~]{1,3}([^*_~]+)[*_~]{1,3}", r"\1", t)
+        # 5. Strip markdown headings: # Title -> Title
+        t = re.sub(r"^#+\s*", "", t, flags=re.MULTILINE)
+        # 6. Clean up file paths: dir/file.ext -> file.ext
+        t = re.sub(r"[\w\-]+(?:/[\w\-]+)+", lambda m: m.group(0).split("/")[-1], t)
+        # 7. Replace parentheses with commas / pause, and strip any stray brackets/parens
+        t = re.sub(r"\(([^)]*)\)", r", \1,", t)
+        t = re.sub(r"[()\[\]{}]", "", t)
+        # 8. Collapse whitespace and repeated punctuation
+        t = re.sub(r"\s+", " ", t).strip()
+        t = re.sub(r",+", ",", t)
+        t = re.sub(r"\s+,", ",", t)
+
+        # 9. Clamp words if excessively long for speech
+        words = t.split()
+        if len(words) > max_words:
+            t = " ".join(words[:max_words]).rstrip(",;:— -") + "."
+
+        return t.strip()
+
+

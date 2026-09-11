@@ -25,7 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from starlette.websockets import WebSocketState
 
-from .dictation import CleanProseFormatter
+from .dictation import CleanProseFormatter, VoiceProseFormatter
 from .memory import Hippocampus
 from .persona import (
     Persona,
@@ -110,12 +110,21 @@ RUNTIME_SETTINGS = {
     "groq_api_key": os.environ.get("GROQ_API_KEY", ""),
     "openai_api_key": os.environ.get("OPENAI_API_KEY", ""),
     "sensevoice_base_url": os.environ.get("SENSEVOICE_BASE_URL", "http://100.99.50.84:8086"),
-    "llm_provider": os.environ.get("LLM_PROVIDER", "litellm").lower(),
-    "llm_base_url": os.environ.get("LLM_BASE_URL", "http://100.99.50.84:8000/v1"),
-    "llm_model": os.environ.get("LLM_MODEL", "claude-sonnet-4-6"),
+    "llm_provider": os.environ.get(
+        "LLM_PROVIDER",
+        "groq" if os.environ.get("GROQ_API_KEY") else "litellm",
+    ).lower(),
+    "llm_base_url": os.environ.get(
+        "LLM_BASE_URL",
+        "https://api.groq.com/openai/v1" if os.environ.get("GROQ_API_KEY") else "http://100.99.50.84:8000/v1",
+    ),
+    "llm_model": os.environ.get(
+        "LLM_MODEL",
+        "groq/compound-mini" if os.environ.get("GROQ_API_KEY") else "claude-sonnet-4-6",
+    ),
     "llm_api_key": os.environ.get(
         "LLM_API_KEY",
-        os.environ.get("LITELLM_MASTER_KEY", "sk-3340dc7a5732b32c09a08a86da68b7400a9778d3bbbc574a"),
+        os.environ.get("GROQ_API_KEY", os.environ.get("LITELLM_MASTER_KEY", "sk-3340dc7a5732b32c09a08a86da68b7400a9778d3bbbc574a")),
     ),
     "tts_provider": os.environ.get("TTS_PROVIDER", "kokoro").lower(),
     "kokoro_base_url": os.environ.get("KOKORO_BASE_URL", "http://127.0.0.1:8088"),
@@ -466,19 +475,60 @@ async def _safe_send_json(ws: WebSocket, payload: dict) -> bool:
         return False
 
 
+_STALL_AUDIO_CACHE: dict[str, tuple[str, bytes]] = {}
+
+
+def _get_or_synth_stall(stall_text: str, p: Persona) -> tuple[str, bytes]:
+    """Retrieve pre-cached stall audio or synthesize on demand."""
+    clean_text = VoiceProseFormatter.sanitize(stall_text, max_words=15) or stall_text
+    cache_key = f"{p.name}:{p.voice}:{clean_text}"
+    if cache_key in _STALL_AUDIO_CACHE:
+        audio_id, wav = _STALL_AUDIO_CACHE[cache_key]
+        if audio_id in _audio_store:
+            return audio_id, wav
+
+    try:
+        wav, _ = tts.synth(clean_text, voice=p.voice, speed=p.speed)
+    except Exception:
+        wav = b""
+    audio_id = f"stall-{uuid.uuid4().hex[:8]}"
+    if wav:
+        _store_audio(audio_id, wav)
+        _STALL_AUDIO_CACHE[cache_key] = (audio_id, wav)
+    return audio_id, wav
+
+
+def check_deterministic_control(text: str) -> tuple[bool, Optional[str]]:
+    """Check if turn is a local deterministic command (<20ms, 0 LLM latency)."""
+    t = text.strip().lower().rstrip(".?!,")
+    # Silence / abort turn
+    if t in ("stop", "cancel", "pause", "be quiet", "shut up", "hush", "silence", "halt"):
+        return True, None
+    # Quick status check
+    if t in ("status", "ping", "are you there", "system status", "health", "test"):
+        return True, "All systems online and ready."
+    # Who are you
+    if t in ("who are you", "who is this", "what is your name", "introduce yourself"):
+        return True, "I'm Donna, your Chief of Staff. What do you need?"
+    return False, None
+
+
 async def _speak_sentence(
     ws: WebSocket, turn_id: str, sentence: str, seq: int, active_persona: Optional[Persona] = None
 ) -> bool:
     p = active_persona or persona
+    clean_text = VoiceProseFormatter.sanitize(sentence, max_words=20)
+    if not clean_text:
+        clean_text = sentence.strip()
     try:
-        wav, _word_times = tts.synth(sentence, voice=p.voice, speed=p.speed)
+        wav, _word_times = tts.synth(clean_text, voice=p.voice, speed=p.speed)
     except ProviderError as e:
         await _safe_send_json(ws, frame("agent.error", turn_id, reason=e.reason, seq=seq))
         return False
     audio_id = f"{turn_id}-s{seq}"
     _store_audio(audio_id, wav)
     return await _safe_send_json(
-        ws, frame("agent.sentence", turn_id, seq=seq, text=sentence, audio_url=f"/audio/{audio_id}")
+        ws, frame("agent.sentence", turn_id, seq=seq, text=clean_text, audio_url=f"/audio/{audio_id}")
     )
 
 
@@ -545,7 +595,13 @@ def get_session_grounding() -> str:
                 for s in steps:
                     msg = s.get("ephemeralMessage", "")
                     if msg:
-                        grounding_parts.append(msg)
+                        # Clean out raw git command lines to prevent reciting code aloud
+                        clean_lines = [
+                            line for line in msg.splitlines()
+                            if not line.strip().startswith(("git ", "[", "$", "#", "Active"))
+                        ]
+                        if clean_lines:
+                            grounding_parts.append("\n".join(clean_lines[:4]))
         except Exception:
             pass
 
@@ -568,6 +624,10 @@ def get_session_grounding() -> str:
         pass
 
     grounding_parts.append("Active services: Kokoro TTS (:8088), Pet-Talk WS (:8089), LiteLLM Fleet Proxy (:8000)")
+    grounding_parts.append(
+        "(INTERNAL CONTEXT ONLY — NEVER RECITE FILE PATHS, GIT COMMANDS, OR RAW PORTS ALOUD. "
+        "Keep reply strictly under 20 words in natural spoken prose.)"
+    )
     return "\n\n".join(grounding_parts)
 
 
@@ -575,33 +635,18 @@ async def handle_turn(
     ws: WebSocket, turn_id: str, text: str, queue: SpeakQueue,
     log: Optional[TurnLog] = None, active_persona: Optional[Persona] = None,
 ) -> None:
-    """Router stub: stall+worker path vs direct answer path."""
+    """Router: deterministic control vs stall+worker vs direct answer."""
     if not text or not text.strip():
         await _safe_send_json(ws, frame("agent.error", turn_id, reason="empty_transcript"))
         await _safe_send_json(ws, frame("agent.done", turn_id))
         if log is not None:
             log.end(path="empty", chars=0, sentences=0)
         return
+
     p = active_persona or persona
-    path = llm.route(text) if hasattr(llm, "route") else route_text(text)
     chars = 0
     first = True
     spoken_sentences: list[str] = []
-
-    pname = getattr(p, "name", "donna")
-    history = memory.get_history_messages(pname, limit=6)
-    live_ctx = get_session_grounding()
-    instruction = (
-        getattr(p, "instruction_spec", "")
-        or (
-            f"You are Donna—Saurabh's Chief of Staff, agent co-founder, and digital twin brain.\n"
-            f"{p.tone}\n\n"
-            f"[ACTIVE SYSTEM GROUNDING]\n"
-            f"{live_ctx}\n\n"
-            f"Respond concisely in 1 to 2 spoken sentences. Speak with authentic authority, wit, and dignity."
-        )
-    )
-    messages = [{"role": "system", "content": instruction}, *history, {"role": "user", "content": text}]
 
     async def _speak_tracked(sentence: str, seq: int) -> bool:
         nonlocal chars, first
@@ -615,16 +660,65 @@ async def handle_turn(
         first = False
         return True
 
+    # 1. Deterministic Control Fast-Path (<20ms)
+    is_control, control_reply = check_deterministic_control(text)
+    if is_control:
+        if control_reply is None:
+            # Immediate silence / stop
+            await _safe_send_json(ws, frame("agent.done", turn_id, path="control", sentences=0))
+            if log is not None:
+                log.end(path="control", chars=0, sentences=0)
+            return
+        if not await _safe_send_json(ws, frame("state.speaking", turn_id)):
+            return
+        await _speak_tracked(control_reply, seq=0)
+        await _safe_send_json(ws, frame("agent.done", turn_id, path="control", sentences=1))
+        if log is not None:
+            log.mark("done")
+            log.end(path="control", chars=len(control_reply), sentences=1)
+        memory.record_turn(turn_id, getattr(p, "name", "donna"), text, spoken_sentences)
+        return
+
+    # 2. Route general request
+    path = llm.route(text) if hasattr(llm, "route") else route_text(text)
+    pname = getattr(p, "name", "donna")
+    history = memory.get_history_messages(pname, limit=6)
+    live_ctx = get_session_grounding()
+    instruction = (
+        getattr(p, "instruction_spec", "")
+        or (
+            f"You are Donna—Saurabh's Chief of Staff, agent co-founder, and digital twin brain.\n"
+            f"{p.tone}\n\n"
+            f"[ACTIVE SYSTEM GROUNDING]\n"
+            f"{live_ctx}\n\n"
+            f"CRITICAL LIVE VOICE RULES:\n"
+            f"1. Respond strictly in 1 or 2 concise spoken sentences (maximum 15-20 words total).\n"
+            f"2. Deliver the direct answer or punchline immediately.\n"
+            f"3. Never use markdown, bullet points, asterisks, backticks, code snippets, or parentheticals.\n"
+            f"4. Never recite file names, git hashes, or raw service ports.\n"
+            f"5. Speak with dry wit, poise, authentic authority, and dignity."
+        )
+    )
+    messages = [{"role": "system", "content": instruction}, *history, {"role": "user", "content": text}]
+
     if path == "stall":
         stall_text = p.stall_for(0)
+        audio_id, _ = _get_or_synth_stall(stall_text, p)
         if not await _safe_send_json(ws, frame("agent.stall", turn_id, phrase_id="stall-0", text=stall_text)):
             return
         if log is not None:
             log.mark("stall")
         if not await _safe_send_json(ws, frame("state.thinking", turn_id)):
             return
-        if not await _speak_tracked(stall_text, seq=0):
+        # Send pre-cached stall audio immediately (<2ms)
+        if not await _safe_send_json(
+            ws, frame("agent.sentence", turn_id, seq=0, text=stall_text, audio_url=f"/audio/{audio_id}")
+        ):
             return
+        if log is not None:
+            log.mark("first_sentence")
+        chars += len(stall_text)
+        spoken_sentences.append(stall_text)
         # Worker path: stream >=1 sentences behind the playing stall audio.
         if not await _safe_send_json(ws, frame("state.speaking", turn_id)):
             return
@@ -637,8 +731,6 @@ async def handle_turn(
                     if not await _speak_tracked(queued, seq=seq):
                         break
                     seq += 1
-                    # Test hook only: stretch the turn so barge-kill is observable.
-                    # PET_TALK_TURN_DELAY_MS=0 (default) in production.
                     await asyncio.sleep(_turn_delay_s())
         except ProviderError as e:
             await _safe_send_json(ws, frame("agent.error", turn_id, reason=e.reason))
@@ -647,7 +739,6 @@ async def handle_turn(
         await _safe_send_json(ws, frame("agent.done", turn_id, path="worker", sentences=seq - 1))
         if log is not None:
             log.end(path="worker", chars=chars, sentences=seq - 1)
-        # Record completed turn in durable Hippocampus ledger
         memory.record_turn(turn_id, pname, text, spoken_sentences)
     else:
         if not await _safe_send_json(ws, frame("state.thinking", turn_id)):
@@ -669,7 +760,6 @@ async def handle_turn(
         await _safe_send_json(ws, frame("agent.done", turn_id, path="direct", sentences=seq))
         if log is not None:
             log.end(path="direct", chars=chars, sentences=seq)
-        # Record completed turn in durable Hippocampus ledger
         memory.record_turn(turn_id, pname, text, spoken_sentences)
 
 

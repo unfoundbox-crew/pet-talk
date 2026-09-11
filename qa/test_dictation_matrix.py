@@ -33,7 +33,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from server.dictation import CleanProseFormatter
+from server.dictation import CleanProseFormatter, VoiceProseFormatter
 from server.providers import (
     DeepgramSTT,
     GroqSTT,
@@ -386,5 +386,33 @@ class TestSTTFactoryAndResolution(unittest.TestCase):
         self.assertIn(b"WAVE", wav[:16])
 
 
+class TestVoiceProseFormatter(unittest.TestCase):
+    """Test VoiceProseFormatter stripping markdown and constraining words for TTS."""
+
+    def test_strip_markdown_formatting(self):
+        raw = "Hold that thought, I'm three steps ahead—**HUD** is live, and `cli/client.py` has *changes*."
+        sanitized = VoiceProseFormatter.sanitize(raw)
+        self.assertNotIn("**", sanitized)
+        self.assertNotIn("`", sanitized)
+        self.assertNotIn("*", sanitized)
+        self.assertNotIn("cli/client.py", sanitized)
+        self.assertIn("client.py", sanitized)
+
+    def test_strip_parentheses_and_urls(self):
+        raw = "Check the docs (found at https://unfoundbox.com/docs) for details."
+        sanitized = VoiceProseFormatter.sanitize(raw)
+        self.assertNotIn("https://", sanitized)
+        self.assertNotIn("(", sanitized)
+        self.assertNotIn(")", sanitized)
+
+    def test_word_clamp(self):
+        long_text = "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty twentyone twentytwo twentythree twentyfour twentyfive twentysix twentyseven"
+        sanitized = VoiceProseFormatter.sanitize(long_text, max_words=10)
+        words = sanitized.split()
+        self.assertLessEqual(len(words), 10)
+        self.assertTrue(sanitized.endswith("."))
+
+
 if __name__ == "__main__":
     unittest.main()
+
