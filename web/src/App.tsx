@@ -127,7 +127,14 @@ export default function App() {
   // --- Mic: getUserMedia + ScriptProcessor 128-sample chunks -> user.start ---
   const startTalking = useCallback(async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1,
+        },
+      });
       const Ctx: typeof AudioContext =
         window.AudioContext ??
         (window as unknown as { webkitAudioContext: typeof AudioContext })
@@ -148,7 +155,11 @@ export default function App() {
         });
       };
       src.connect(proc);
-      proc.connect(ctx.destination);
+      // Mute monitor to prevent speaker feedback loop; zero-gain keeps proc running
+      const zeroGain = ctx.createGain();
+      zeroGain.gain.value = 0;
+      proc.connect(zeroGain);
+      zeroGain.connect(ctx.destination);
       micRef.current = { stream, ctx, proc, src };
       setTalking(true);
     } catch {

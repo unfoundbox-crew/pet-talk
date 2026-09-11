@@ -24,17 +24,9 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
+from .memory import Hippocampus
 from .persona import load_persona
-from .providers import ProviderError, StubLLM, StubSTT, StubTTS, route_text
-
-try:
-    from .providers import KokoroSpacePilotTTS as _Kokoro
-
-    _kokoro = _Kokoro()
-    _kokoro.synth("ok", voice="af_heart")
-    tts = _kokoro
-except Exception:
-    tts = StubTTS()
+from .providers import ProviderError, make_llm, make_stt, make_tts, route_text
 from .telemetry import TurnLog
 
 # ---------------------------------------------------------------- queue ---
@@ -92,9 +84,10 @@ SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
 VOICES_PATH = os.path.join(os.path.dirname(SERVER_DIR), "personas", "voices.yaml")
 TURNS_PATH = os.path.join(SERVER_DIR, "turns.jsonl")
 
-stt = StubSTT()
-llm = StubLLM()
-# tts resolved above (Kokoro-live else Stub fallback).
+stt = make_stt()
+llm = make_llm()
+tts = make_tts()
+memory = Hippocampus(ledger_path=os.path.join(SERVER_DIR, "ledger.jsonl"))
 persona = load_persona()  # built-in default until personas/ exists
 
 
@@ -251,11 +244,21 @@ async def handle_turn(
     path = llm.route(text) if hasattr(llm, "route") else route_text(text)
     chars = 0
     first = True
+    spoken_sentences: list[str] = []
+
+    pname = getattr(persona, "name", "donna")
+    history = memory.get_history_messages(pname, limit=6)
+    instruction = (
+        getattr(persona, "instruction_spec", "")
+        or f"You are {pname}. Respond concisely in 1 to 2 spoken sentences."
+    )
+    messages = [{"role": "system", "content": instruction}, *history, {"role": "user", "content": text}]
 
     async def _speak_tracked(sentence: str, seq: int) -> None:
         nonlocal chars, first
         await _speak_sentence(ws, turn_id, sentence, seq=seq)
         chars += len(sentence)
+        spoken_sentences.append(sentence)
         if first and log is not None:
             log.mark("first_sentence")
         first = False
@@ -271,7 +274,7 @@ async def handle_turn(
         await ws.send_json(frame("state.speaking", turn_id))
         seq = 1
         try:
-            async for sentence in llm.stream([{"role": "user", "content": text}]):
+            async for sentence in llm.stream(messages):
                 await queue.push(sentence)
                 queued = await queue.pop()
                 if queued is not None:
@@ -287,12 +290,14 @@ async def handle_turn(
         await ws.send_json(frame("agent.done", turn_id, path="worker", sentences=seq - 1))
         if log is not None:
             log.end(path="worker", chars=chars, sentences=seq - 1)
+        # Record completed turn in durable Hippocampus ledger
+        memory.record_turn(turn_id, pname, text, spoken_sentences)
     else:
         await ws.send_json(frame("state.thinking", turn_id))
         await ws.send_json(frame("state.speaking", turn_id))
         seq = 0
         try:
-            async for sentence in llm.stream([{"role": "user", "content": text}]):
+            async for sentence in llm.stream(messages):
                 await _speak_tracked(sentence, seq=seq)
                 seq += 1
                 if seq >= 1:
@@ -304,6 +309,8 @@ async def handle_turn(
         await ws.send_json(frame("agent.done", turn_id, path="direct", sentences=seq))
         if log is not None:
             log.end(path="direct", chars=chars, sentences=seq)
+        # Record completed turn in durable Hippocampus ledger
+        memory.record_turn(turn_id, pname, text, spoken_sentences)
 
 
 @app.websocket("/ws")

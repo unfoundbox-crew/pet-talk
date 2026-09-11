@@ -163,10 +163,28 @@ class OpenAICompatibleLLM(LLMProvider):
             resp = await client.chat.completions.create(
                 model=self.model, messages=messages, stream=True
             )
+            buf = ""
             async for chunk in resp:
                 delta = chunk.choices[0].delta.content if chunk.choices else None
-                if delta:
-                    yield delta
+                if not delta:
+                    continue
+                buf += delta
+                while True:
+                    split_idx = -1
+                    for i, ch in enumerate(buf):
+                        if ch in (".", "!", "?", "\n"):
+                            if i + 1 == len(buf) or buf[i + 1].isspace():
+                                split_idx = i + 1
+                                break
+                    if split_idx != -1:
+                        sentence = buf[:split_idx].strip()
+                        buf = buf[split_idx:].lstrip()
+                        if sentence:
+                            yield sentence
+                    else:
+                        break
+            if buf.strip():
+                yield buf.strip()
         except ProviderError:
             raise
         except Exception as e:
@@ -489,6 +507,17 @@ def make_stt() -> STTProvider:
     if which in ("whisper-local", "whisper_local", "whisper", "local"):
         raise ProviderError("stt_not_wired", "whisper-local not wired")
     return StubSTT()
+
+
+def make_llm() -> LLMProvider:
+    """Tyre switch: LLM_PROVIDER=stub|openai|litellm|fleet (default: stub)."""
+    which = os.environ.get("LLM_PROVIDER", "stub").lower()
+    if which in ("openai", "litellm", "fleet", "local"):
+        base_url = os.environ.get("LLM_BASE_URL", "http://100.99.50.84:8000/v1")
+        model = os.environ.get("LLM_MODEL", "claude-3-7-sonnet")
+        api_key = os.environ.get("LLM_API_KEY", "x")
+        return OpenAICompatibleLLM(base_url=base_url, model=model, api_key=api_key)
+    return StubLLM()
 
 
 # ---------------------------------------------------------------- VAD ---

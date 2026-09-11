@@ -17,6 +17,9 @@ if python3 "$ROOT/qa/test_protocol.py" -v; then :; else FAIL=1; fi
 say "2/4 personas + voices + i18n (stdlib unittest)"
 if python3 "$ROOT/qa/test_persona.py" -v; then :; else FAIL=1; fi
 
+say "2b/4 hippocampus memory ledger (stdlib unittest)"
+if python3 "$ROOT/qa/test_memory.py" -v; then :; else FAIL=1; fi
+
 say "3/4 latency budget (honest stub until backend exists)"
 if python3 "$ROOT/qa/latency.py"; then :; else FAIL=1; fi
 
