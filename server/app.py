@@ -516,6 +516,61 @@ async def handle_turn_task(
         turn_tasks.pop(turn_id, None)
 
 
+def get_session_grounding() -> str:
+    """Collect real-time grounding from active Antigravity session and git checkouts."""
+    import json
+    import os
+    import subprocess
+
+    grounding_parts = []
+
+    # 1. Try Archie wake hook for live session grounding & persona
+    hook_path = os.path.expanduser("~/.gemini/config/hooks/archie-wake.sh")
+    if os.path.isfile(hook_path):
+        try:
+            payload = {
+                "conversationId": os.environ.get("AGY_CONVERSATION_ID", "c466f375-c0da-4491-993d-7eb36d468e23"),
+                "workspacePaths": ["/Users/saurabh"],
+            }
+            res = subprocess.run(
+                ["bash", hook_path],
+                input=json.dumps(payload),
+                capture_output=True,
+                text=True,
+                timeout=1.5,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                data = json.loads(res.stdout)
+                steps = data.get("injectSteps", [])
+                for s in steps:
+                    msg = s.get("ephemeralMessage", "")
+                    if msg:
+                        grounding_parts.append(msg)
+        except Exception:
+            pass
+
+    # 2. Add local workspace git checkout grounding
+    try:
+        sp_out = subprocess.check_output(
+            ["git", "-C", "/Users/saurabh/code/motionvector/spacepilot", "log", "-n", "1", "--oneline"],
+            text=True, timeout=1, stderr=subprocess.DEVNULL
+        ).strip()
+        grounding_parts.append(f"SpacePilot recent commit: {sp_out}")
+    except Exception:
+        pass
+    try:
+        pt_out = subprocess.check_output(
+            ["git", "-C", "/Users/saurabh/code/unfoundbox-crew/pet-talk", "log", "-n", "1", "--oneline"],
+            text=True, timeout=1, stderr=subprocess.DEVNULL
+        ).strip()
+        grounding_parts.append(f"Pet-Talk recent commit: {pt_out}")
+    except Exception:
+        pass
+
+    grounding_parts.append("Active services: Kokoro TTS (:8088), Pet-Talk WS (:8089), LiteLLM Fleet Proxy (:8000)")
+    return "\n\n".join(grounding_parts)
+
+
 async def handle_turn(
     ws: WebSocket, turn_id: str, text: str, queue: SpeakQueue,
     log: Optional[TurnLog] = None, active_persona: Optional[Persona] = None,
@@ -535,9 +590,16 @@ async def handle_turn(
 
     pname = getattr(p, "name", "donna")
     history = memory.get_history_messages(pname, limit=6)
+    live_ctx = get_session_grounding()
     instruction = (
         getattr(p, "instruction_spec", "")
-        or f"You are {pname}. {p.tone}\nRespond concisely in 1 to 2 spoken sentences."
+        or (
+            f"You are Donna—Saurabh's Chief of Staff, agent co-founder, and digital twin brain.\n"
+            f"{p.tone}\n\n"
+            f"[ACTIVE SYSTEM GROUNDING]\n"
+            f"{live_ctx}\n\n"
+            f"Respond concisely in 1 to 2 spoken sentences. Speak with authentic authority, wit, and dignity."
+        )
     )
     messages = [{"role": "system", "content": instruction}, *history, {"role": "user", "content": text}]
 
