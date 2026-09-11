@@ -63,8 +63,14 @@ fi
 say "8/9 terminal CLI client (audio recording, playback, barge-in <=50ms, WS client)"
 if python3 "$ROOT/qa/test_cli_client.py" -v; then :; else FAIL=1; fi
 
-say "9/9 native macOS global hotkey listener (Carbon Option+Tab, sub-50ms barge kill, daemon lifecycle)"
+say "9/10 native macOS global hotkey listener (Carbon Option+Tab, sub-50ms barge kill, daemon lifecycle)"
 if python3 "$ROOT/qa/test_hotkey.py" -v; then :; else FAIL=1; fi
+
+say "10/11 floating glass capsule HUD (NSPanel, Obsidian Zinc, kinetic glyphs, nonactivating)"
+if python3 "$ROOT/qa/test_hud.py" -v; then :; else FAIL=1; fi
+
+say "11/11 acoustic earcons & config engine (sub-2ms CoreAudio/NSSound pre-cached in RAM, sound packs)"
+if python3 "$ROOT/qa/test_earcons.py" -v; then :; else FAIL=1; fi
 
 say "summary"
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: OK (passes + honest SKIP/NOT-MEASURED only)"; else echo "RESULT: FAIL"; fi

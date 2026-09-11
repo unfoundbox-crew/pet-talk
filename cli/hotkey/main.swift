@@ -8,6 +8,7 @@
 // - Launches `bin/pet-talk-cli once` on hotkey press.
 // - Zero polling / <0.1% CPU: blocks on CFRunLoopRun() waiting for Mach port Carbon events.
 
+import AppKit
 import Carbon
 import CoreFoundation
 import Darwin
@@ -106,6 +107,24 @@ class HotkeyListener {
         }
     }
 
+    func logCliOutput(_ text: String) {
+        if isDaemon {
+            if !FileManager.default.fileExists(atPath: HotkeyConfig.logFile) {
+                FileManager.default.createFile(atPath: HotkeyConfig.logFile, contents: nil)
+            }
+            if let handle = FileHandle(forWritingAtPath: HotkeyConfig.logFile) {
+                handle.seekToEndOfFile()
+                if let data = text.data(using: .utf8) {
+                    handle.write(data)
+                }
+                handle.closeFile()
+            }
+        } else {
+            fputs(text, stdout)
+            fflush(stdout)
+        }
+    }
+
     func resolveCliPath() -> String {
         if let overridePath = cliOverridePath, FileManager.default.isExecutableFile(atPath: overridePath) {
             return overridePath
@@ -147,16 +166,25 @@ class HotkeyListener {
             log("| [barge-in] Terminated previous pet-talk-cli process")
         }
 
-        if !wasActive {
-            log("| [idle] Triggered -> starting one-shot recording turn...")
-        } else {
+        if wasActive {
+            // Immediate barge-kill earcon (<1ms)
+            EarconEngine.shared.playBargeKill()
             log("| [barge-in] Starting fresh recording turn...")
+            // Cue mic open chime right after barge kill chime (35ms)
+            DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(35)) {
+                EarconEngine.shared.playMicOpen()
+            }
+        } else {
+            // Immediate mic open earcon (<1.2ms)
+            EarconEngine.shared.playMicOpen()
+            log("| [idle] Triggered -> starting one-shot recording turn...")
         }
 
         // 2. Launch pet-talk-cli once
         let cliPath = resolveCliPath()
         guard FileManager.default.isExecutableFile(atPath: cliPath) else {
             log("! [error] pet-talk-cli executable not found at \(cliPath)")
+            EarconEngine.shared.playError()
             return
         }
 
@@ -164,23 +192,62 @@ class HotkeyListener {
         proc.executableURL = URL(fileURLWithPath: cliPath)
         proc.arguments = ["once"]
 
-        if isDaemon {
-            if !FileManager.default.fileExists(atPath: HotkeyConfig.logFile) {
-                FileManager.default.createFile(atPath: HotkeyConfig.logFile, contents: nil)
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        proc.standardOutput = outPipe
+        proc.standardError = errPipe
+
+        var silenceCutoffFired = false
+
+        let forwardOutput: (Data) -> Void = { [weak self] data in
+            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            self?.logCliOutput(text)
+
+            // Detect turn transitions from pet-talk-cli output
+            if !silenceCutoffFired && (text.contains("[THINKING]") || text.contains("Transcribing") || text.contains("user.stop")) {
+                silenceCutoffFired = true
+                EarconEngine.shared.playSilenceCutoff()
+                HUDController.shared.update(state: .thinking)
             }
-            if let logHandle = FileHandle(forWritingAtPath: HotkeyConfig.logFile) {
-                logHandle.seekToEndOfFile()
-                proc.standardOutput = logHandle
-                proc.standardError = logHandle
+            if text.contains("[SPEAKING]") {
+                HUDController.shared.update(state: .speaking)
             }
+            if text.contains("[ERROR]") || text.contains("Error:") {
+                EarconEngine.shared.playError()
+            }
+        }
+
+        outPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            forwardOutput(data)
+        }
+        errPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            forwardOutput(data)
         }
 
         do {
             try proc.run()
             activeCliProc = proc
             log("| [spawned] \(cliPath) once (PID: \(proc.processIdentifier))")
+            HUDController.shared.show(state: .listening)
+            proc.terminationHandler = { [weak self] process in
+                outPipe.fileHandleForReading.readabilityHandler = nil
+                errPipe.fileHandleForReading.readabilityHandler = nil
+                let remOut = outPipe.fileHandleForReading.readDataToEndOfFile()
+                forwardOutput(remOut)
+                let remErr = errPipe.fileHandleForReading.readDataToEndOfFile()
+                forwardOutput(remErr)
+
+                HUDController.shared.dismiss()
+                if process.terminationStatus != 0 && !silenceCutoffFired {
+                    EarconEngine.shared.playError()
+                }
+                self?.activeCliProc = nil
+            }
         } catch {
             log("! [error] Failed to launch pet-talk-cli: \(error)")
+            EarconEngine.shared.playError()
         }
     }
 
@@ -205,6 +272,14 @@ class HotkeyListener {
     }
 
     func startListening() -> Int32 {
+        _ = NSApplication.shared
+        NSApplication.shared.setActivationPolicy(.accessory)
+
+        // Pre-load configuration and acoustic earcons
+        let config = PetTalkConfig.load()
+        EarconEngine.shared.configure(from: config)
+        EarconEngine.shared.prewarm()
+
         let cliPath = resolveCliPath()
         ProcessManager.writePid(getpid())
 
@@ -212,6 +287,8 @@ class HotkeyListener {
         log("| PID: \(getpid())")
         log("| Hotkey: Option + Tab (keycode: \(HotkeyConfig.hotKeyCode), mod: 0x\(String(HotkeyConfig.hotKeyModifier, radix: 16, uppercase: true)))")
         log("| Target CLI: \(cliPath)")
+        log("| Earcons: enabled=\(EarconEngine.shared.isEnabled), pack=\(EarconEngine.shared.soundPack), vol=\(String(format: "%.2f", EarconEngine.shared.volume))")
+        log("| HUD: Obsidian Deep Zinc Capsule (220x44px)")
         log("| Mode: \(isDaemon ? "Daemon (background)" : "Foreground")")
         log("| Ready for global Option+Tab barge-in turns (<0.1% CPU)...")
 
@@ -283,6 +360,7 @@ class HotkeyListener {
 
     func cleanup() {
         log("+-- pet-talk-hotkey shutting down...")
+        HUDController.shared.dismiss()
         if let ref = hotKeyRef {
             UnregisterEventHotKey(ref)
             hotKeyRef = nil
@@ -299,22 +377,37 @@ class HotkeyListener {
 
 func printUsage() {
     let usage = """
-    pet-talk-hotkey — Native macOS Option+Tab Global Hotkey Listener
+    pet-talk-hotkey — Native macOS Option+Tab Global Hotkey Listener & Sensory Presence
 
     Usage:
       pet-talk-hotkey                     Run listener in foreground (<0.1% CPU)
       pet-talk-hotkey start               Spawn daemon in background
       pet-talk-hotkey stop                Stop running daemon
       pet-talk-hotkey status              Check if listener daemon is active
+      pet-talk-hotkey test-audio          Play & benchmark acoustic earcons sequence (<2ms)
+      pet-talk-hotkey test-hud            Pop up floating glass capsule HUD in each state (1.5s each)
+      pet-talk-hotkey config show         Show current configuration
+      pet-talk-hotkey config set <k> <v>  Update configuration setting
+      pet-talk-hotkey --dump-hud-spec     Dump HUD specification JSON for test assertions
       pet-talk-hotkey --check-registration Verify Carbon hotkey registration
       pet-talk-hotkey --barge-benchmark   Benchmark afplay barge-in kill latency
       pet-talk-hotkey --help              Show this help message
 
-    Specifications:
-      Key:      Tab (kVK_Tab, keycode 48)
-      Modifier: Option (optionKey, 0x0800 / 2048)
-      Barge-in: <= 50ms afplay instant kill via Darwin libproc
-      Action:   Launches `bin/pet-talk-cli once`
+    Options for test-audio:
+      --volume <0.0-1.0>                  Set earcon volume
+      --sound-pack <pack>                 apple_minimal | cyberpunk | haptic | none
+      --no-audio                          Disable earcons
+
+    Sensory Presence Specifications:
+      Key:        Tab (kVK_Tab, keycode 48)
+      Modifier:   Option (optionKey, 0x0800 / 2048)
+      Barge-in:   <= 50ms afplay instant kill via Darwin libproc
+      Earcons:    Pre-loaded NSSound in RAM (<2ms latency)
+                  - Mic Open:       Tink.aiff (24ms)
+                  - Silence Cutoff: Pop.aiff (32ms)
+                  - Barge Kill:     Bottle.aiff (18ms)
+                  - Error:          Basso.aiff (45ms)
+      HUD:        220x44px Obsidian Glass NSPanel [.nonactivatingPanel]
     """
     print(usage)
 }
@@ -430,6 +523,153 @@ func doBargeBenchmark() -> Int32 {
     }
 }
 
+func doTestHUD() -> Int32 {
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+
+    print("+-- Testing Pet-Talk Floating Glass Capsule HUD...")
+    print("| Window: 220x44px NSPanel [.nonactivatingPanel, .borderless]")
+    print("| Level: .floating, Spaces: [.canJoinAllSpaces, .fullScreenAuxiliary]")
+    print("| Theme: Obsidian Deep Zinc (#12141c @ 85%) + 1px border (#282c3f)")
+    print("| State 1 (1.5s): [LISTENING] Emerald True (#10b981) + 'Listening...'")
+
+    HUDController.shared.show(state: .listening)
+
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+        print("| State 2 (1.5s): [THINKING] SpacePilot Gold (#c9a227) + 'Donna thinking...'")
+        HUDController.shared.update(state: .thinking)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            print("| State 3 (1.5s): [SPEAKING] Liquid Silver (#cfd4dc) + 'Speaking...'")
+            HUDController.shared.update(state: .speaking)
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                print("| Dismissing HUD (200ms ease-out fade)...")
+                HUDController.shared.dismiss {
+                    print("+-- PASS: HUD visual test sequence completed.")
+                    CFRunLoopStop(CFRunLoopGetMain())
+                }
+            }
+        }
+    }
+
+    CFRunLoopRun()
+    return 0
+}
+
+func doDumpHUDSpec() -> Int32 {
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+
+    let summary = HUDController.shared.getSpecificationSummary()
+    if let data = try? JSONSerialization.data(withJSONObject: summary, options: [.prettyPrinted, .sortedKeys]),
+       let jsonStr = String(data: data, encoding: .utf8) {
+        print(jsonStr)
+        return 0
+    } else {
+        print("{\"error\": \"Failed to serialize HUD specification summary\"}")
+        return 1
+    }
+}
+
+func doTestAudio(args: [String]) -> Int32 {
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+
+    print("+-- Testing Pet-Talk Acoustic Earcon Engine...")
+
+    // Load configuration
+    var config = PetTalkConfig.load()
+
+    // Handle CLI flags
+    if let volIdx = args.firstIndex(of: "--volume"), volIdx + 1 < args.count, let vol = Float(args[volIdx + 1]) {
+        config.audio.volume = max(0.0, min(1.0, vol))
+    }
+    if let packIdx = args.firstIndex(of: "--sound-pack"), packIdx + 1 < args.count {
+        config.audio.soundPack = args[packIdx + 1]
+    }
+    if args.contains("--no-audio") || args.contains("--disable") {
+        config.audio.enabled = false
+    }
+
+    EarconEngine.shared.configure(from: config)
+    EarconEngine.shared.prewarm()
+
+    print("| Sound Pack: \(EarconEngine.shared.soundPack) (Volume: \(String(format: "%.2f", EarconEngine.shared.volume)), Enabled: \(EarconEngine.shared.isEnabled))")
+
+    let results = EarconEngine.shared.testSequence()
+    var allPassed = true
+    let budgetMs: Double = 2.0
+
+    for (index, r) in results.enumerated() {
+        let soundNum = index + 1
+        let triggerName = r.trigger.displayName
+        let status: String
+        if !EarconEngine.shared.isEnabled {
+            status = "DISABLED"
+        } else {
+            status = r.success ? "PASS" : "FAIL"
+        }
+        let latStr = String(format: "%.3f", r.latencyMs)
+        print("| \(soundNum). \(triggerName) -> \(r.path) (\(latStr)ms) [\(status)]")
+
+        if !r.success || (!EarconEngine.shared.isEnabled ? false : r.latencyMs > budgetMs) {
+            if EarconEngine.shared.isEnabled {
+                allPassed = false
+            }
+        }
+    }
+
+    if EarconEngine.shared.isEnabled {
+        if allPassed {
+            print("+-- PASS: All earcon triggers executed within SLA budget (<= \(budgetMs)ms).")
+            return 0
+        } else {
+            print("!-- FAIL: One or more earcon triggers failed or exceeded \(budgetMs)ms budget.")
+            return 1
+        }
+    } else {
+        print("+-- Audio earcons disabled by configuration/flag.")
+        return 0
+    }
+}
+
+func doConfig(args: [String]) -> Int32 {
+    let subcmd = args.first ?? "show"
+    var config = PetTalkConfig.load()
+
+    switch subcmd {
+    case "show":
+        print(config.toYAML())
+        return 0
+    case "set":
+        guard args.count >= 3 else {
+            print("Usage: pet-talk-hotkey config set <key> <value>")
+            print("Example: pet-talk-hotkey config set audio.sound_pack cyberpunk")
+            print("         pet-talk-hotkey config set audio.volume 0.65")
+            return 1
+        }
+        let key = args[1]
+        let val = args[2]
+        if config.setProperty(key: key, value: val) {
+            do {
+                try config.save()
+                print("+-- Successfully updated \(key) = \(val) in \(PetTalkConfig.defaultConfigPath)")
+                return 0
+            } catch {
+                print("!-- Error saving config: \(error)")
+                return 1
+            }
+        } else {
+            print("!-- Unknown or unsupported config key: \(key)")
+            return 1
+        }
+    default:
+        print("Unknown config command: \(subcmd)")
+        return 1
+    }
+}
+
 // MARK: - Entry Point
 
 let args = Array(CommandLine.arguments.dropFirst())
@@ -442,6 +682,14 @@ case "stop":
     exit(doStop())
 case "status":
     exit(doStatus())
+case "test-audio", "--test-audio", "--test-earcons":
+    exit(doTestAudio(args: args))
+case "config":
+    exit(doConfig(args: Array(args.dropFirst())))
+case "test-hud":
+    exit(doTestHUD())
+case "--dump-hud-spec":
+    exit(doDumpHUDSpec())
 case "--check-registration", "--verify":
     exit(doVerify())
 case "--barge-benchmark":

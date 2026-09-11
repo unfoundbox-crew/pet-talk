@@ -10,6 +10,7 @@ Verifies:
 """
 from __future__ import annotations
 
+import glob
 import os
 import shutil
 import subprocess
@@ -18,7 +19,7 @@ import time
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SWIFT_SRC = os.path.join(ROOT, "cli", "hotkey", "main.swift")
+SWIFT_SRCS = sorted(glob.glob(os.path.join(ROOT, "cli", "hotkey", "*.swift")))
 BIN_PATH = os.path.join(ROOT, "bin", "pet-talk-hotkey")
 PID_FILE = "/tmp/pet-talk-hotkey.pid"
 
@@ -31,10 +32,11 @@ class TestHotkeyCompilation(unittest.TestCase):
         self.assertIsNotNone(swiftc, "swiftc compiler must be available on macOS")
 
     def test_clean_compilation(self):
-        self.assertTrue(os.path.exists(SWIFT_SRC), f"Source file missing: {SWIFT_SRC}")
+        for src in SWIFT_SRCS:
+            self.assertTrue(os.path.exists(src), f"Source file missing: {src}")
 
         os.makedirs(os.path.dirname(BIN_PATH), exist_ok=True)
-        cmd = ["swiftc", "-O", SWIFT_SRC, "-o", BIN_PATH]
+        cmd = ["swiftc", "-O"] + SWIFT_SRCS + ["-o", BIN_PATH]
         res = subprocess.run(cmd, capture_output=True, text=True)
 
         self.assertEqual(
@@ -56,7 +58,7 @@ class TestCarbonHotkeyRegistration(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         if not os.path.exists(BIN_PATH):
-            subprocess.run(["swiftc", "-O", SWIFT_SRC, "-o", BIN_PATH], check=True)
+            subprocess.run(["swiftc", "-O"] + SWIFT_SRCS + ["-o", BIN_PATH], check=True)
 
     def test_keycode_and_modifier_registration(self):
         res = subprocess.run(
