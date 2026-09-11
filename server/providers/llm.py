@@ -10,6 +10,10 @@ from __future__ import annotations
 import abc
 import asyncio
 import os
+
+# LiteLLM proxy default. Point at your own proxy via LITELLM_BASE_URL; no fleet
+# host is baked into the tree.
+DEFAULT_LITELLM_BASE_URL = os.environ.get("LITELLM_BASE_URL", "http://127.0.0.1:4000/v1")
 from typing import Any, AsyncIterator, Optional
 
 from ._shared import (
@@ -123,7 +127,7 @@ class OpenAICompatibleLLM(LLMProvider):
 
     def __init__(
         self,
-        base_url: str = "http://100.99.50.84:8000/v1",
+        base_url: str = DEFAULT_LITELLM_BASE_URL,
         model: str = "claude-sonnet-4-6",
         api_key: str = "",
         max_tokens: Optional[int] = None,
@@ -278,7 +282,7 @@ class OpenAICompatibleLLM(LLMProvider):
 
     def __init__(
         self,
-        base_url: str = "http://100.99.50.84:8000/v1",
+        base_url: str = DEFAULT_LITELLM_BASE_URL,
         model: str = "claude-sonnet-4-6",
         api_key: str = "",
         max_tokens: Optional[int] = None,
@@ -333,26 +337,6 @@ class OpenAICompatibleLLM(LLMProvider):
             payload["max_tokens"] = self.max_tokens
             payload["temperature"] = 0.7
         return payload
-
-    def _check_reachable(self) -> None:
-        """Fail fast and loud if a known-flaky host is unreachable, instead
-        of the previous behavior: silently swapping the Tailscale fleet
-        address (100.99.50.84) for 127.0.0.1 and trying there without
-        telling anyone. An unreachable host is now a named, immediate
-        ProviderError — never a quiet reroute.
-        """
-        if "100.99.50.84" not in self.base_url:
-            return
-        import socket
-
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(0.5)
-        try:
-            sock.connect(("100.99.50.84", 8000))
-        except Exception as e:
-            raise ProviderError("provider_unreachable", f"{self.base_url}: {e}")
-        finally:
-            sock.close()
 
     async def stream(self, messages: list[dict]) -> AsyncIterator[str]:
         import json as _json
@@ -450,7 +434,7 @@ def make_llm(
     logger.debug("make_llm: selecting provider=%s", which)
 
     if which in ("haiku", "claude-haiku", "claude"):
-        b_url = base_url or os.environ.get("ANTHROPIC_BASE_URL") or "http://100.99.50.84:8000/v1"
+        b_url = base_url or os.environ.get("ANTHROPIC_BASE_URL") or DEFAULT_LITELLM_BASE_URL
         m = model or os.environ.get("HAIKU_MODEL", "claude-3-5-haiku-20241022")
         key = _require_key(
             api_key or os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("LITELLM_MASTER_KEY"),
@@ -492,7 +476,7 @@ def make_llm(
         return OpenAICompatibleLLM(base_url=b_url, model=m, api_key=key)
 
     if which in ("litellm", "fleet", "local"):
-        b_url = base_url or os.environ.get("LLM_BASE_URL", "http://100.99.50.84:8000/v1")
+        b_url = base_url or os.environ.get("LLM_BASE_URL", DEFAULT_LITELLM_BASE_URL)
         m = model or os.environ.get("LLM_MODEL", "claude-sonnet-4-6")
         key = _require_key(
             api_key or os.environ.get("LLM_API_KEY") or os.environ.get("LITELLM_MASTER_KEY"),
