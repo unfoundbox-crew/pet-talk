@@ -172,7 +172,7 @@ export const MemoryDrawer: React.FC<MemoryDrawerProps> = ({
         ) : (
           filteredTurns.map((turn, idx) => (
             <div
-              key={turn.turn_id || idx}
+              key={`${turn.turn_id || "turn"}-${turn.timestamp || idx}-${idx}`}
               style={{
                 background: "#191c26",
                 border: "1px solid #282c3f",

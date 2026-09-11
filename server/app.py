@@ -286,6 +286,14 @@ def get_audio(audio_id: str) -> Response:
     return Response(content=wav, media_type="audio/wav")
 
 
+async def _safe_send_json(ws: WebSocket, payload: dict) -> bool:
+    try:
+        await ws.send_json(payload)
+        return True
+    except (RuntimeError, WebSocketDisconnect):
+        return False
+
+
 async def _speak_sentence(
     ws: WebSocket, turn_id: str, sentence: str, seq: int, active_persona: Optional[Persona] = None
 ) -> None:
@@ -293,12 +301,12 @@ async def _speak_sentence(
     try:
         wav, _word_times = tts.synth(sentence, voice=p.voice, speed=p.speed)
     except ProviderError as e:
-        await ws.send_json(frame("agent.error", turn_id, reason=e.reason, seq=seq))
+        await _safe_send_json(ws, frame("agent.error", turn_id, reason=e.reason, seq=seq))
         return
     audio_id = f"{turn_id}-s{seq}"
     _audio_store[audio_id] = wav
-    await ws.send_json(
-        frame("agent.sentence", turn_id, seq=seq, text=sentence, audio_url=f"/audio/{audio_id}")
+    await _safe_send_json(
+        ws, frame("agent.sentence", turn_id, seq=seq, text=sentence, audio_url=f"/audio/{audio_id}")
     )
 
 
