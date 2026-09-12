@@ -69,6 +69,7 @@ SUITES=(
   "Smallest.ai Lightning TTS & OpenAI reasoning tyres|qa/test_new_tyres.py|unit|"
   "voice forensics & latency analyzer|qa/test_voice_analyzer.py|unit|REAL"
   "real engine e2e (Kokoro/STT/LLM)|qa/test_real_engine_e2e.py|unit|REAL"
+  "first-turn STT warm on a live server (:8090, its own)|qa/test_stt_warm_live.py|unit|REAL"
   "archie receipts, freshness law & chip rules|qa/test_receipts.py|unit|"
   "streaming STT (partials, early stall, tail finalize)|qa/test_stt_streaming.py|unit|"
   "archie small-form glyph, states & placement rules|qa/test_archie_glyph.py|unit|"

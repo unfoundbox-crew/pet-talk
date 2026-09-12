@@ -13,6 +13,7 @@ lives in focused modules:
     ws.py           the /ws reader loop and barge
     routes_http.py  HTTP routes
     voices.py       personas/voices.yaml reader
+    warmup.py       startup STT warm (the cold first turn's model load)
 
 Wire protocol is unchanged (TECH-SPEC section 4): every frame carries
 ``turn_id``; ``barge`` kills playback and flushes; the worker path streams
@@ -60,6 +61,7 @@ from .speak_queue import ResumePoint, SpeakQueue, SpokenSentence
 from .control import Control, check_deterministic_control
 from .persona_runtime import build_system_prompt, resolve_persona
 from .stall import get_or_synth_stall, stall_cache_key, warm_stall_cache
+from .warmup import silent_pcm16, stt_warm_enabled, warm_stt
 from .speech import TurnResult, run_speech, speak_sentence
 from .turn import handle_turn, handle_turn_task
 from .voices import load_voices, parse_voices_minimal
@@ -97,19 +99,41 @@ app.include_router(routes_http.router)
 app.include_router(ws_module.router)
 
 
-#: Strong reference to the startup warm task (see below).
+#: Strong references to the startup warm tasks (see below).
 _WARM_TASK = None
+_STT_WARM_TASK = None
+
+
+def warm_tasks() -> list:
+    """The startup warm tasks that were actually scheduled.
+
+    A seam for the gate: `qa/test_turn_lifecycle.py` awaits these to prove the
+    startup hook warms STT exactly once, without the flakiness of sleeping and
+    hoping the loop got a turn.
+    """
+    return [t for t in (_WARM_TASK, _STT_WARM_TASK) if t is not None]
 
 
 @app.on_event("startup")
 async def _warm_on_startup() -> None:
-    """Pre-synthesize the default persona's stall phrases (lane 2).
+    """Warm the two things a cold first turn otherwise pays for: the stall
+    phrases (TTS) and the STT model.
 
-    Scheduled as a task and never awaited: the WS port must accept connections
-    immediately, and a slow or unavailable TTS backend must not hold the boot.
-    The cold first turn was the only thing breaching ``turn_worst_ms`` — 1455ms
-    cold against 291ms warm (measured 2026-09-12b). ``PET_TALK_STALL_WARM=0``
-    turns it off and says so in the log.
+    Both are scheduled as tasks and neither is awaited: the WS port must accept
+    connections immediately, and a slow or unavailable backend must not hold
+    the boot. They run concurrently because they are different providers, so
+    the slower one does not gate the other.
+
+    Why each exists, measured on this machine:
+
+    * **Stall warm.** The cold first turn was the only thing breaching
+      ``turn_worst_ms`` — 1455ms cold against 291ms warm (2026-09-12b).
+      ``PET_TALK_STALL_WARM=0`` turns it off and says so in the log.
+    * **STT warm.** With TTS and the stall cache both pre-warmed, the first
+      turn after a boot still stalled 1264ms while faster-whisper loaded its
+      weights on the first call; warm turns that day ran 317-383ms. One short
+      transcription of silence at startup buys that load back.
+      ``PET_TALK_STT_WARM=0`` turns it off and says so in the log.
     """
     import asyncio as _asyncio
 
@@ -119,12 +143,19 @@ async def _warm_on_startup() -> None:
         except Exception as e:  # a failed warm must never take the server down
             swallowed("stall_warm_task_failed", e)
 
-    # The reference is held on purpose. asyncio keeps only a weak reference to
+    async def _warm_stt() -> None:
+        try:
+            await warm_stt(runtime.current().stt)
+        except Exception as e:  # warm_stt does not raise; belt and braces
+            swallowed("stt_warm_task_failed", e)
+
+    # The references are held on purpose. asyncio keeps only a weak reference to
     # a running task, so a bare `create_task(...)` whose result nobody holds can
     # be garbage-collected before it ever runs — measured here: the first boot
     # of this hook logged nothing at all because of exactly that.
-    global _WARM_TASK
+    global _WARM_TASK, _STT_WARM_TASK
     _WARM_TASK = _asyncio.create_task(_warm(), name="stall-warm")
+    _STT_WARM_TASK = _asyncio.create_task(_warm_stt(), name="stt-warm")
 
 # --------------------------------------------------- compatibility names ---
 # The live provider triple is published here because this is the documented
@@ -199,11 +230,15 @@ __all__ = [
     "safe_send_json",
     "save_persona",
     "send_error",
+    "silent_pcm16",
     "speak_sentence",
     "stall_cache_key",
     "store_audio",
     "studio_token",
     "stt",
+    "stt_warm_enabled",
     "tts",
+    "warm_stt",
+    "warm_tasks",
     "ws_endpoint",
 ]
