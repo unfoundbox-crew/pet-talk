@@ -24,9 +24,15 @@ from .settings import REPO_ROOT
 MAX_GROUNDING_CHARS = 460
 GIT_TIMEOUT_S = 1.0
 AX_TIMEOUT_S = 0.3
+#: How long a detached reaper waits on a killed child before giving up on it.
+REAP_TIMEOUT_S = 5.0
 AX_ENV_FLAG = "PET_TALK_AX"
 AX_BIN_ENV = "PET_TALK_HOTKEY_BIN"
 GROUNDING_REPOS_ENV = "PET_TALK_GROUNDING_REPOS"
+
+#: Strong refs to detached reaper tasks, so they are not garbage collected
+#: mid-flight (asyncio only keeps weak references to running tasks).
+_REAPERS: set[asyncio.Task] = set()
 
 VOICE_GUARD = (
     "(INTERNAL CONTEXT ONLY — never recite file paths, git commands, or raw "
@@ -67,6 +73,35 @@ class AxSnapshot:
         return f"Screen: {self.app} — {self.window}".strip()
 
 
+async def _reap(proc: "asyncio.subprocess.Process") -> None:
+    """Wait on a killed child off the caller's critical path."""
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=REAP_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        swallowed("grounding_subprocess_unreaped", None, pid=proc.pid)
+    except Exception as e:  # pragma: no cover — reaping is best effort
+        swallowed("grounding_subprocess_reap_failed", e, pid=proc.pid)
+
+
+def _abandon(proc: "asyncio.subprocess.Process") -> None:
+    """Kill a child and reap it in the background.
+
+    Never await its exit here: a grandchild that inherited the stdout pipe
+    keeps ``proc.wait()`` blocked until IT exits, which would make a 300ms
+    timeout take as long as the command wanted to run (measured: 5.0s).
+    """
+    if proc.returncode is None:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        except Exception as e:  # pragma: no cover
+            swallowed("grounding_subprocess_kill_failed", e, pid=proc.pid)
+    task = asyncio.ensure_future(_reap(proc))
+    _REAPERS.add(task)
+    task.add_done_callback(_REAPERS.discard)
+
+
 async def _run(argv: list[str], timeout_s: float) -> Optional[str]:
     """Run a command off the loop with a hard timeout. None on any failure."""
     proc: Optional[asyncio.subprocess.Process] = None
@@ -79,12 +114,8 @@ async def _run(argv: list[str], timeout_s: float) -> Optional[str]:
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
     except asyncio.TimeoutError:
         swallowed("grounding_subprocess_timeout", None, argv=argv[0], timeout_s=timeout_s)
-        if proc is not None and proc.returncode is None:
-            proc.kill()
-            try:
-                await proc.wait()
-            except Exception as e:  # pragma: no cover — reaping a killed child
-                swallowed("grounding_subprocess_reap_failed", e, argv=argv[0])
+        if proc is not None:
+            _abandon(proc)
         return None
     except FileNotFoundError as e:
         swallowed("grounding_subprocess_missing", e, argv=argv[0])
@@ -131,7 +162,7 @@ async def ax_snapshot() -> Optional[AxSnapshot]:
         swallowed("ax_bad_json", None, line=line[:120])
         return None
     if not data.get("ok"):
-        swallowed("ax_not_ok", None, reason=data.get("reason", "unspecified"))
+        swallowed("ax_not_ok", None, ax_reason=data.get("reason", "unspecified"))
         return None
     app = str(data.get("app") or "").strip()
     window = str(data.get("window") or "").strip()

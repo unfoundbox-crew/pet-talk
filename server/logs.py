@@ -23,10 +23,14 @@ if not log.handlers:
 log.setLevel(os.environ.get("PET_TALK_LOG_LEVEL", "INFO").upper())
 
 
-def swallowed(reason: str, exc: BaseException | None = None, **context: object) -> str:
+def swallowed(
+    reason: str, exc: BaseException | None = None, /, **context: object
+) -> str:
     """Log an exception the caller deliberately kept from killing the loop.
 
     Returns the reason so callers can hand it straight to ``agent.error``.
+    ``reason`` and ``exc`` are positional-only, so a context key of either
+    name (``reason=`` is a natural one to want) cannot collide with them.
     """
     extras = " ".join(f"{k}={v!r}" for k, v in context.items())
     log.warning(
