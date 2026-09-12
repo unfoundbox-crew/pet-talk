@@ -187,6 +187,7 @@ class RuntimeSettings:
     opencode_api_key: str = ""
     gemini_api_key: str = ""
     anthropic_api_key: str = ""
+    elevenlabs_api_key: str = ""
 
     sensevoice_base_url: str = ""
     kokoro_base_url: str = ""
@@ -233,6 +234,7 @@ class RuntimeSettings:
                 or os.environ.get("GOOGLE_API_KEY", "")
             ),
             anthropic_api_key=anthropic,
+            elevenlabs_api_key=os.environ.get("ELEVENLABS_API_KEY", ""),
             sensevoice_base_url=_env_default("SENSEVOICE_BASE_URL", "http://127.0.0.1:8086"),
             kokoro_base_url=_env_default("KOKORO_BASE_URL", "http://127.0.0.1:8088"),
             llm_base_url=_resolve_chain(base_vars, base_literal, "LLM_BASE_URL"),
@@ -265,8 +267,18 @@ class RuntimeSettings:
         return ""
 
     def key_for_tts(self) -> str:
+        # ``TTS_REQUIRED_KEY`` has always listed ``elevenlabs`` and
+        # ``deepgram`` as needing a key; this method just never returned
+        # one for either, so ``provider_factory._require_key`` degraded
+        # them with ``missing_api_key`` even with the real env var set
+        # (found 2026-09-12, lane 4c capability-matrix pass — see
+        # qa/test_capability_matrix.py and docs/CAPABILITY-MATRIX.md).
         if self.tts_provider in ("smallest", "smallest-ai", "smallest_ai", "waves"):
             return self.smallest_api_key
+        if self.tts_provider == "elevenlabs":
+            return self.elevenlabs_api_key
+        if self.tts_provider == "deepgram":
+            return self.deepgram_api_key
         return ""
 
     # -- serialization --------------------------------------------------

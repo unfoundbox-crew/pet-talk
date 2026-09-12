@@ -64,7 +64,7 @@ server reads studio token from .qa-scratch/studio.token at boot
 Full frame catalogue and every `agent.error` reason are the contract in `docs/SPEC.md` §4 — do not duplicate the table here, only the type names:
 
 - Client to server: `user.start`, `user.chunk`, `user.stop`, `user.text`, `user.attach`, `barge`.
-- Server to client: `state.idle`/`state.listening`/`state.thinking`/`state.speaking`, `transcript.user`, `agent.stall`, `agent.sentence`, `agent.done`, `agent.error`, `eyes.received`, `eyes.text`.
+- Server to client: `state.idle`/`state.listening`/`state.thinking`/`state.speaking`, `transcript.user`, `agent.stall`, `agent.sentence`, `agent.done`, `agent.error`, `eyes.received`, `eyes.text`, `agent.receipt`.
 
 ### HTTP routes (`server/routes_http.py`)
 
@@ -174,6 +174,7 @@ TTSProvider.synth(text: str, voice: str, speed: float) -> tuple[bytes, list[dict
 | zero-vision (zrv) | pet-talk calls out | `server/eyes.py` shells the `zrv` CLI for local OCR (`--engine apple-vision` etc.) | `docs/SPEC.md` §8 |
 | realengine | none | — | — |
 | SpacePilot | pet-talk calls out (optional) | Kokoro TTS daemon auth token can be `SPACEPILOT_TOKEN` (`providers/tts.py`) | — |
+| agentworth (archie) | pet-talk calls out | `server/receipts_archie.py` shells the `archie` CLI with `--json` (`session wake`, `repo blame`, `repo suspect`, `session list`) for session and commit provenance. Read-only; ids, paths and token counts only, never transcript content. A missing or failing binary is `receipts_unavailable`, never a silent pass. | `docs/SPEC.md` §8a |
 
 ## Invariants
 
@@ -188,6 +189,8 @@ Numbered from `AGENTS.md`'s seven laws:
 7. Night mode `PET_TALK_SILENT=1` — nothing plays audio or starts an audio daemon — enforced by `qa/run_all.sh`'s `SILENT`-tagged suites (skip under the flag) per AGENTS.md; cross-check `qa/test_earcons.py`, `qa/test_hud.py`.
 
 Latency budgets (`qa/budgets.json`), each mapped to its gate per `docs/SPEC.md` §9.2: stall ≤400ms (`qa/latency.py`, `qa/test_turn_lifecycle.py`), barge ≤100ms (`qa/latency.py`, `qa/test_turn_lifecycle.py`, `qa/test_socket_resilience.py`), turn p50 ≤800ms / worst ≤1200ms (`qa/latency.py`), provider swap zero-code-change (`qa/test_providers.py`, `qa/test_settings_api.py`), persona switch isolation (`qa/test_persona.py`, `qa/test_persona_api.py`). Turn-level budgets are measured against real providers as of 2026-09-12b and all three hold; `tts_ms` and cold-start `turn_worst_ms` do not — see `docs/SPEC.md` §9.1 and Known gaps.
+
+8. **No vendor lock-in** — added 2026-09-12 (lane 4c). STT, LLM and TTS each have >= 2 providers that construct from their `*_PROVIDER` env var alone, no code change; an unknown name and a missing key both fail closed by name (`<layer>_unknown_provider`, `missing_api_key:<VAR>`) into `ProviderSet.degraded`, never a silent substitution; a `POST /settings` swap installs a new, frozen `ProviderSet` rather than mutating the one an in-flight turn already snapshotted. Enforced by `qa/test_capability_matrix.py`, which is also where two real, not-yet-closed gaps are recorded rather than hidden: the eyes OCR engine swaps via its own `EYES_ENGINE` config (`server/eyes.py`), not `RuntimeSettings`/`POST /settings`; and VAD has no second provider and no env switch at all — `server/providers/vad.py`'s `EnergyGateVAD` is unused dead code, and production VAD is a separate, hardcoded client-side class (`cli/audio.py`'s `EnergyVAD`). Only `server/providers/`, `server/provider_factory.py`, `server/settings.py` (config resolution) and `server/auth.py` (the egress allowlist, cross-checked by `qa/test_security.py`) may name a vendor class or host; every other `server/*.py` file may name zero of either — enforced by the same file's grep-based test. LLM routing through fleet capability aliases (`fleet/frontier` etc., per the sovereign router) is **NOT-MEASURED**: that router is in flight in a separate session as of 2026-09-12 and is not in this checkout; `LLM_PROVIDER=fleet` today is only an alias for the same LiteLLM proxy address as `litellm`/`local`. Full per-provider table in `docs/CAPABILITY-MATRIX.md`.
 
 ## Known gaps
 

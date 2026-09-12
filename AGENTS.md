@@ -22,8 +22,15 @@ humanizer, QA gates. Local-first; cloud tyres explicit, never silent.
 
 ## Laws
 1. Fail closed with named reasons. No silent fallbacks, no fake greens.
-2. Provider swaps are config-only (`TTS_PROVIDER`/`STT_PROVIDER`/`LLM_PROVIDER`
-   env at boot, or `POST /settings` at runtime).
+2. Provider swaps are config-only. For STT, LLM, TTS: `STT_PROVIDER`/
+   `LLM_PROVIDER`/`TTS_PROVIDER` env at boot, or `POST /settings` at
+   runtime — every named provider constructs from that alone, no code
+   change; an unknown name fails closed as `<layer>_unknown_provider`, a
+   missing credential as `missing_api_key:<VAR>`. The eyes OCR engine
+   swaps the same way but through its own `EYES_ENGINE` (`server/eyes.py`),
+   not `RuntimeSettings`/`/settings`. VAD is NOT yet covered by this law —
+   it has one provider and no env switch today. Full per-provider table,
+   and exactly what's proven vs. not: `docs/CAPABILITY-MATRIX.md`.
 3. No absolute paths, no secrets in tree (Doppler + env only).
 4. Heavy compute leaves the MacBook; node/python checks stay local. Exception: `make build-hotkey` (five Swift files, ~8 s) builds locally at nice 19; `air` is Intel and cannot produce the arm64 binary.
 5. Subagents report back in ONE message; never spawn sideways.
