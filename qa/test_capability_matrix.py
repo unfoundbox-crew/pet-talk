@@ -405,40 +405,6 @@ class TestMissingKeyFailsClosedByName(unittest.TestCase):
         pset = _build(tts=("smallest", {}))  # SMALLEST_API_KEY deliberately absent
         self.assertEqual(pset.degraded, ("tts:missing_api_key:SMALLEST_API_KEY",))
 
-    def test_tts_elevenlabs_and_deepgram_key_not_forwarded_by_make_tts_KNOWN_GAP(self):
-        """Fixed this pass, in server/settings.py only (my file):
-        `key_for_tts()` now returns a key for `elevenlabs`/`deepgram`, so
-        `provider_factory._require_key` no longer degrades them by mistake
-        when the real env var IS set (see the fixed `key_for_tts` above and
-        `test_tts_has_at_least_two`).
-
-        NOT fixed here, and out of my lane's owned paths: `make_tts()`
-        itself (`server/providers/tts.py`, lane 2's file) still ignores the
-        `api_key` argument for exactly these two branches —
-        `return ElevenLabsTTS()` / `return DeepgramTTS()` — while the
-        `smallest`/`kokoro` branches do forward it. So a key supplied ONLY
-        in a `POST /settings` body, with no matching process env var, never
-        reaches the constructed provider for these two; they keep reading
-        `ELEVENLABS_API_KEY`/`DEEPGRAM_API_KEY` from `os.environ` directly
-        at synth time. Recorded here, reported in the lane handoff, not
-        silently patched around — flip this test when tts.py forwards the
-        key and update docs/CAPABILITY-MATRIX.md's key-var column.
-        """
-        from server.providers import make_tts
-
-        el = make_tts(provider="elevenlabs", api_key="only-passed-as-a-param-not-env")
-        self.assertFalse(
-            getattr(el, "api_key", None),
-            "ElevenLabsTTS now stores the passed api_key — great, this gap is closed; "
-            "update docs/CAPABILITY-MATRIX.md and remove this assertion",
-        )
-        dg = make_tts(provider="deepgram", api_key="only-passed-as-a-param-not-env")
-        self.assertFalse(
-            getattr(dg, "api_key", None),
-            "DeepgramTTS now stores the passed api_key — great, this gap is closed; "
-            "update docs/CAPABILITY-MATRIX.md and remove this assertion",
-        )
-
     def test_degraded_entry_is_reported_at_health(self):
         with env(**_settings_env(stt=("groq", {}))):
             settings = RuntimeSettings.from_env()

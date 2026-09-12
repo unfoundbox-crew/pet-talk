@@ -21,6 +21,7 @@ from .logs import swallowed
 from .persona import Persona
 from .persona_runtime import build_system_prompt
 from .provider_factory import ProviderSet
+from . import receipts
 from .providers import ProviderError, route_text
 from .settings import TURNS_PATH
 from .speak_queue import SpeakQueue
@@ -93,6 +94,7 @@ async def handle_turn(
             result.spoken.append(spoken.text)
             if log_ is not None:
                 log_.mark("first_sentence")
+        await receipts.emit(ws, turn_id, result.spoken, pname)
         await safe_send_json(
             ws, frame("agent.done", turn_id, path="control", sentences=result.sentences)
         )
@@ -171,6 +173,7 @@ async def handle_turn(
         )
         if log_ is not None:
             log_.mark("done")
+        await receipts.emit(ws, turn_id, result.spoken, pname)
         await safe_send_json(
             ws, frame("agent.done", turn_id, path="worker", sentences=result.sentences)
         )
@@ -198,6 +201,7 @@ async def handle_turn(
     )
     if log_ is not None:
         log_.mark("done")
+    await receipts.emit(ws, turn_id, result.spoken, pname)
     await safe_send_json(
         ws, frame("agent.done", turn_id, path="direct", sentences=result.sentences)
     )

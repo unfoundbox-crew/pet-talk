@@ -22,11 +22,15 @@ from typing import Any
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse, Response
 
+import os
+
 from .audio_store import get_audio
 from .auth import offending_base_url, require_studio_token
 from .dictation import CleanProseFormatter
 from .frames import parse_int_field
 from .logs import log, swallowed
+from .providers.tts import provider_voices
+from . import runtime
 from .persona import Persona, delete_persona, list_personas, load_persona, save_persona
 from .providers import ProviderError
 from .settings import SERVICE_NAME, SERVICE_VERSION
@@ -68,8 +72,11 @@ def health() -> dict[str, Any]:
 
 
 @router.get("/voices")
-def voices() -> Response:
+def voices(provider: str = "") -> Response:
     try:
+        if provider or os.environ.get("PET_TALK_VOICES_FROM_PROVIDER") == "1":
+            name = provider or runtime.settings().tts_provider
+            return JSONResponse({"provider": name, "voices": provider_voices(name)})
         return JSONResponse(load_voices())
     except ProviderError as e:
         return JSONResponse({"reason": e.reason, "detail": e.detail}, status_code=404)
