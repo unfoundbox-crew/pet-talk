@@ -71,8 +71,12 @@ async def handle_turn(
     providers: Optional[ProviderSet] = None,
     on_cancel: Optional[BargeFn] = None,
     handover: bool = False,
+    stall_sent: bool = False,
 ) -> TurnResult:
     """Router: deterministic control vs stall+worker vs direct answer.
+
+    ``stall_sent`` is True when the streaming-STT path already spoke the stall
+    on end-of-speech (server/stt_stream.py); the worker path then skips its own.
 
     ``handover`` is the Option+Shift+Tab chord's flag, consumed once by this
     turn: it adds one line to the system prompt (see
@@ -163,7 +167,7 @@ async def handle_turn(
         except Exception as e:
             await send_error(ws, turn_id, "persona_no_stalls", str(e))
             stall_text = ""
-        if stall_text:
+        if stall_text and not stall_sent:
             stall_audio = None
             try:
                 stall_audio = await get_or_synth_stall(stall_text, p, providers.tts)
@@ -304,6 +308,7 @@ async def _turn_pipeline(
         providers=providers,
         on_cancel=on_cancel,
         handover=handover,
+        stall_sent=stall_sent,
     )
 
 
@@ -320,6 +325,7 @@ async def handle_turn_task(
     sample_rate: int = 16000,
     barged: Optional[set] = None,
     handover: bool = False,
+    stall_sent: bool = False,
 ) -> None:
     """Run one turn as a cancellable task so barge can kill it mid-flight.
 
