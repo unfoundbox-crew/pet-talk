@@ -285,12 +285,25 @@ class SttStreamSession:
 
         ``audio`` overrides the accumulated buffer — ``user.stop`` may carry
         the client's own merged ``pcm_b64``, which wins by the existing wire
-        contract. Only its tail is decoded, on the same seam.
+        contract. Only its tail is decoded, on the same seam — but ONLY when
+        the two buffers are the same length. ``_partial_offset`` is an offset
+        into the stream's own buffer; against a caller buffer of a different
+        length the cut lands in the wrong place and the transcript silently
+        loses or repeats audio. A mismatch decodes the whole thing and logs
+        ``stt_stream_len_mismatch``: slower, correct, and visible.
 
         Raises :class:`ProviderError` when the turn was barged, so the caller
         never starts a turn for audio nobody is waiting on any more.
         """
+        seam_invalid = False
         if audio is not None:
+            if len(audio) != len(self._buf):
+                log.info(
+                    "stt_stream_len_mismatch turn_id=%s stream_bytes=%d caller_bytes=%d "
+                    "partial_offset=%d",
+                    self.turn_id, len(self._buf), len(audio), self._partial_offset,
+                )
+                seam_invalid = True
             self._buf = bytearray(audio)
         if self._cancelled:
             raise ProviderError("stt_stream_cancelled", self._cancel_reason or "barged")
@@ -298,6 +311,8 @@ class SttStreamSession:
         if not full:
             raise ProviderError("stt_empty_audio", "no audio in this turn")
 
+        if seam_invalid:
+            return await self._decode_now(full, "final_whole_len_mismatch")
         if final_full_pass():
             return await self._decode_now(full, "final_full")
 

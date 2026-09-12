@@ -435,7 +435,15 @@ async def _stream_stop(
         )
         return False
 
+    # Set the moment a turn is actually started. Past that point the
+    # whole-utterance fallback would be a SECOND turn for one utterance — two
+    # answers speaking over each other — so a failure after it re-raises
+    # instead of falling back. The dispatcher names it and keeps the socket.
+    committed = False
+
     def _start(text: str, stall_sent: bool):
+        nonlocal committed
+        committed = True
         kwargs: dict[str, Any] = {}
         if stall_sent and "stall_sent" in stt_stream.handle_turn_task_params():
             # turn.py is another lane's file: the parameter is threaded only
@@ -477,12 +485,15 @@ async def _stream_stop(
         raise
     except Exception as e:
         # The streaming path is an optimization; a bug in it must not cost the
-        # turn. Named, then the whole-utterance path runs.
+        # turn. Named, then the whole-utterance path runs — UNLESS the turn is
+        # already started, in which case falling back would run it twice.
+        reason = "stt_stream_stop_failed_after_commit" if committed else "stt_stream_stop_failed"
         log.warning(
-            "stt_stream_stop_failed turn_id=%s reason=%s",
-            turn_id,
-            swallowed("stt_stream_stop_failed", e, turn_id=turn_id),
+            "%s turn_id=%s reason=%s", reason, turn_id,
+            swallowed(reason, e, turn_id=turn_id),
         )
+        if committed:
+            raise
         return False
 
 

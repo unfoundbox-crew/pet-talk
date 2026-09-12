@@ -644,6 +644,131 @@ class TestTailOnlyFinalize(unittest.TestCase):
 # ----------------------------------------------------- provider capability ---
 
 
+class TestFinalizeSeamSafety(unittest.TestCase):
+    """A caller buffer that is not the stream's buffer invalidates the seam.
+
+    ``user.stop`` may carry the client's own merged ``pcm_b64``, which wins by
+    the wire contract. ``finalize`` swapped it in and then cut the tail at
+    ``_partial_offset`` — an offset measured against the OTHER buffer. If the
+    two disagree on length the cut lands in the wrong place and the transcript
+    silently loses or repeats audio. Decode the whole thing instead, and say so.
+    """
+
+    def test_a_length_mismatch_decodes_the_whole_utterance_by_name(self) -> None:
+        async def go():
+            stt = SegmentSTT()
+            session = stt_stream.SttStreamSession(stt, "t-mismatch", window_ms=300)
+            with StreamEnv(PET_TALK_STT_STREAM="1"):
+                await session.feed(pcm(600))
+                await asyncio.sleep(0.05)
+                self.assertTrue(session.latest_partial(),
+                                "fixture failed: no partial, so no seam to get wrong")
+                stt.calls.clear()
+                caller_audio = pcm(1000)  # the client merged differently
+                with self.assertLogs("pet_talk.server", level="INFO") as caught:
+                    text = await session.finalize(caller_audio)
+            self.assertTrue(
+                any("stt_stream_len_mismatch" in line for line in caught.output),
+                "the mismatch was not named: %s" % caught.output,
+            )
+            self.assertEqual(
+                stt.calls, [len(caller_audio)],
+                "finalize decoded a tail, not the whole caller buffer",
+            )
+            self.assertEqual(text, "words %d" % len(caller_audio))
+
+        asyncio.run(go())
+
+    def test_a_matching_length_still_takes_the_tail(self) -> None:
+        """The guard must not throw away the tail optimization."""
+
+        async def go():
+            stt = SegmentSTT()
+            session = stt_stream.SttStreamSession(stt, "t-match", window_ms=300)
+            with StreamEnv(PET_TALK_STT_STREAM="1"):
+                await session.feed(pcm(600))
+                await asyncio.sleep(0.05)
+                await session.feed(pcm(100))  # under the window: a tail, no decode
+                stt.calls.clear()
+                await session.finalize(bytes(session.audio))
+            self.assertTrue(stt.calls, "finalize decoded nothing at all")
+            self.assertEqual(
+                stt.calls, [len(pcm(100))],
+                "finalize paid for more than the tail on a matching buffer",
+            )
+
+        asyncio.run(go())
+
+
+class TestPostCommitFallbackCannotDoubleTurn(unittest.TestCase):
+    """Once the turn is started, the fallback path must not start a second.
+
+    ``_stream_stop`` wrapped ``run_streaming_stop`` in a broad except that
+    returns False, and False means "run the whole-utterance path". But
+    ``run_streaming_stop`` calls ``start_turn`` before it returns, so a failure
+    AFTER that point started a second turn for the same utterance — two answers
+    speaking over each other.
+    """
+
+    def test_a_failure_after_start_turn_re_raises_instead_of_falling_back(self) -> None:
+        async def go():
+            install(SegmentSTT())
+            w = fake_ws()
+            session = ws_mod.Session(ws=w)
+            session.turn_persona["t-double"] = TEST_PERSONA
+            started: list[str] = []
+
+            async def exploding_stop(ws, turn_id, stream, persona, providers,
+                                     start_turn, **kwargs):
+                start_turn("the transcript", False)   # committed
+                started.append(turn_id)
+                raise RuntimeError("something broke after the turn was committed")
+
+            real = stt_stream.run_streaming_stop
+            stt_stream.run_streaming_stop = exploding_stop
+            try:
+                with StreamEnv(PET_TALK_STT_STREAM="1", PET_TALK_STT_STREAM_MS="300"):
+                    await drive(session, "t-double", chunk_ms=200, n_chunks=3)
+                    with self.assertRaises(RuntimeError):
+                        await ws_mod._stream_stop(
+                            session, "t-double", b"".join(session.chunks), 16000,
+                            TEST_PERSONA, session.queue_for("t-double"), False,
+                        )
+            finally:
+                stt_stream.run_streaming_stop = real
+            self.assertEqual(len(started), 1)
+            await session.shutdown()
+
+        asyncio.run(go())
+
+    def test_a_failure_before_start_turn_still_falls_back(self) -> None:
+        """Nothing committed, so the whole-utterance path is still the answer."""
+
+        async def go():
+            install(SegmentSTT())
+            session = ws_mod.Session(ws=fake_ws())
+            session.turn_persona["t-early"] = TEST_PERSONA
+
+            async def exploding_stop(*a, **k):
+                raise RuntimeError("broke before committing anything")
+
+            real = stt_stream.run_streaming_stop
+            stt_stream.run_streaming_stop = exploding_stop
+            try:
+                with StreamEnv(PET_TALK_STT_STREAM="1", PET_TALK_STT_STREAM_MS="300"):
+                    await drive(session, "t-early", chunk_ms=200, n_chunks=3)
+                    served = await ws_mod._stream_stop(
+                        session, "t-early", b"".join(session.chunks), 16000,
+                        TEST_PERSONA, session.queue_for("t-early"), False,
+                    )
+            finally:
+                stt_stream.run_streaming_stop = real
+            self.assertFalse(served, "an uncommitted failure must fall back, by name")
+            await session.shutdown()
+
+        asyncio.run(go())
+
+
 class TestProviderCapability(unittest.TestCase):
     """Assertion 5 — capability is a flag, and a refusal is named."""
 
