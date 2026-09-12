@@ -499,6 +499,6 @@ def make_stt(
         )
     if which in ("sensevoice", "fleet", "sovereign"):
         return SenseVoiceSTT(
-            base_url=base_url or os.environ.get("SENSEVOICE_BASE_URL", "http://100.99.50.84:8086"),
+            base_url=base_url or os.environ.get("SENSEVOICE_BASE_URL", "http://127.0.0.1:8086"),
         )
     raise ProviderError("stt_unknown_provider", f"unknown STT provider: {which}")

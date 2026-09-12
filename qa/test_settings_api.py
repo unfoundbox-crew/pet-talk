@@ -39,8 +39,11 @@ class TestSettingsApi(unittest.TestCase):
         # Update settings to litellm and stub tts
         payload = {
             "llm_provider": "litellm",
-            "llm_base_url": "http://100.99.50.84:8000/v1",
+            "llm_base_url": "http://127.0.0.1:4000/v1",
             "llm_model": "claude-3-7-sonnet",
+            # Fail-closed: without a key the swap lands as UnavailableLLM with a
+            # named degraded reason, so the test supplies one explicitly.
+            "llm_api_key": "test-key-not-real",
             "tts_provider": "stub",
             "stt_provider": "stub",
         }
