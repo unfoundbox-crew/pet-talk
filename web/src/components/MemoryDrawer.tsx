@@ -61,180 +61,75 @@ export const MemoryDrawer: React.FC<MemoryDrawerProps> = ({
   };
 
   return (
-    <div
-      style={{
-        position: "fixed",
-        top: 0,
-        right: 0,
-        bottom: 0,
-        width: "min(420px, 90vw)",
-        background: "#12141c",
-        borderLeft: "1px solid #282c3f",
-        boxShadow: "-8px 0 32px rgba(0,0,0,0.7)",
-        zIndex: 100,
-        display: "flex",
-        flexDirection: "column",
-        color: "#f1f3f9",
-        fontFamily: "system-ui, -apple-system, sans-serif",
-      }}
-    >
-      {/* Header */}
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          padding: "1.25rem",
-          borderBottom: "1px solid #282c3f",
-        }}
-      >
-        <div>
-          <h3 style={{ margin: 0, fontSize: "1.05rem", fontWeight: 600 }}>
-            {t["memory-ledger"] || "Memory Ledger"}
-          </h3>
-          <span style={{ fontSize: "0.75rem", color: "#636c84" }}>
-            Hippocampus Episodic Storage ({turns.length} turns)
-          </span>
-        </div>
-        <button
-          type="button"
-          onClick={onClose}
-          style={{
-            background: "none",
-            border: "none",
-            color: "#9ba3b8",
-            fontSize: "1.2rem",
-            cursor: "pointer",
-            padding: "0.25rem",
-          }}
-        >
-          ✕
-        </button>
-      </div>
-
-      {/* Filter & Actions */}
-      <div
-        style={{
-          padding: "0.875rem 1.25rem",
-          borderBottom: "1px solid #282c3f",
-          display: "flex",
-          gap: "0.5rem",
-        }}
-      >
-        <input
-          type="text"
-          placeholder="Filter conversation turns..."
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          style={{
-            flex: 1,
-            padding: "0.45rem 0.75rem",
-            borderRadius: "6px",
-            border: "1px solid #282c3f",
-            background: "#090a0f",
-            color: "#f1f3f9",
-            fontSize: "0.8rem",
-          }}
-        />
-        <button
-          type="button"
-          onClick={handleExportJsonl}
-          title="Export JSONL"
-          style={{
-            background: "#191c26",
-            border: "1px solid #282c3f",
-            color: "#24c1e0",
-            borderRadius: "6px",
-            padding: "0.45rem 0.65rem",
-            fontSize: "0.75rem",
-            cursor: "pointer",
-          }}
-        >
-          Export
-        </button>
-      </div>
-
-      {/* Turns List */}
-      <div
-        style={{
-          flex: 1,
-          overflowY: "auto",
-          padding: "1.25rem",
-          display: "flex",
-          flexDirection: "column",
-          gap: "0.875rem",
-        }}
-      >
-        {filteredTurns.length === 0 ? (
-          <div style={{ color: "#636c84", fontSize: "0.85rem", textAlign: "center", marginTop: "2rem" }}>
-            No episodic memories stored yet. Speak with the agent to commit turns.
-          </div>
-        ) : (
-          filteredTurns.map((turn, idx) => (
-            <div
-              key={`${turn.turn_id || "turn"}-${turn.timestamp || idx}-${idx}`}
-              style={{
-                background: "#191c26",
-                border: "1px solid #282c3f",
-                borderRadius: "8px",
-                padding: "0.75rem",
-                fontSize: "0.8rem",
-              }}
-            >
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  color: "#636c84",
-                  fontSize: "0.7rem",
-                  marginBottom: "0.35rem",
-                }}
-              >
-                <span style={{ color: "#24c1e0", fontWeight: 600 }}>{turn.persona.toUpperCase()}</span>
-                <span>{turn.timestamp ? new Date(turn.timestamp * 1000).toLocaleTimeString() : ""}</span>
-              </div>
-              <div style={{ marginBottom: "0.4rem", color: "#f1f3f9" }}>
-                <span style={{ color: "#00c853", fontWeight: 600 }}>User: </span>
-                {turn.user}
-              </div>
-              <div style={{ color: "#9ba3b8" }}>
-                <span style={{ color: "#ffb300", fontWeight: 600 }}>Agent: </span>
-                {turn.agent}
-              </div>
+    <>
+      <div className="pt-scrim" />
+      <div className="pt-sheet pt-sheet--drawer">
+        <div className="pt-sheet-head">
+          <div>
+            <h2 className="pt-h2">{t["memory-ledger"] || "Memory Ledger"}</h2>
+            <div className="pt-lbl">
+              Hippocampus Episodic Storage (<span className="pt-mono">{turns.length}</span> turns)
             </div>
-          ))
-        )}
-      </div>
+          </div>
+          <button type="button" className="pt-btn pt-btn--icon" onClick={onClose}>
+            ✕
+          </button>
+        </div>
 
-      {/* Footer */}
-      <div
-        style={{
-          padding: "1rem 1.25rem",
-          borderTop: "1px solid #282c3f",
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-        }}
-      >
-        <span style={{ fontSize: "0.75rem", color: "#636c84" }}>Durable across restarts</span>
-        <button
-          type="button"
-          onClick={handleClear}
-          disabled={clearing || turns.length === 0}
-          style={{
-            background: "rgba(255, 61, 0, 0.15)",
-            border: "1px solid rgba(255, 61, 0, 0.4)",
-            color: "#ff3d00",
-            borderRadius: "6px",
-            padding: "0.4rem 0.75rem",
-            fontSize: "0.75rem",
-            fontWeight: 600,
-            cursor: "pointer",
-          }}
-        >
-          {clearing ? "Clearing..." : t["clear-memory"] || "Clear Memory"}
-        </button>
+        <div className="pt-section" style={{ display: "flex", gap: "var(--pt-s2)" }}>
+          <input
+            type="text"
+            className="pt-input"
+            placeholder="Filter conversation turns..."
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+          <button type="button" className="pt-btn" onClick={handleExportJsonl} title="Export JSONL">
+            Export
+          </button>
+        </div>
+
+        <div className="pt-section pt-scroll-y">
+          {filteredTurns.length === 0 ? (
+            <p className="pt-note">No episodic memories stored yet. Speak with the agent to commit turns.</p>
+          ) : (
+            filteredTurns.map((turn, idx) => (
+              <div
+                key={`${turn.turn_id || "turn"}-${turn.timestamp || idx}-${idx}`}
+                className="pt-section"
+              >
+                <div className="pt-lbl">
+                  {turn.persona.toUpperCase()}
+                  {" · "}
+                  <span className="pt-mono">
+                    {turn.timestamp ? new Date(turn.timestamp * 1000).toLocaleTimeString() : ""}
+                  </span>
+                </div>
+                <div>
+                  <strong>User: </strong>
+                  {turn.user}
+                </div>
+                <div>
+                  <strong>Agent: </strong>
+                  {turn.agent}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+
+        <div className="pt-sheet-head">
+          <span className="pt-note">Durable across restarts</span>
+          <button
+            type="button"
+            className="pt-btn pt-btn--danger"
+            onClick={handleClear}
+            disabled={clearing || turns.length === 0}
+          >
+            {clearing ? "Clearing..." : t["clear-memory"] || "Clear Memory"}
+          </button>
+        </div>
       </div>
-    </div>
+    </>
   );
 };

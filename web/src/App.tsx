@@ -1,4 +1,29 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+/**
+ * The cockpit — a developer inspector, not the product.
+ *
+ * The product is the notch. This page exists so a developer can watch a turn
+ * happen: the spoken stream with the receipt under each claim, the read-ahead
+ * buffer, one latency bar per turn against qa/budgets.json, and behind a
+ * Developer toggle, the raw frames and every number.
+ *
+ * Three laws this file is built around:
+ *
+ *   1. **Receipts over prose.** A spoken line is a claim; the chip under it is
+ *      the proof. They render together (TranscriptStream + ReceiptChip).
+ *   2. **The user surface says nothing about engineering.** No frame names, no
+ *      millisecond numbers, no persona name — those mount only when
+ *      `developer` is on. devSurface.test.tsx greps the rendered DOM for
+ *      `agent.`, `ms` and `stall` to keep that honest.
+ *   3. **Read ahead, skip forward.** Buffered sentences render dim before they
+ *      are spoken; Right arrow moves the play head, Left arrow moves it back,
+ *      Escape stops the turn. Skipping never drops a sentence (readAhead.ts).
+ *
+ * Colour comes only from tokens (styles/tokens.css + tokens.pet-talk.css) via
+ * the classes in styles/app.css. No hex literal lives in this file, and
+ * qa/test_design_tokens.py enforces that.
+ */
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AgentState,
   PersonaId,
@@ -21,11 +46,31 @@ import { MemoryDrawer, MemoryTurn } from "./components/MemoryDrawer";
 import { ActiveProviders, RuntimeSettings, SettingsModal } from "./components/SettingsModal";
 import { PromptComposer } from "./components/PromptComposer";
 import { EyesAttachDock, EyesBlock, EyesEntry, ScreenGroundingLine } from "./components/EyesAttach";
-import { ReceiptChip, ReceiptFrame, asReceiptFrame } from "./components/ReceiptChip";
+import { ReceiptFrame, asReceiptFrame } from "./components/ReceiptChip";
 import { ChunkPlayer } from "./audio/ChunkPlayer";
+import { StreamLine, TranscriptStream } from "./components/TranscriptStream";
+import { LatencyBar } from "./components/LatencyBar";
+import { DeveloperRail, LoggedFrame } from "./components/DeveloperRail";
+import { ThemeToggle, useTheme } from "./components/ThemeToggle";
+import { ArchieGlyph, ArchieGlyphState } from "./components/ArchieGlyph";
+import { EMPTY_TIMING, TurnTiming } from "./latency";
+import {
+  EMPTY_READ_AHEAD,
+  ReadAheadState,
+  advance,
+  bufferedAhead,
+  insertSentence,
+  skipBack,
+  skipForward,
+  startIfIdle,
+} from "./readAhead";
 
 type Strings = typeof en;
 const STRINGS: Record<"en" | "hi", Strings> = { en, hi };
+
+const DEVELOPER_STORAGE_KEY = "pet_talk_developer";
+/** How many frames the inspector keeps. Older ones are gone, not summarised. */
+const FRAME_LOG_CAP = 200;
 
 const STATIC_VOICES = [
   { id: "af_heart", display_name: "Heart (EN)", lang: "en" },
@@ -58,26 +103,24 @@ const DEFAULT_PERSONAS: PersonaData[] = [
   },
 ];
 
-interface TranscriptLine {
+/** A transcript entry. Agent sentences carry `seq` so the play head can find them. */
+interface TranscriptEntry {
   id: string;
-  who: "user" | "agent" | "eyes";
+  who: "user" | "agent" | "thinking" | "eyes" | "notice";
   text: string;
-  audio_url?: string;
+  seq?: number;
+  frame?: string;
   time: string;
-  /** Set when who === "eyes": key into the eyes entry map. */
   eyesRef?: string;
-  /** The proof under a spoken claim about work. See ReceiptChip. */
   receipt?: ReceiptFrame;
 }
 
 function clockNow(): string {
-  return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-}
-
-interface QueuedSentence {
-  index: number;
-  text: string;
-  audio_url: string;
+  return new Date().toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
 }
 
 function httpBaseFromWs(wsUrl: string): string {
@@ -93,19 +136,50 @@ function resolveAudioUrl(url?: string): string {
   return `${base}${url.startsWith("/") ? "" : "/"}${url}`;
 }
 
+function readDeveloperFlag(): boolean {
+  try {
+    return localStorage.getItem(DEVELOPER_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/** Archie's light is the state: idle steady, listening bright, speaking beat.
+ *  Lane 5a owns the glyph; the cockpit only tells it which state it is in. */
+function archieState(state: AgentState, offline: boolean): ArchieGlyphState {
+  if (offline) return "error";
+  if (state === "speaking") return "speaking";
+  if (state === "listening") return "listening";
+  return "idle";
+}
+
+const STATE_WORD: Record<AgentState, string> = {
+  idle: "ready",
+  listening: "listening",
+  thinking: "working",
+  speaking: "speaking",
+};
+
 export default function App() {
   const [lang, setLang] = useState<"en" | "hi">("en");
   const t = STRINGS[lang];
 
-  // Core Connection & State
+  const [theme, setTheme] = useTheme();
+  const [developer, setDeveloper] = useState<boolean>(readDeveloperFlag);
+  useEffect(() => {
+    try {
+      localStorage.setItem(DEVELOPER_STORAGE_KEY, developer ? "1" : "0");
+    } catch {
+      // Not persisted; the toggle still holds for this page-load.
+    }
+  }, [developer]);
+
+  // Core connection & state
   const [connected, setConnected] = useState(false);
-  // Set on a 401 from a mutating fetch, or a WS close 4401 — shown as a
-  // banner instead of a silent retry (server/auth.py requires the token).
   const [authError, setAuthError] = useState(false);
   const [state, setState] = useState<AgentState>("idle");
-  const [activeSentence, setActiveSentence] = useState<string>("");
 
-  // Persona & Voice Customization
+  // Persona & voice
   const [personas, setPersonas] = useState<PersonaData[]>(DEFAULT_PERSONAS);
   const [currentPersona, setCurrentPersona] = useState<PersonaId>("donna");
   const [voice, setVoice] = useState(STATIC_VOICES[0].id);
@@ -113,24 +187,21 @@ export default function App() {
   const [speed, setSpeed] = useState(1.05);
   const [systemPrompt, setSystemPrompt] = useState("");
 
-  // Mode & Audio Controls
+  // Mode & audio
   const [inputMode, setInputMode] = useState<"ptt" | "handsfree">("ptt");
   const [muted, setMuted] = useState(false);
   const [talking, setTalking] = useState(false);
   const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
 
-  // Modals & Panels
+  // Sheets
   const [showStudio, setShowStudio] = useState(false);
   const [showMemory, setShowMemory] = useState(false);
-  const [showTelemetry, setShowTelemetry] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
 
-  // Runtime Settings & Swappable Tires
+  // Runtime settings & swappable tyres
   const [settings, setSettings] = useState<RuntimeSettings>({
     stt_provider: "stub",
     llm_provider: "stub",
-    // No hardcoded fleet address — the real default comes from
-    // GET /settings (settings.llm_base_url) once it loads.
     llm_base_url: "",
     llm_model: "claude-3-7-sonnet",
     tts_provider: "stub",
@@ -142,42 +213,37 @@ export default function App() {
     llm: "StubLLM",
     tts: "StubTTS",
   });
-  // secrets_set[field] from GET/POST /settings: whether the server holds a
-  // live credential for that field. The server never returns the value.
   const [secretsSet, setSecretsSet] = useState<Record<string, boolean>>({});
 
-  // Telemetry Waterfall
+  // Measurement. `timing` is this turn's; `metrics` feeds the older HUD.
+  const [timing, setTiming] = useState<TurnTiming>(EMPTY_TIMING);
+  const [timingTurn, setTimingTurn] = useState<string>("");
   const [metrics, setMetrics] = useState<LatencyMetrics>({
-    vadMs: 28,
-    sttMs: 140,
-    stallMs: 0.6,
-    ttftMs: 380,
-    ttsMs: 180,
-    e2eMs: 560,
-    provenance: "target",
+    vadMs: 0,
+    sttMs: 0,
+    stallMs: 0,
+    ttftMs: 0,
+    ttsMs: 0,
+    e2eMs: 0,
+    provenance: "idle",
   });
-  const [queueLength, setQueueLength] = useState(0);
+  const [frames, setFrames] = useState<LoggedFrame[]>([]);
 
-  // Memory & Transcripts
+  // Transcript, buffer, memory, eyes
+  const [entries, setEntries] = useState<TranscriptEntry[]>([]);
+  const [buffer, setBuffer] = useState<ReadAheadState>(EMPTY_READ_AHEAD);
   const [memoryTurns, setMemoryTurns] = useState<MemoryTurn[]>([]);
-  const [lines, setLines] = useState<TranscriptLine[]>([]);
-
-  // Eyes lane (WAVE3 §1): one entry per attachment, keyed by ref.
   const [eyesMap, setEyesMap] = useState<Record<string, EyesEntry>>({});
   const [eyesNotice, setEyesNotice] = useState("");
   const [screenGround, setScreenGround] = useState<ScreenGrounding | null>(null);
+  const [lastReceipt, setLastReceipt] = useState<ReceiptFrame | null>(null);
 
-  // Refs for audio and streaming
+  // Refs
   const turnRef = useRef<string>(newTurnId());
   const turnStartTimeRef = useRef<number>(0);
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const queueRef = useRef<QueuedSentence[]>([]);
-  const playingRef = useRef(false);
-  const prefetchRef = useRef<HTMLAudioElement | null>(null);
-  // Chunked TTS playback (SPEC 4.2.1). Lazily created — no AudioContext is
-  // made until the first agent.chunk actually arrives. This is a separate
-  // context from the mic capture one: the mic context is 16kHz and torn down
-  // every talk session, wrong lifetime and wrong rate for TTS playback.
+  const bufferRef = useRef<ReadAheadState>(EMPTY_READ_AHEAD);
+  bufferRef.current = buffer;
   const chunkPlayerRef = useRef<ChunkPlayer | null>(null);
   const getChunkPlayer = useCallback((): ChunkPlayer => {
     if (!chunkPlayerRef.current) {
@@ -194,13 +260,10 @@ export default function App() {
     src: MediaStreamAudioSourceNode;
     analyser: AnalyserNode;
   } | null>(null);
-
-  // VAD state for hands-free mode
   const speechDetectedRef = useRef(false);
   const silenceTimerRef = useRef<number | null>(null);
   const recordedAudioRef = useRef<Float32Array[]>([]);
 
-  // Stable refs for callbacks
   const personaRef = useRef(currentPersona);
   personaRef.current = currentPersona;
   const voiceRef = useRef(voice);
@@ -212,30 +275,41 @@ export default function App() {
   const mutedRef = useRef(muted);
   mutedRef.current = muted;
 
-  const pushLine = useCallback((who: "user" | "agent", text: string, audio_url?: string) => {
-    setLines((prev) => [
+  const logFrame = useCallback(
+    (direction: "in" | "out", name: string, payload: unknown) => {
+      setFrames((prev) => {
+        const next = [
+          ...prev,
+          {
+            id: `${name}-${prev.length}-${Date.now()}`,
+            clock: clockNow(),
+            direction,
+            name,
+            payload,
+          },
+        ];
+        return next.length > FRAME_LOG_CAP ? next.slice(next.length - FRAME_LOG_CAP) : next;
+      });
+    },
+    [],
+  );
+
+  const pushEntry = useCallback((entry: Omit<TranscriptEntry, "id" | "time">) => {
+    setEntries((prev) => [
       ...prev,
-      {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-        who,
-        text,
-        audio_url,
-        time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
-      },
+      { ...entry, id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, time: clockNow() },
     ]);
   }, []);
 
   /**
-   * Attach proof to the claim it proves.
-   *
-   * A receipt lands after the sentence it backs, so it patches the newest
-   * agent line whose text is that claim. If the claim never reached the
-   * transcript (a receipt for a line spoken before this socket opened), the
-   * receipt speaks for itself on its own line rather than being dropped —
-   * an unshown receipt is the failure mode this whole lane exists to stop.
+   * Attach proof to the claim it proves: the newest agent line whose text is
+   * the receipt's claim. A receipt whose claim never reached the transcript
+   * speaks for itself on its own line rather than being dropped — an unshown
+   * receipt is the failure mode this whole surface exists to stop.
    */
   const attachReceipt = useCallback((receipt: ReceiptFrame) => {
-    setLines((prev) => {
+    setLastReceipt(receipt);
+    setEntries((prev) => {
       for (let i = prev.length - 1; i >= 0; i -= 1) {
         const line = prev[i];
         if (line.who === "agent" && !line.receipt && line.text === receipt.claim) {
@@ -261,6 +335,68 @@ export default function App() {
     setEyesMap((prev) => (prev[ref] ? { ...prev, [ref]: { ...prev[ref], ...patch } } : prev));
   }, []);
 
+  // --- Playback, driven by the play head ------------------------------------
+
+  /** Point the audio element at the sentence the head is on and play it. */
+  const playHead = useCallback((next: ReadAheadState) => {
+    const el = audioRef.current;
+    const sentence = next.sentences[next.head];
+    if (!el || !sentence || mutedRef.current) return;
+    if (!sentence.audioUrl) return;
+    el.src = sentence.audioUrl;
+    el.playbackRate = speedRef.current;
+    void el.play().catch(() => undefined);
+  }, []);
+
+  const onAudioEnded = useCallback(() => {
+    setBuffer((prev) => {
+      const next = advance(prev);
+      if (next.sentences[next.head]) playHead(next);
+      return next;
+    });
+  }, [playHead]);
+
+  const killPlayback = useCallback(() => {
+    const el = audioRef.current;
+    if (el) {
+      el.pause();
+      el.removeAttribute("src");
+      el.load();
+    }
+    chunkPlayerRef.current?.stop();
+  }, []);
+
+  /**
+   * Skip a sentence. The head moves; the buffer does not shrink.
+   *
+   * The wire protocol has no `resume_from` on `barge` (see ws.ts ClientFrame),
+   * so a skip is entirely local: stop what is sounding — including chunked
+   * audio, which the chunk player can only stop wholesale — and play the
+   * sentence the head landed on from its whole-sentence `audio_url`. The
+   * server keeps streaming; nothing is cancelled and nothing is lost.
+   */
+  const skip = useCallback(
+    (direction: 1 | -1) => {
+      setBuffer((prev) => {
+        const next = direction === 1 ? skipForward(prev) : skipBack(prev);
+        if (next === prev) return prev;
+        chunkPlayerRef.current?.stop();
+        playHead(next);
+        return next;
+      });
+    },
+    [playHead],
+  );
+
+  const handleBarge = useCallback(() => {
+    socket.send({ type: "barge", turn_id: turnRef.current });
+    logFrame("out", "barge", { type: "barge", turn_id: turnRef.current });
+    killPlayback();
+    setBuffer(EMPTY_READ_AHEAD);
+    setState("listening");
+    turnRef.current = newTurnId();
+  }, [killPlayback, logFrame]);
+
   /** Read the file locally, show it in the transcript, then send user.attach. */
   const handleAttach = useCallback(
     async (file: File | Blob, hint?: "screenshot") => {
@@ -279,16 +415,7 @@ export default function App() {
             time: clockNow(),
           },
         }));
-        setLines((prev) => [
-          ...prev,
-          {
-            id: `eyes-${ref}`,
-            who: "eyes",
-            text: "",
-            time: clockNow(),
-            eyesRef: ref,
-          },
-        ]);
+        pushEntry({ who: "eyes", text: "", eyesRef: ref, frame: "user.attach" });
         socket.send({
           type: "user.attach",
           turn_id: turnRef.current,
@@ -298,69 +425,14 @@ export default function App() {
           b64: att.b64,
           filename: att.filename,
         });
+        logFrame("out", "user.attach", { ref, kind: att.kind, bytes: att.bytes });
       } catch (e) {
         // Same reason vocabulary as the server, so one UI covers both.
         setEyesNotice((e as Error)?.message || "eyes_bad_kind");
       }
     },
-    [],
+    [pushEntry, logFrame],
   );
-
-  // --- Playback queue: play sentence N while prefetching N+1 ---
-  const pumpQueue = useCallback(() => {
-    const el = audioRef.current;
-    if (!el || playingRef.current) return;
-    const next = queueRef.current.shift();
-    setQueueLength(queueRef.current.length);
-    if (!next) {
-      setActiveSentence("");
-      return;
-    }
-    playingRef.current = true;
-    setActiveSentence(next.text);
-    el.src = next.audio_url;
-    el.playbackRate = speedRef.current;
-    void el.play().catch(() => {
-      playingRef.current = false;
-      setActiveSentence("");
-    });
-    // Prefetch N+1 while N plays
-    const upcoming = queueRef.current[0];
-    if (upcoming) {
-      const pre = new Audio();
-      pre.preload = "auto";
-      pre.src = upcoming.audio_url;
-      prefetchRef.current = pre;
-    }
-  }, []);
-
-  const onAudioEnded = useCallback(() => {
-    playingRef.current = false;
-    pumpQueue();
-  }, [pumpQueue]);
-
-  const killPlayback = useCallback(() => {
-    queueRef.current = [];
-    setQueueLength(0);
-    playingRef.current = false;
-    setActiveSentence("");
-    prefetchRef.current?.removeAttribute("src");
-    prefetchRef.current = null;
-    const el = audioRef.current;
-    if (el) {
-      el.pause();
-      el.removeAttribute("src");
-      el.load();
-    }
-    chunkPlayerRef.current?.stop();
-  }, []);
-
-  const handleBarge = useCallback(() => {
-    socket.send({ type: "barge", turn_id: turnRef.current });
-    killPlayback();
-    setState("listening");
-    turnRef.current = newTurnId();
-  }, [killPlayback]);
 
   const handleSendPrompt = useCallback(
     (promptText: string) => {
@@ -368,22 +440,63 @@ export default function App() {
       const turnId = newTurnId();
       turnRef.current = turnId;
       turnStartTimeRef.current = performance.now();
+      setTiming(EMPTY_TIMING);
+      setBuffer(EMPTY_READ_AHEAD);
       setState("thinking");
-
-      socket.send({
-        type: "user.text",
+      const frame = {
+        type: "user.text" as const,
         turn_id: turnId,
         text: promptText.trim(),
-        persona: currentPersona,
-        voice: voice,
-        speed: speed,
-        system_prompt: systemPrompt,
-      });
+        persona: personaRef.current,
+        voice: voiceRef.current,
+        speed: speedRef.current,
+        system_prompt: promptRef.current,
+      };
+      socket.send(frame);
+      logFrame("out", "user.text", { ...frame, text: frame.text });
     },
-    [currentPersona, voice, speed, systemPrompt]
+    [logFrame],
   );
 
-  // --- Mic Engine: getUserMedia + ScriptProcessor + Analyser ---
+  // --- Mic engine -----------------------------------------------------------
+  const stopTalking = useCallback(() => {
+    if (!micRef.current) return;
+    setTalking(false);
+    turnStartTimeRef.current = performance.now();
+
+    const totalLen = recordedAudioRef.current.reduce((acc, c) => acc + c.length, 0);
+    let pcmB64 = "";
+    if (totalLen > 0) {
+      const merged = new Float32Array(totalLen);
+      let offset = 0;
+      for (const c of recordedAudioRef.current) {
+        merged.set(c, offset);
+        offset += c.length;
+      }
+      pcmB64 = float32ToBase64Pcm16(merged);
+    }
+    recordedAudioRef.current = [];
+
+    try {
+      micRef.current.stream.getTracks().forEach((tr) => tr.stop());
+      void micRef.current.ctx.close();
+    } catch {
+      // Already closed.
+    }
+    micRef.current = null;
+    setAnalyser(null);
+
+    socket.send({
+      type: "user.stop",
+      turn_id: turnRef.current,
+      pcm_b64: pcmB64,
+      sample_rate: 16000,
+    });
+    logFrame("out", "user.stop", { turn_id: turnRef.current, pcm_bytes: pcmB64.length });
+    setTiming(EMPTY_TIMING);
+    setBuffer(EMPTY_READ_AHEAD);
+  }, [logFrame]);
+
   const startTalking = useCallback(async () => {
     try {
       recordedAudioRef.current = [];
@@ -401,13 +514,11 @@ export default function App() {
       const ctx = new Ctx({ sampleRate: 16000 });
       const src = ctx.createMediaStreamSource(stream);
 
-      // WebAudio Analyser for living orb visualization
       const ana = ctx.createAnalyser();
       ana.fftSize = 64;
       src.connect(ana);
       setAnalyser(ana);
 
-      // Send user.start ONCE at the start of talking
       socket.send({
         type: "user.start",
         turn_id: turnRef.current,
@@ -416,8 +527,8 @@ export default function App() {
         speed: speedRef.current,
         system_prompt: promptRef.current,
       });
+      logFrame("out", "user.start", { turn_id: turnRef.current });
 
-      // 512-sample chunks for smooth visualization & stream buffering
       const proc = ctx.createScriptProcessor(512, 1, 1);
       proc.onaudioprocess = (ev: AudioProcessingEvent) => {
         const input = ev.inputBuffer.getChannelData(0);
@@ -425,11 +536,8 @@ export default function App() {
         samples.set(input);
         recordedAudioRef.current.push(samples);
 
-        // Calculate RMS for continuous VAD mode
         let sum = 0;
-        for (let i = 0; i < samples.length; i++) {
-          sum += samples[i] * samples[i];
-        }
+        for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
         const rms = Math.sqrt(sum / samples.length);
 
         if (inputMode === "handsfree") {
@@ -443,10 +551,11 @@ export default function App() {
               silenceTimerRef.current = null;
             }
           } else if (speechDetectedRef.current && !silenceTimerRef.current) {
-            silenceTimerRef.current = setTimeout(() => {
+            silenceTimerRef.current = window.setTimeout(() => {
               speechDetectedRef.current = false;
+              silenceTimerRef.current = null;
               stopTalking();
-            }, 600);
+            }, settings.vad_silence_ms || 600);
           }
         }
 
@@ -458,7 +567,7 @@ export default function App() {
       };
 
       src.connect(proc);
-      // Mute monitor to prevent feedback loops; zero-gain keeps ScriptProcessor active
+      // Zero-gain monitor keeps the ScriptProcessor alive without feedback.
       const zeroGain = ctx.createGain();
       zeroGain.gain.value = 0;
       proc.connect(zeroGain);
@@ -472,43 +581,9 @@ export default function App() {
       console.error("Failed to start mic:", err);
       setTalking(false);
     }
-  }, [inputMode]);
+  }, [inputMode, logFrame, settings.vad_silence_ms, stopTalking]);
 
-  const stopTalking = useCallback(() => {
-    if (!micRef.current) return;
-    setTalking(false);
-    turnStartTimeRef.current = performance.now();
-
-    // Flatten recorded chunks into one complete PCM16 payload
-    const totalLen = recordedAudioRef.current.reduce((acc, c) => acc + c.length, 0);
-    let pcmB64 = "";
-    if (totalLen > 0) {
-      const merged = new Float32Array(totalLen);
-      let offset = 0;
-      for (const c of recordedAudioRef.current) {
-        merged.set(c, offset);
-        offset += c.length;
-      }
-      pcmB64 = float32ToBase64Pcm16(merged);
-    }
-    recordedAudioRef.current = [];
-
-    // Stop tracks and close audio context cleanly
-    try {
-      micRef.current.stream.getTracks().forEach((t) => t.stop());
-      void micRef.current.ctx.close();
-    } catch {}
-    micRef.current = null;
-
-    socket.send({
-      type: "user.stop",
-      turn_id: turnRef.current,
-      pcm_b64: pcmB64,
-      sample_rate: 16000,
-    });
-  }, []);
-
-  // --- WebSocket Setup & Event Demux ---
+  // --- Socket ---------------------------------------------------------------
   useEffect(() => {
     socket.connect(WS_URL);
     setConnected(true);
@@ -521,14 +596,24 @@ export default function App() {
     const off = socket.onFrame((frame: ServerFrame) => {
       const now = performance.now();
       const elapsed = turnStartTimeRef.current > 0 ? Math.round(now - turnStartTimeRef.current) : 0;
+      const kind = (frame as { type?: string }).type ?? "unknown";
+      logFrame("in", kind, frame);
 
-      // Receipts are handled before the audio frame switch: a receipt plays
-      // nothing and owns its own shape, so it stays out of ws.ts's union.
       const receipt = asReceiptFrame(frame);
       if (receipt) {
         attachReceipt(receipt);
         return;
       }
+
+      /** First playable audio of the turn, whichever frame carries it. */
+      const markFirstAudio = () => {
+        setTiming((prev) =>
+          prev.firstAudioMs === null && elapsed > 0
+            ? { ...prev, firstAudioMs: elapsed }
+            : prev,
+        );
+        setTimingTurn(frame.turn_id);
+      };
 
       switch (frame.type) {
         case "state.idle":
@@ -536,20 +621,17 @@ export default function App() {
           break;
         case "state.listening":
           setState("listening");
-          // Entering listening (fresh turn or post-barge) stops any chunked
-          // playback still in flight — the same law as killPlayback below.
           chunkPlayerRef.current?.stop();
           break;
         case "state.thinking":
           setState("thinking");
-          // Optional AX grounding (lane C). Absent on most builds; ignore then.
           setScreenGround(frame.screen ?? null);
           break;
         case "state.speaking":
           setState("speaking");
           break;
         case "transcript.user":
-          pushLine("user", frame.text);
+          pushEntry({ who: "user", text: frame.text, frame: "transcript.user" });
           setMetrics((m) => ({
             ...m,
             sttMs: elapsed > 0 ? elapsed : m.sttMs,
@@ -557,44 +639,53 @@ export default function App() {
           }));
           break;
         case "agent.stall":
+          setTiming((prev) =>
+            prev.stallMs === null && elapsed > 0 ? { ...prev, stallMs: elapsed } : prev,
+          );
+          setTimingTurn(frame.turn_id);
           setMetrics((m) => ({
             ...m,
-            stallMs: elapsed > 0 ? elapsed : 0.6,
+            stallMs: elapsed > 0 ? elapsed : m.stallMs,
             provenance: "flown",
           }));
+          if (frame.text) {
+            pushEntry({ who: "thinking", text: frame.text, frame: "agent.stall" });
+          }
           if (frame.audio_url && !mutedRef.current && audioRef.current) {
-            queueRef.current.unshift({
-              index: -1,
-              text: frame.text || "One sec...",
-              audio_url: resolveAudioUrl(frame.audio_url),
-            });
-            setQueueLength(queueRef.current.length);
-            pumpQueue();
+            // The stall is not part of the sentence buffer — it is not a claim
+            // and it must never be skippable or re-orderable. It plays direct.
+            const el = audioRef.current;
+            el.src = resolveAudioUrl(frame.audio_url);
+            el.playbackRate = speedRef.current;
+            void el.play().catch(() => undefined);
+            markFirstAudio();
           }
           break;
-        case "agent.sentence":
-          pushLine("agent", frame.text, resolveAudioUrl(frame.audio_url));
+        case "agent.sentence": {
+          const seq = frame.seq ?? frame.index ?? 0;
+          pushEntry({ who: "agent", text: frame.text, seq, frame: "agent.sentence" });
+          setBuffer((prev) => {
+            let next = insertSentence(prev, {
+              seq,
+              text: frame.text,
+              audioUrl: resolveAudioUrl(frame.audio_url),
+              chunked: Boolean(frame.chunked),
+            });
+            const wasIdle = prev.head < 0 || prev.head >= prev.sentences.length;
+            next = startIfIdle(next);
+            // A chunked sentence is already sounding through ChunkPlayer, so the
+            // head only tracks it; an unchunked one needs the audio element.
+            if (wasIdle && !frame.chunked) playHead(next);
+            return next;
+          });
+          if (!frame.chunked) markFirstAudio();
           setMetrics((m) => ({
             ...m,
-            ttftMs: m.ttftMs === 380 && elapsed > 0 ? elapsed : m.ttftMs,
-            ttsMs: 180,
+            ttftMs: m.ttftMs === 0 && elapsed > 0 ? elapsed : m.ttftMs,
             provenance: "flown",
           }));
-          // Chunked sentences already played via agent.chunk (ChunkPlayer) as
-          // they arrived — enqueuing audio_url here too would play the whole
-          // sentence a second time. The transcript line above still lands
-          // either way; only the playback enqueue is skipped.
-          if (!mutedRef.current && !frame.chunked) {
-            queueRef.current.push({
-              index: frame.index ?? frame.seq ?? 0,
-              text: frame.text,
-              audio_url: resolveAudioUrl(frame.audio_url),
-            });
-            queueRef.current.sort((a, b) => a.index - b.index);
-            setQueueLength(queueRef.current.length);
-            pumpQueue();
-          }
           break;
+        }
         case "agent.chunk":
           if (!mutedRef.current) {
             void getChunkPlayer().enqueue({
@@ -604,9 +695,14 @@ export default function App() {
               final: frame.final,
             });
           }
+          if (frame.chunk_no === 0) markFirstAudio();
           break;
         case "handover.received":
-          pushLine("agent", `Handover received from ${frame.source}.`);
+          pushEntry({
+            who: "notice",
+            text: `Handed over from ${frame.source}.`,
+            frame: "handover.received",
+          });
           break;
         case "agent.done":
           setMetrics((m) => ({
@@ -614,14 +710,14 @@ export default function App() {
             e2eMs: elapsed > 0 ? elapsed : m.e2eMs,
             provenance: "flown",
           }));
+          setTimingTurn(frame.turn_id);
           turnRef.current = newTurnId();
-          // Refresh memory drawer turns automatically
           fetch(`${httpBaseFromWs(WS_URL)}/ledger`)
             .then((r) => r.json())
             .then((d) => {
               if (d && Array.isArray(d.turns)) setMemoryTurns(d.turns);
             })
-            .catch(() => {});
+            .catch(() => undefined);
           break;
         case "eyes.received":
           patchEyes(frame.ref, {
@@ -649,6 +745,14 @@ export default function App() {
               reason: frame.reason,
               detail: frame.detail,
             });
+          } else {
+            // An error is the one moment that waits for the user, so it lands
+            // in the stream in plain words instead of only in the console.
+            pushEntry({
+              who: "notice",
+              text: `Could not finish that: ${frame.reason}.`,
+              frame: "agent.error",
+            });
           }
           break;
       }
@@ -659,27 +763,26 @@ export default function App() {
       offAuth();
       socket.close();
     };
-  }, [pushLine, pumpQueue, patchEyes, attachReceipt, getChunkPlayer]);
+  }, [pushEntry, patchEyes, attachReceipt, getChunkPlayer, logFrame, playHead]);
 
-  // --- Fetch Voices, Personas, and Memory Ledger on load ---
+  // --- Server state on load -------------------------------------------------
   useEffect(() => {
     const base = httpBaseFromWs(WS_URL);
 
-    // 1. Fetch Voices
     fetch(`${base}/voices`)
       .then((r) => (r.ok ? r.json() : Promise.reject()))
       .then((data: unknown) => {
         if (!Array.isArray(data) || data.length === 0) return;
-        const list = data.map((v) => ({
-          id: v.id as string,
-          display_name: v.display_name ?? (v.id as string),
-          lang: v.lang ?? "en",
-        }));
-        setVoices(list);
+        setVoices(
+          data.map((v) => ({
+            id: v.id as string,
+            display_name: v.display_name ?? (v.id as string),
+            lang: v.lang ?? "en",
+          })),
+        );
       })
-      .catch(() => {});
+      .catch(() => undefined);
 
-    // 2. Fetch Personas
     fetch(`${base}/personas`)
       .then((r) => (r.ok ? r.json() : Promise.reject()))
       .then((data: unknown) => {
@@ -692,9 +795,8 @@ export default function App() {
           setVoice(current.voice);
         }
       })
-      .catch(() => {});
+      .catch(() => undefined);
 
-    // 3. Fetch Memory Ledger
     fetch(`${base}/ledger`)
       .then((r) => (r.ok ? r.json() : Promise.reject()))
       .then((data: unknown) => {
@@ -702,9 +804,8 @@ export default function App() {
           setMemoryTurns((data as { turns: MemoryTurn[] }).turns);
         }
       })
-      .catch(() => {});
+      .catch(() => undefined);
 
-    // 4. Fetch Runtime Settings & Active Providers
     fetch(`${base}/settings`)
       .then((r) => (r.ok ? r.json() : Promise.reject()))
       .then((d) => {
@@ -712,10 +813,9 @@ export default function App() {
         if (d && d.active) setActiveProviders(d.active);
         if (d && d.secrets_set) setSecretsSet(d.secrets_set);
       })
-      .catch(() => {});
+      .catch(() => undefined);
   }, [currentPersona]);
 
-  // Handle Runtime Tire Switching
   const handleApplySettings = async (
     newSettings: Partial<RuntimeSettings> & { deepgram_api_key?: string; llm_api_key?: string },
   ) => {
@@ -737,7 +837,6 @@ export default function App() {
     }
   };
 
-  // Handle Persona Selection
   const handleSelectPersona = (name: string) => {
     setCurrentPersona(name);
     const p = personas.find((item) => item.name === name);
@@ -748,7 +847,6 @@ export default function App() {
     }
   };
 
-  // Handle Save / Create Persona
   const handleSavePersona = async (personaData: PersonaData) => {
     const base = httpBaseFromWs(WS_URL);
     const res = await fetch(`${base}/personas`, {
@@ -767,7 +865,6 @@ export default function App() {
     }
   };
 
-  // Handle Delete Persona
   const handleDeletePersona = async (name: string) => {
     const base = httpBaseFromWs(WS_URL);
     const res = await fetch(`${base}/personas/${name}`, {
@@ -781,11 +878,10 @@ export default function App() {
     if (res.ok) {
       const refreshed = await fetch(`${base}/personas`).then((r) => r.json());
       setPersonas(refreshed);
-      handleSelectPersona("donna");
+      handleSelectPersona(refreshed[0]?.name ?? "donna");
     }
   };
 
-  // Clear Memory
   const handleClearMemory = async () => {
     const base = httpBaseFromWs(WS_URL);
     const res = await fetch(`${base}/ledger`, {
@@ -796,34 +892,41 @@ export default function App() {
       setAuthError(true);
       return;
     }
-    if (res.ok) {
-      setMemoryTurns([]);
-    }
+    if (res.ok) setMemoryTurns([]);
   };
 
-  // Voice Preview
   const handlePreviewVoice = (voiceId: string) => {
     const base = httpBaseFromWs(WS_URL);
     const audio = new Audio(`${base}/audio/preview-${encodeURIComponent(voiceId)}`);
-    audio.play().catch(() => {});
+    audio.play().catch(() => undefined);
   };
 
-  // Keyboard Shortcuts (Space hold to talk, tap to barge, M to mute)
+  // --- Keyboard -------------------------------------------------------------
+  // Space holds to talk (tap barges while speaking); Right/Left skip inside the
+  // read-ahead buffer; Escape stops the turn; M mutes.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
       if (e.code === "Space" && !e.repeat) {
         e.preventDefault();
-        if (state === "speaking") {
+        if (state === "speaking") handleBarge();
+        else if (!talking) void startTalking();
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        skip(1);
+      } else if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        skip(-1);
+      } else if (e.key === "Escape") {
+        if (showStudio || showMemory || showSettings) {
+          setShowStudio(false);
+          setShowMemory(false);
+          setShowSettings(false);
+        } else {
           handleBarge();
-        } else if (!talking) {
-          startTalking();
         }
       } else if (e.key.toLowerCase() === "m") {
         setMuted((prev) => !prev);
-      } else if (e.key === "Escape") {
-        setShowStudio(false);
-        setShowMemory(false);
       }
     };
 
@@ -841,491 +944,253 @@ export default function App() {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [state, talking, inputMode, handleBarge, startTalking, stopTalking]);
+  }, [
+    state,
+    talking,
+    inputMode,
+    handleBarge,
+    startTalking,
+    stopTalking,
+    skip,
+    showStudio,
+    showMemory,
+    showSettings,
+  ]);
+
+  // --- Render ---------------------------------------------------------------
+
+  /** Transcript entries plus the phase each agent sentence is in right now. */
+  const streamLines: StreamLine[] = useMemo(() => {
+    const seqIndex = new Map<number, number>();
+    buffer.sentences.forEach((s, i) => seqIndex.set(s.seq, i));
+    return entries.map((entry) => {
+      const line: StreamLine = {
+        id: entry.id,
+        who: entry.who,
+        text: entry.text,
+        receipt: entry.receipt,
+        seq: entry.seq,
+        frame: entry.frame,
+      };
+      if (entry.who === "agent" && entry.seq !== undefined) {
+        const index = seqIndex.get(entry.seq);
+        line.phase =
+          index === undefined
+            ? "spoken"
+            : index < buffer.head
+              ? "spoken"
+              : index === buffer.head
+                ? "speaking"
+                : "buffered";
+      }
+      if (entry.who === "eyes" && entry.eyesRef && eyesMap[entry.eyesRef]) {
+        line.slot = <EyesBlock entry={eyesMap[entry.eyesRef]} />;
+      }
+      return line;
+    });
+  }, [entries, buffer, eyesMap]);
+
+  const aheadCount = bufferedAhead(buffer).length;
 
   return (
-    <div
-      style={{
-        backgroundColor: "#090a0f",
-        minHeight: "100vh",
-        color: "#f1f3f9",
-        fontFamily: "'Google Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        boxSizing: "border-box",
-        padding: "1.5rem 1rem",
-      }}
-    >
-      {authError && (
-        <div
-          role="alert"
-          style={{
-            width: "100%",
-            maxWidth: 720,
-            background: "rgba(255, 61, 0, 0.15)",
-            border: "1px solid #ff3d00",
-            color: "#ff3d00",
-            borderRadius: "10px",
-            padding: "0.6rem 1rem",
-            marginBottom: "0.75rem",
-            fontSize: "0.8rem",
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            gap: "0.75rem",
-          }}
-        >
-          <span>studio token missing or wrong — set it in Settings to reconnect.</span>
-          <button
-            type="button"
-            onClick={() => setShowSettings(true)}
-            style={{
-              background: "none",
-              border: "1px solid #ff3d00",
-              color: "#ff3d00",
-              borderRadius: "6px",
-              padding: "0.2rem 0.6rem",
-              fontSize: "0.75rem",
-              cursor: "pointer",
-              flexShrink: 0,
-            }}
-          >
-            Open Settings
-          </button>
-        </div>
-      )}
-      {/* Top App Bar */}
-      <header
-        style={{
-          width: "100%",
-          maxWidth: 680,
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          marginBottom: "1.5rem",
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: "0.65rem" }}>
-          <div
-            style={{
-              width: 28,
-              height: 28,
-              borderRadius: "50%",
-              background: "linear-gradient(135deg, #4285f4, #a142f4)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              fontWeight: 700,
-              fontSize: "0.9rem",
-              color: "#ffffff",
-              boxShadow: "0 2px 8px rgba(66, 133, 244, 0.4)",
-            }}
-          >
-            G
-          </div>
-          <span style={{ fontSize: "1.1rem", fontWeight: 600, letterSpacing: "-0.01em" }}>
-            pet-talk <span style={{ fontSize: "0.75rem", color: "#24c1e0", fontWeight: 500 }}>duplex</span>
-          </span>
-        </div>
-
-        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-          {/* Language Toggle */}
-          <button
-            type="button"
-            onClick={() => setLang((l) => (l === "en" ? "hi" : "en"))}
-            style={{
-              background: "#191c26",
-              border: "1px solid #282c3f",
-              color: "#f1f3f9",
-              borderRadius: "999px",
-              padding: "0.25rem 0.65rem",
-              fontSize: "0.75rem",
-              fontWeight: 600,
-              cursor: "pointer",
-            }}
-          >
-            {lang.toUpperCase()}
-          </button>
-
-          {/* Persona Studio Button */}
-          <button
-            type="button"
-            onClick={() => setShowStudio((s) => !s)}
-            style={{
-              background: showStudio ? "#24c1e0" : "#191c26",
-              color: showStudio ? "#090a0f" : "#f1f3f9",
-              border: "1px solid #282c3f",
-              borderRadius: "999px",
-              padding: "0.25rem 0.75rem",
-              fontSize: "0.75rem",
-              fontWeight: 600,
-              cursor: "pointer",
-            }}
-          >
-            Studio
-          </button>
-
-          {/* Memory Ledger Button */}
-          <button
-            type="button"
-            onClick={() => setShowMemory(true)}
-            style={{
-              background: "#191c26",
-              border: "1px solid #282c3f",
-              color: "#f1f3f9",
-              borderRadius: "999px",
-              padding: "0.25rem 0.75rem",
-              fontSize: "0.75rem",
-              fontWeight: 600,
-              cursor: "pointer",
-            }}
-          >
-            Memory ({memoryTurns.length})
-          </button>
-
-          {/* Settings / Tires Button */}
-          <button
-            type="button"
-            onClick={() => setShowSettings(true)}
-            style={{
-              background: showSettings ? "#24c1e0" : "#191c26",
-              color: showSettings ? "#090a0f" : "#f1f3f9",
-              border: "1px solid #282c3f",
-              borderRadius: "999px",
-              padding: "0.25rem 0.75rem",
-              fontSize: "0.75rem",
-              fontWeight: 600,
-              cursor: "pointer",
-            }}
-          >
-            ⚙️ {t["settings"] || "Settings"} ({activeProviders.llm === "StubLLM" ? "Mocks" : "Live"})
-          </button>
-
-          {/* Connection Status Pill */}
-          <button
-            type="button"
-            onClick={() => {
-              if (connected) {
-                socket.close();
-                setConnected(false);
-              } else {
-                socket.connect();
-                setConnected(true);
+    <div className="pt-app">
+      <header className="pt-header">
+        <div className="pt-header-left">
+          <ArchieGlyph
+            state={archieState(state, !connected || authError)}
+            colourway="C4"
+            size={24}
+          />
+          <span className="pt-wordmark">pet-talk</span>
+          <span className="pt-chip">
+            <span
+              className={
+                connected ? (state === "idle" ? "pt-dot" : "pt-dot pt-dot--live") : "pt-dot pt-dot--down"
               }
-            }}
-            data-testid="state-pill"
-            style={{
-              background: connected ? "rgba(0, 200, 83, 0.15)" : "rgba(255, 61, 0, 0.15)",
-              color: connected ? "#00c853" : "#ff3d00",
-              border: `1px solid ${connected ? "#00c853" : "#ff3d00"}`,
-              borderRadius: "999px",
-              padding: "0.25rem 0.75rem",
-              fontSize: "0.75rem",
-              fontWeight: 600,
-              cursor: "pointer",
-            }}
+            />
+            {connected ? STATE_WORD[state] : "offline"}
+          </span>
+          {aheadCount > 0 ? (
+            <span className="pt-chip pt-chip--signal">
+              {aheadCount === 1 ? "1 line ahead" : `${aheadCount} lines ahead`}
+            </span>
+          ) : null}
+          {developer ? <span className="pt-mono">{turnRef.current}</span> : null}
+        </div>
+
+        <div className="pt-header-right">
+          <button
+            type="button"
+            className="pt-btn pt-btn--ghost"
+            onClick={() => setLang(lang === "en" ? "hi" : "en")}
+            title="Language"
           >
-            {connected ? state.toUpperCase() : "DISCONNECTED"}
+            {lang === "en" ? "EN" : "हि"}
           </button>
+          <button type="button" className="pt-btn" onClick={() => setShowStudio(true)}>
+            {t["custom-persona"]}
+          </button>
+          <button type="button" className="pt-btn" onClick={() => setShowMemory(true)}>
+            {t["memory-ledger"]}
+          </button>
+          <button type="button" className="pt-btn" onClick={() => setShowSettings(true)}>
+            {t["settings"]}
+          </button>
+          <button
+            type="button"
+            className="pt-btn"
+            aria-pressed={developer}
+            onClick={() => setDeveloper((prev) => !prev)}
+            title="Show frames, budgets and raw sources"
+          >
+            Developer
+          </button>
+          <ThemeToggle theme={theme} onChange={setTheme} />
         </div>
       </header>
 
-      {/* Main Stage */}
-      <main style={{ width: "100%", maxWidth: 680, display: "flex", flexDirection: "column", alignItems: "center" }}>
-        {/* Persona Studio Drawer / Panel */}
-        {showStudio && (
-          <div style={{ width: "100%" }}>
-            <PersonaStudio
-              personas={personas}
-              currentPersona={currentPersona}
-              onSelectPersona={handleSelectPersona}
-              voices={voices}
-              currentVoice={voice}
-              onSelectVoice={setVoice}
-              speed={speed}
-              onSpeedChange={setSpeed}
-              systemPrompt={systemPrompt}
-              onSystemPromptChange={setSystemPrompt}
-              onSavePersona={handleSavePersona}
-              onDeletePersona={handleDeletePersona}
-              onPreviewVoice={handlePreviewVoice}
-              t={t}
-            />
-          </div>
-        )}
-
-        {/* Central Acoustic Orb */}
-        <AcousticOrb state={state} analyser={analyser} talking={talking} size={240} />
-
-        {/* State Caption & Spoken Subtitle */}
-        <div style={{ minHeight: "4.5rem", textAlign: "center", margin: "0.5rem 0 1rem" }}>
-          <div
-            style={{
-              fontSize: "0.85rem",
-              fontWeight: 600,
-              color: state === "listening" ? "#00c853" : state === "thinking" ? "#24c1e0" : state === "speaking" ? "#ffb300" : "#636c84",
-              textTransform: "uppercase",
-              letterSpacing: "0.05em",
-              marginBottom: "0.35rem",
-            }}
-          >
-            {state === "listening" ? t["listening"] : state === "thinking" ? t["thinking"] : state === "speaking" ? t["speaking"] : "IDLE"}
-          </div>
-          <div
-            style={{
-              fontSize: "1.05rem",
-              color: "#f1f3f9",
-              maxWidth: 540,
-              lineHeight: 1.4,
-              fontStyle: activeSentence ? "normal" : "italic",
-            }}
-          >
-            {activeSentence || (state === "listening" ? "Say something or ask a question..." : "Hold space or push to talk")}
-          </div>
-        </div>
-
-        {/* Main Interaction Controls */}
-        <div style={{ display: "flex", gap: "1rem", alignItems: "center", marginBottom: "1.5rem" }}>
-          {/* Push to Talk Primary Action */}
-          <button
-            type="button"
-            data-testid="ptt-button"
-            onMouseDown={startTalking}
-            onMouseUp={stopTalking}
-            onTouchStart={startTalking}
-            onTouchEnd={stopTalking}
-            style={{
-              background: talking ? "#00c853" : "linear-gradient(135deg, #4285f4, #24c1e0)",
-              color: talking ? "#090a0f" : "#ffffff",
-              border: "none",
-              borderRadius: "999px",
-              padding: "0.85rem 2rem",
-              fontSize: "1rem",
-              fontWeight: 600,
-              cursor: "pointer",
-              boxShadow: talking ? "0 0 24px rgba(0,200,83,0.5)" : "0 4px 16px rgba(66,133,244,0.4)",
-              transition: "transform 0.1s, box-shadow 0.1s",
-              userSelect: "none",
-            }}
-          >
-            {talking ? "Listening…" : t["push-to-talk"]}
-          </button>
-
-          {/* Barge In Button (Always available or highlights during speech) */}
-          <button
-            type="button"
-            data-testid="barge-button"
-            onClick={handleBarge}
-            style={{
-              background: state === "speaking" ? "#ff3d00" : "#191c26",
-              color: state === "speaking" ? "#ffffff" : "#ff3d00",
-              border: "1px solid #ff3d00",
-              borderRadius: "999px",
-              padding: "0.85rem 1.5rem",
-              fontSize: "0.9rem",
-              fontWeight: 600,
-              cursor: "pointer",
-              boxShadow: state === "speaking" ? "0 0 16px rgba(255,61,0,0.5)" : "none",
-            }}
-          >
-            {t["barge"]}
-          </button>
-        </div>
-
-        {/* Mode & Mute Switcher Bar */}
-        <div style={{ display: "flex", gap: "0.75rem", marginBottom: "1rem" }}>
-          <button
-            type="button"
-            onClick={() => setInputMode((m) => (m === "ptt" ? "handsfree" : "ptt"))}
-            style={{
-              background: inputMode === "handsfree" ? "rgba(36, 193, 224, 0.2)" : "#191c26",
-              border: `1px solid ${inputMode === "handsfree" ? "#24c1e0" : "#282c3f"}`,
-              color: inputMode === "handsfree" ? "#24c1e0" : "#9ba3b8",
-              borderRadius: "8px",
-              padding: "0.4rem 0.85rem",
-              fontSize: "0.75rem",
-              fontWeight: 600,
-              cursor: "pointer",
-            }}
-          >
-            {inputMode === "handsfree" ? t["hands-free"] || "Hands-Free (VAD)" : t["push-to-talk-mode"] || "Push-to-Talk"}
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setMuted((m) => !m)}
-            style={{
-              background: muted ? "rgba(255, 61, 0, 0.2)" : "#191c26",
-              border: `1px solid ${muted ? "#ff3d00" : "#282c3f"}`,
-              color: muted ? "#ff3d00" : "#9ba3b8",
-              borderRadius: "8px",
-              padding: "0.4rem 0.85rem",
-              fontSize: "0.75rem",
-              fontWeight: 600,
-              cursor: "pointer",
-            }}
-          >
-            {muted ? `🔇 ${t["muted"]}` : "🔊 Unmuted"}
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setShowTelemetry((s) => !s)}
-            style={{
-              background: "#191c26",
-              border: "1px solid #282c3f",
-              color: "#9ba3b8",
-              borderRadius: "8px",
-              padding: "0.4rem 0.85rem",
-              fontSize: "0.75rem",
-              cursor: "pointer",
-            }}
-          >
-            {t["telemetry"] || "Telemetry"}
-          </button>
-        </div>
-
-        {/* Telemetry Waterfall HUD */}
-        {showTelemetry && (
-          <div style={{ width: "100%" }}>
-            <TelemetryHud
-              state={state}
-              metrics={metrics}
-              queueLength={queueLength}
-              connected={connected}
-            />
-          </div>
-        )}
-
-        {/* Dialogue Transcript Stream */}
-        <section
-          aria-label="Transcript"
-          style={{
-            width: "100%",
-            background: "#12141c",
-            border: "1px solid #282c3f",
-            borderRadius: "16px",
-            padding: "1.25rem",
-            marginTop: "1rem",
-            boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
-          }}
-        >
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              marginBottom: "1rem",
-              paddingBottom: "0.5rem",
-              borderBottom: "1px solid #282c3f",
-            }}
-          >
-            <span style={{ fontSize: "0.85rem", fontWeight: 600, color: "#f1f3f9" }}>
-              Live Dialogue Stream
-            </span>
-            <span style={{ fontSize: "0.75rem", color: "#636c84" }}>
-              Persona: {currentPersona.toUpperCase()} ({voice})
-            </span>
+      <div className="pt-body" data-developer={developer ? "true" : "false"}>
+        <nav className="pt-rail">
+          <div className="pt-rail-group">
+            <p className="pt-lbl">voice</p>
+            <button
+              type="button"
+              className="pt-rail-row"
+              aria-pressed={talking}
+              onMouseDown={() => void startTalking()}
+              onMouseUp={() => (inputMode === "ptt" ? stopTalking() : undefined)}
+            >
+              {talking ? "listening — release to send" : "hold to talk (space)"}
+            </button>
+            <button
+              type="button"
+              className="pt-rail-row"
+              aria-pressed={inputMode === "handsfree"}
+              onClick={() => setInputMode(inputMode === "ptt" ? "handsfree" : "ptt")}
+            >
+              hands-free
+            </button>
+            <button
+              type="button"
+              className="pt-rail-row"
+              aria-pressed={muted}
+              onClick={() => setMuted((prev) => !prev)}
+            >
+              muted
+            </button>
+            <button type="button" className="pt-rail-row" onClick={handleBarge}>
+              stop (esc)
+            </button>
           </div>
 
-          <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", marginBottom: "0.85rem" }}>
-            <ScreenGroundingLine screen={screenGround} />
-            <EyesAttachDock onAttach={handleAttach} disabled={!connected} notice={eyesNotice} />
+          <div className="pt-rail-group">
+            <p className="pt-lbl">level</p>
+            <div style={{ padding: `0 var(--pt-s4)` }}>
+              <AcousticOrb analyser={analyser} state={state} talking={talking} size={132} />
+            </div>
           </div>
 
-          <div
-            data-testid="transcript"
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              gap: "0.75rem",
-              maxHeight: 280,
-              overflowY: "auto",
-            }}
-          >
-            {lines.length === 0 ? (
-              <div style={{ color: "#636c84", fontSize: "0.85rem", textAlign: "center", padding: "1.5rem" }}>
-                Hold spacebar to talk. Transcripts and sentence audio will stream live here.
-              </div>
-            ) : (
-              lines.map((line) =>
-                line.who === "eyes" ? (
-                  eyesMap[line.eyesRef ?? ""] ? (
-                    <EyesBlock key={line.id} entry={eyesMap[line.eyesRef as string]} />
-                  ) : null
-                ) : (
-                <div
-                  key={line.id}
-                  style={{
-                    display: "flex",
-                    flexDirection: "column",
-                    alignSelf: line.who === "user" ? "flex-end" : "flex-start",
-                    maxWidth: "80%",
-                    background: line.who === "user" ? "rgba(66, 133, 244, 0.15)" : "#191c26",
-                    border: `1px solid ${line.who === "user" ? "rgba(66, 133, 244, 0.3)" : "#282c3f"}`,
-                    borderRadius: "12px",
-                    padding: "0.6rem 0.85rem",
-                    fontSize: "0.85rem",
-                  }}
+          <div className="pt-rail-group">
+            <p className="pt-lbl">attach</p>
+            <div style={{ padding: `0 var(--pt-s4)` }}>
+              <EyesAttachDock onAttach={handleAttach} disabled={!connected} notice={eyesNotice} />
+            </div>
+          </div>
+
+          {developer ? (
+            <div className="pt-rail-group">
+              <p className="pt-lbl">personas</p>
+              {personas.map((p) => (
+                <button
+                  type="button"
+                  key={p.name}
+                  className="pt-rail-row"
+                  aria-current={p.name === currentPersona}
+                  onClick={() => handleSelectPersona(p.name)}
                 >
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      fontSize: "0.7rem",
-                      color: line.who === "user" ? "#4285f4" : "#ffb300",
-                      marginBottom: "0.25rem",
-                      gap: "1rem",
-                    }}
-                  >
-                    <span style={{ fontWeight: 600 }}>{line.who === "user" ? "You" : currentPersona.toUpperCase()}</span>
-                    <span style={{ color: "#636c84" }}>{line.time}</span>
-                  </div>
-                  <div style={{ color: "#f1f3f9", lineHeight: 1.4 }}>{line.text}</div>
-                  {/* Proof under the spoken line. Never a mascot here. */}
-                  {line.receipt ? <ReceiptChip receipt={line.receipt} /> : null}
-                  {line.audio_url && (
-                    <div style={{ marginTop: "0.35rem" }}>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const a = new Audio(line.audio_url);
-                          a.playbackRate = speedRef.current;
-                          a.play();
-                        }}
-                        style={{
-                          background: "none",
-                          border: "none",
-                          color: "#24c1e0",
-                          fontSize: "0.7rem",
-                          cursor: "pointer",
-                          padding: 0,
-                        }}
-                      >
-                        ▶ Replay
-                      </button>
-                    </div>
-                  )}
-                </div>
-                ),
-              )
-            )}
-          </div>
-        </section>
+                  {p.name}
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </nav>
 
-        {/* Google Labs Styled Prompt Composer & Dictation Dock */}
-        <PromptComposer
-          onSend={handleSendPrompt}
-          disabled={!connected}
-          connected={connected}
-          serverUrl={httpBaseFromWs(WS_URL)}
-          onAuthError={() => setAuthError(true)}
+        <main className="pt-main">
+          {authError ? (
+            <div className="pt-banner" role="alert">
+              <span>studio token missing or wrong — set it in Settings to reconnect.</span>
+              <button type="button" className="pt-btn pt-btn--danger" onClick={() => setShowSettings(true)}>
+                Open Settings
+              </button>
+            </div>
+          ) : null}
+
+          {screenGround ? <ScreenGroundingLine screen={screenGround} /> : null}
+
+          <div className="pt-scroll-y">
+            <TranscriptStream
+              lines={streamLines}
+              developer={developer}
+              emptyHint="Hold space and ask something. Buffered lines appear dim before they are spoken; → skips one, Esc stops."
+            />
+          </div>
+
+          <LatencyBar timing={timing} developer={developer} turnKey={timingTurn} />
+
+          <PromptComposer
+            onSend={handleSendPrompt}
+            disabled={!connected}
+            connected={connected}
+            serverUrl={httpBaseFromWs(WS_URL)}
+            onAuthError={() => setAuthError(true)}
+            t={t}
+          />
+        </main>
+
+        {developer ? (
+          <DeveloperRail
+            frames={frames}
+            timing={timing}
+            personaName={currentPersona}
+            providers={activeProviders}
+            queueLength={buffer.sentences.length}
+            bufferedCount={aheadCount}
+            lastReceipt={lastReceipt}
+          />
+        ) : null}
+      </div>
+
+      {developer ? (
+        <div style={{ position: "fixed", right: "var(--pt-s5)", bottom: "var(--pt-s5)" }}>
+          <TelemetryHud
+            state={state}
+            metrics={metrics}
+            queueLength={aheadCount}
+            connected={connected}
+          />
+        </div>
+      ) : null}
+
+      {showStudio ? (
+        <PersonaStudio
+          personas={personas}
+          currentPersona={currentPersona}
+          onSelectPersona={handleSelectPersona}
+          voices={voices}
+          currentVoice={voice}
+          onSelectVoice={setVoice}
+          speed={speed}
+          onSpeedChange={setSpeed}
+          systemPrompt={systemPrompt}
+          onSystemPromptChange={setSystemPrompt}
+          onSavePersona={handleSavePersona}
+          onDeletePersona={handleDeletePersona}
+          onPreviewVoice={handlePreviewVoice}
+          onClose={() => setShowStudio(false)}
           t={t}
         />
-      </main>
+      ) : null}
 
-      {/* Persistent Hippocampus Memory Drawer */}
       <MemoryDrawer
         isOpen={showMemory}
         onClose={() => setShowMemory(false)}
@@ -1334,7 +1199,6 @@ export default function App() {
         t={t}
       />
 
-      {/* Settings / Swappable Tires Modal */}
       <SettingsModal
         isOpen={showSettings}
         onClose={() => setShowSettings(false)}
@@ -1350,8 +1214,7 @@ export default function App() {
         t={t}
       />
 
-      {/* Hidden audio element for gapless streaming playback */}
-      <audio ref={audioRef} onEnded={onAudioEnded} preload="auto" />
+      <audio ref={audioRef} onEnded={onAudioEnded} hidden />
     </div>
   );
 }

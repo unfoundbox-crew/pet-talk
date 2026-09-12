@@ -59,6 +59,19 @@ interface SettingsModalProps {
   t: Record<string, string>;
 }
 
+// A row of side-by-side fields. Layout only — no colour, spacing from the
+// ladder token, so it stays exempt from the "no ad-hoc pixel" rule.
+const twoCol: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "1fr 1fr",
+  gap: "var(--pt-s3)",
+};
+
+const inlineRow: React.CSSProperties = {
+  display: "flex",
+  gap: "var(--pt-s2)",
+};
+
 // Placeholder for a password-type credential input: never the value itself.
 function secretPlaceholder(field: SecretField, secretsSet: SettingsModalProps["secretsSet"]): string {
   return secretsSet[field] ? "set (hidden)" : "not set";
@@ -98,17 +111,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [clearingField, setClearingField] = useState<SecretField | null>(null);
 
   if (!isOpen) return null;
-
-  const clearButtonStyle: React.CSSProperties = {
-    background: "none",
-    border: "1px solid #282c3f",
-    color: "#9ba3b8",
-    borderRadius: 6,
-    padding: "0 0.5rem",
-    fontSize: "0.7rem",
-    cursor: "pointer",
-    marginLeft: "0.35rem",
-  };
 
   // Posts an explicit "" for one credential field — the one way to wipe a
   // live key, since a blank typed value is treated as "leave unchanged".
@@ -190,178 +192,117 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   };
 
-  return (
-    <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        backgroundColor: "rgba(9, 10, 15, 0.75)",
-        backdropFilter: "blur(8px)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        zIndex: 200,
-        padding: "1rem",
-      }}
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
-      <div
-        style={{
-          width: "100%",
-          maxWidth: 540,
-          maxHeight: "90vh",
-          overflowY: "auto",
-          background: "#12141c",
-          border: "1px solid #282c3f",
-          borderRadius: "16px",
-          padding: "1.5rem",
-          color: "#f1f3f9",
-          boxShadow: "0 12px 32px rgba(0,0,0,0.7)",
-          fontFamily: "system-ui, -apple-system, sans-serif",
-        }}
-      >
-        {/* Header */}
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1.25rem" }}>
-          <div>
-            <h3 style={{ margin: 0, fontSize: "1.15rem", fontWeight: 600 }}>
-              {t["settings"] || "Settings"} & Swappable Tires
-            </h3>
-            <span style={{ fontSize: "0.75rem", color: "#636c84" }}>
-              Hot-swap models without restarting the duplex server
-            </span>
-          </div>
+  const secretRow = (
+    field: SecretField,
+    id: string,
+    label: string,
+    value: string,
+    onChange: (v: string) => void,
+    extraHint?: string
+  ) => (
+    <div className="pt-field">
+      <label htmlFor={id}>
+        <span className={`pt-dot ${secretsSet[field] ? "pt-dot--live" : "pt-dot--down"}`} /> {label}
+      </label>
+      <div style={inlineRow}>
+        <input
+          id={id}
+          className="pt-input"
+          type="password"
+          placeholder={extraHint ? `${secretPlaceholder(field, secretsSet)} ${extraHint}` : secretPlaceholder(field, secretsSet)}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+        />
+        {secretsSet[field] && (
           <button
             type="button"
-            onClick={onClose}
-            style={{ background: "none", border: "none", color: "#9ba3b8", fontSize: "1.2rem", cursor: "pointer" }}
+            className="pt-btn pt-btn--ghost"
+            disabled={clearingField === field}
+            onClick={() => handleClearSecret(field, () => onChange(""))}
           >
+            clear
+          </button>
+        )}
+      </div>
+    </div>
+  );
+
+  return (
+    <>
+      <div className="pt-scrim" onClick={onClose} />
+      <div className="pt-sheet" role="dialog" aria-modal="true" aria-label={t["settings"] || "Settings"}>
+        <div className="pt-sheet-head">
+          <div>
+            <h2 className="pt-h2">{t["settings"] || "Settings"} &amp; Swappable Tires</h2>
+            <p className="pt-note">Hot-swap models without restarting the duplex server</p>
+          </div>
+          <button type="button" className="pt-btn pt-btn--icon pt-btn--ghost" onClick={onClose} aria-label="Close">
             ✕
           </button>
         </div>
 
-        {/* Active Providers Pill */}
-        <div
-          style={{
-            display: "flex",
-            gap: "0.5rem",
-            background: "#191c26",
-            border: "1px solid #282c3f",
-            borderRadius: "8px",
-            padding: "0.5rem 0.75rem",
-            fontSize: "0.75rem",
-            marginBottom: "1.25rem",
-            fontFamily: "monospace",
-          }}
-        >
-          <span style={{ color: "#636c84" }}>Active:</span>
-          <span>STT: <b style={{ color: activeProviders.stt === "StubSTT" ? "#ffb300" : "#00c853" }}>{activeProviders.stt}</b></span>
-          <span>•</span>
-          <span>LLM: <b style={{ color: activeProviders.llm === "StubLLM" ? "#ffb300" : "#24c1e0" }}>{activeProviders.llm}</b></span>
-          <span>•</span>
-          <span>TTS: <b style={{ color: activeProviders.tts === "StubTTS" ? "#ffb300" : "#a142f4" }}>{activeProviders.tts}</b></span>
+        {/* Active Providers */}
+        <div className="pt-section">
+          <p className="pt-lbl">Active</p>
+          <dl className="pt-kv">
+            <dt className="pt-k">STT</dt>
+            <dd className="pt-v">
+              <span className={`pt-chip ${activeProviders.stt === "StubSTT" ? "" : "pt-chip--signal"}`}>
+                <span className={`pt-dot ${activeProviders.stt === "StubSTT" ? "pt-dot--down" : "pt-dot--live"}`} />
+                {activeProviders.stt}
+              </span>
+            </dd>
+            <dt className="pt-k">LLM</dt>
+            <dd className="pt-v">
+              <span className={`pt-chip ${activeProviders.llm === "StubLLM" ? "" : "pt-chip--signal"}`}>
+                <span className={`pt-dot ${activeProviders.llm === "StubLLM" ? "pt-dot--down" : "pt-dot--live"}`} />
+                {activeProviders.llm}
+              </span>
+            </dd>
+            <dt className="pt-k">TTS</dt>
+            <dd className="pt-v">
+              <span className={`pt-chip ${activeProviders.tts === "StubTTS" ? "" : "pt-chip--signal"}`}>
+                <span className={`pt-dot ${activeProviders.tts === "StubTTS" ? "pt-dot--down" : "pt-dot--live"}`} />
+                {activeProviders.tts}
+              </span>
+            </dd>
+          </dl>
         </div>
 
         {/* Studio Token — server/auth.py requires X-Studio-Token on every
             mutating route and on the WS handshake (?token= for browsers). */}
-        <div style={{ marginBottom: "1.25rem" }}>
-          <label style={{ display: "block", fontSize: "0.75rem", color: "#9ba3b8", marginBottom: "0.4rem", fontWeight: 600 }}>
-            Studio Token
-          </label>
-          <div style={{ display: "flex", gap: "0.5rem" }}>
-            <input
-              type="password"
-              value={tokenInput}
-              onChange={(e) => setTokenInput(e.target.value)}
-              placeholder={studioToken() ? "set (hidden) — paste to replace" : "paste the token from .qa-scratch/studio.token"}
-              style={{
-                flex: 1,
-                background: "#191c26",
-                border: "1px solid #282c3f",
-                borderRadius: "8px",
-                padding: "0.4rem 0.6rem",
-                color: "#f1f3f9",
-                fontSize: "0.8rem",
-              }}
-            />
-            <button
-              type="button"
-              onClick={handleSaveToken}
-              style={{
-                background: "#24c1e0",
-                color: "#090a0f",
-                border: "none",
-                borderRadius: "8px",
-                padding: "0.4rem 0.9rem",
-                fontSize: "0.8rem",
-                fontWeight: 600,
-                cursor: "pointer",
-              }}
-            >
-              Connect
-            </button>
+        <div className="pt-section">
+          <div className="pt-field">
+            <label htmlFor="studio-token">Studio Token</label>
+            <div style={inlineRow}>
+              <input
+                id="studio-token"
+                className="pt-input"
+                type="password"
+                value={tokenInput}
+                onChange={(e) => setTokenInput(e.target.value)}
+                placeholder={studioToken() ? "set (hidden) — paste to replace" : "paste the token from .qa-scratch/studio.token"}
+              />
+              <button type="button" className="pt-btn" onClick={handleSaveToken}>
+                Connect
+              </button>
+            </div>
+            {tokenStatus && <span className="pt-hint">{tokenStatus}</span>}
           </div>
-          {tokenStatus && (
-            <span style={{ fontSize: "0.7rem", color: "#636c84", marginTop: "0.3rem", display: "block" }}>
-              {tokenStatus}
-            </span>
-          )}
         </div>
 
         {/* 1-Click Presets */}
-        <div style={{ marginBottom: "1.25rem" }}>
-          <label style={{ display: "block", fontSize: "0.75rem", color: "#9ba3b8", marginBottom: "0.4rem", fontWeight: 600 }}>
-            Quick Tire Presets
-          </label>
-          <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
-            <button
-              type="button"
-              onClick={() => applyPreset("mocks")}
-              style={{
-                background: "#191c26",
-                border: "1px solid #282c3f",
-                color: "#ffb300",
-                borderRadius: "6px",
-                padding: "0.35rem 0.65rem",
-                fontSize: "0.75rem",
-                cursor: "pointer",
-                fontWeight: 500,
-              }}
-            >
-              ⚡ Local Mocks ($0)
+        <div className="pt-section">
+          <p className="pt-lbl">Quick Tire Presets</p>
+          <div style={{ ...inlineRow, flexWrap: "wrap" }}>
+            <button type="button" className="pt-btn" onClick={() => applyPreset("mocks")}>
+              Local Mocks ($0)
             </button>
-            <button
-              type="button"
-              onClick={() => applyPreset("fleet")}
-              style={{
-                background: "#191c26",
-                border: "1px solid #282c3f",
-                color: "#24c1e0",
-                borderRadius: "6px",
-                padding: "0.35rem 0.65rem",
-                fontSize: "0.75rem",
-                cursor: "pointer",
-                fontWeight: 500,
-              }}
-            >
-              🚀 SpacePilot Fleet + Kokoro
+            <button type="button" className="pt-btn" onClick={() => applyPreset("fleet")}>
+              SpacePilot Fleet + Kokoro
             </button>
-            <button
-              type="button"
-              onClick={() => applyPreset("cloud")}
-              style={{
-                background: "#191c26",
-                border: "1px solid #282c3f",
-                color: "#00c853",
-                borderRadius: "6px",
-                padding: "0.35rem 0.65rem",
-                fontSize: "0.75rem",
-                cursor: "pointer",
-                fontWeight: 500,
-              }}
-            >
-              ☁️ Cloud (OpenAI + ElevenLabs)
+            <button type="button" className="pt-btn" onClick={() => applyPreset("cloud")}>
+              Cloud (OpenAI + ElevenLabs)
             </button>
           </div>
         </div>
@@ -369,347 +310,169 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         {/* Detailed Form */}
         <form onSubmit={handleSave}>
           {/* STT Settings */}
-          <div style={{ marginBottom: "1rem", padding: "0.75rem", background: "#191c26", borderRadius: 8 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "0.4rem" }}>
-              <label style={{ fontSize: "0.8rem", fontWeight: 600, color: "#f1f3f9" }}>STT (Speech to Text Matrix)</label>
-              <span style={{ fontSize: "0.7rem", color: "#636c84" }}>Cloud • Apple Silicon • Fleet</span>
+          <div className="pt-section">
+            <div className="pt-sheet-head">
+              <h3 className="pt-h3">STT (Speech to Text Matrix)</h3>
+              <span className="pt-note pt-mono">Cloud · Apple Silicon · Fleet</span>
             </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem" }}>
-              <select
-                value={sttProvider}
-                onChange={(e) => setSttProvider(e.target.value)}
-                style={{
-                  padding: "0.4rem 0.6rem",
-                  borderRadius: 6,
-                  border: "1px solid #282c3f",
-                  background: "#090a0f",
-                  color: "#f1f3f9",
-                  fontSize: "0.8rem",
-                }}
-              >
-                <optgroup label="Cloud Flagships">
-                  <option value="deepgram">Deepgram Nova-3 (Cloud)</option>
-                  <option value="groq">Groq Whisper LPU (Ultra-Fast)</option>
-                  <option value="openai">OpenAI Whisper (Cloud)</option>
-                </optgroup>
-                <optgroup label="Apple Silicon (Local)">
-                  <option value="whisperkit">WhisperKit (CoreML ANE)</option>
-                  <option value="mlx">MLX Whisper (Apple GPU)</option>
-                </optgroup>
-                <optgroup label="Sovereign Fleet">
-                  <option value="sensevoice">SenseVoice Fleet (:8086)</option>
-                </optgroup>
-                <optgroup label="Zero-Cost Mock">
-                  <option value="stub">StubSTT (Zero download)</option>
-                </optgroup>
-              </select>
-              {sttProvider === "deepgram" && (
-                <div style={{ display: "flex", alignItems: "center" }}>
-                  <input
-                    type="password"
-                    placeholder={secretPlaceholder("deepgram_api_key", secretsSet)}
-                    value={deepgramKey}
-                    onChange={(e) => setDeepgramKey(e.target.value)}
-                    style={{
-                      flex: 1,
-                      padding: "0.4rem 0.6rem",
-                      borderRadius: 6,
-                      border: "1px solid #282c3f",
-                      background: "#090a0f",
-                      color: "#f1f3f9",
-                      fontSize: "0.8rem",
-                    }}
-                  />
-                  {secretsSet.deepgram_api_key && (
-                    <button
-                      type="button"
-                      style={clearButtonStyle}
-                      disabled={clearingField === "deepgram_api_key"}
-                      onClick={() => handleClearSecret("deepgram_api_key", () => setDeepgramKey(""))}
-                    >
-                      clear
-                    </button>
-                  )}
-                </div>
-              )}
-              {sttProvider === "groq" && (
-                <div style={{ display: "flex", alignItems: "center" }}>
-                  <input
-                    type="password"
-                    placeholder={secretPlaceholder("groq_api_key", secretsSet)}
-                    value={groqKey}
-                    onChange={(e) => setGroqKey(e.target.value)}
-                    style={{
-                      flex: 1,
-                      padding: "0.4rem 0.6rem",
-                      borderRadius: 6,
-                      border: "1px solid #282c3f",
-                      background: "#090a0f",
-                      color: "#f1f3f9",
-                      fontSize: "0.8rem",
-                    }}
-                  />
-                  {secretsSet.groq_api_key && (
-                    <button
-                      type="button"
-                      style={clearButtonStyle}
-                      disabled={clearingField === "groq_api_key"}
-                      onClick={() => handleClearSecret("groq_api_key", () => setGroqKey(""))}
-                    >
-                      clear
-                    </button>
-                  )}
-                </div>
-              )}
-              {sttProvider === "openai" && (
-                <div style={{ display: "flex", alignItems: "center" }}>
-                  <input
-                    type="password"
-                    placeholder={secretPlaceholder("openai_api_key", secretsSet)}
-                    value={openaiKey}
-                    onChange={(e) => setOpenaiKey(e.target.value)}
-                    style={{
-                      flex: 1,
-                      padding: "0.4rem 0.6rem",
-                      borderRadius: 6,
-                      border: "1px solid #282c3f",
-                      background: "#090a0f",
-                      color: "#f1f3f9",
-                      fontSize: "0.8rem",
-                    }}
-                  />
-                  {secretsSet.openai_api_key && (
-                    <button
-                      type="button"
-                      style={clearButtonStyle}
-                      disabled={clearingField === "openai_api_key"}
-                      onClick={() => handleClearSecret("openai_api_key", () => setOpenaiKey(""))}
-                    >
-                      clear
-                    </button>
-                  )}
-                </div>
-              )}
+            <div style={twoCol}>
+              <div className="pt-field">
+                <label htmlFor="stt-provider">Provider</label>
+                <select id="stt-provider" className="pt-input" value={sttProvider} onChange={(e) => setSttProvider(e.target.value)}>
+                  <optgroup label="Cloud Flagships">
+                    <option value="deepgram">Deepgram Nova-3 (Cloud)</option>
+                    <option value="groq">Groq Whisper LPU (Ultra-Fast)</option>
+                    <option value="openai">OpenAI Whisper (Cloud)</option>
+                  </optgroup>
+                  <optgroup label="Apple Silicon (Local)">
+                    <option value="whisperkit">WhisperKit (CoreML ANE)</option>
+                    <option value="mlx">MLX Whisper (Apple GPU)</option>
+                  </optgroup>
+                  <optgroup label="Sovereign Fleet">
+                    <option value="sensevoice">SenseVoice Fleet (:8086)</option>
+                  </optgroup>
+                  <optgroup label="Zero-Cost Mock">
+                    <option value="stub">StubSTT (Zero download)</option>
+                  </optgroup>
+                </select>
+              </div>
+
+              {sttProvider === "deepgram" &&
+                secretRow("deepgram_api_key", "deepgram-key", "Deepgram key", deepgramKey, setDeepgramKey)}
+              {sttProvider === "groq" && secretRow("groq_api_key", "groq-key", "Groq key", groqKey, setGroqKey)}
+              {sttProvider === "openai" &&
+                secretRow("openai_api_key", "openai-stt-key", "OpenAI key", openaiKey, setOpenaiKey)}
               {sttProvider === "sensevoice" && (
-                <input
-                  type="text"
-                  placeholder="SenseVoice URL (http://...)"
-                  value={sensevoiceUrl}
-                  onChange={(e) => setSensevoiceUrl(e.target.value)}
-                  style={{
-                    padding: "0.4rem 0.6rem",
-                    borderRadius: 6,
-                    border: "1px solid #282c3f",
-                    background: "#090a0f",
-                    color: "#f1f3f9",
-                    fontSize: "0.8rem",
-                  }}
-                />
-              )}
-              {sttProvider === "whisperkit" && (
-                <div style={{ display: "flex", alignItems: "center", fontSize: "0.75rem", color: "#9ba3b8", paddingLeft: "0.25rem" }}>
-                  <span>⚡ Apple Neural Engine CoreML</span>
+                <div className="pt-field">
+                  <label htmlFor="sensevoice-url">SenseVoice URL</label>
+                  <input
+                    id="sensevoice-url"
+                    className="pt-input"
+                    type="text"
+                    placeholder="http://..."
+                    value={sensevoiceUrl}
+                    onChange={(e) => setSensevoiceUrl(e.target.value)}
+                  />
                 </div>
               )}
-              {sttProvider === "mlx" && (
-                <div style={{ display: "flex", alignItems: "center", fontSize: "0.75rem", color: "#9ba3b8", paddingLeft: "0.25rem" }}>
-                  <span>🚀 Apple Silicon GPU via MLX</span>
-                </div>
-              )}
-              {sttProvider === "stub" && (
-                <div style={{ display: "flex", alignItems: "center", fontSize: "0.75rem", color: "#9ba3b8", paddingLeft: "0.25rem" }}>
-                  <span>✓ In-memory mock ($0)</span>
-                </div>
-              )}
+              {sttProvider === "whisperkit" && <p className="pt-note">Apple Neural Engine CoreML</p>}
+              {sttProvider === "mlx" && <p className="pt-note">Apple Silicon GPU via MLX</p>}
+              {sttProvider === "stub" && <p className="pt-note">In-memory mock ($0)</p>}
             </div>
           </div>
 
           {/* LLM Settings */}
-          <div style={{ marginBottom: "1rem", padding: "0.75rem", background: "#191c26", borderRadius: 8 }}>
-            <div style={{ marginBottom: "0.4rem" }}>
-              <label style={{ fontSize: "0.8rem", fontWeight: 600, color: "#f1f3f9" }}>LLM (Language & Reasoning)</label>
-            </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem", marginBottom: "0.5rem" }}>
-              <select
-                value={llmProvider}
-                onChange={(e) => setLlmProvider(e.target.value)}
-                style={{
-                  padding: "0.4rem 0.6rem",
-                  borderRadius: 6,
-                  border: "1px solid #282c3f",
-                  background: "#090a0f",
-                  color: "#f1f3f9",
-                  fontSize: "0.8rem",
-                }}
-              >
-                <option value="stub">StubLLM (3 canned clauses)</option>
-                <option value="litellm">LiteLLM Fleet (SpacePilot proxy)</option>
-                <option value="openai">OpenAI Compatible (Live)</option>
-              </select>
-              <input
-                type="text"
-                placeholder="Model (e.g. claude-3-7-sonnet)"
-                value={llmModel}
-                onChange={(e) => setLlmModel(e.target.value)}
-                disabled={llmProvider === "stub"}
-                style={{
-                  padding: "0.4rem 0.6rem",
-                  borderRadius: 6,
-                  border: "1px solid #282c3f",
-                  background: "#090a0f",
-                  color: "#f1f3f9",
-                  fontSize: "0.8rem",
-                  opacity: llmProvider === "stub" ? 0.5 : 1,
-                }}
-              />
+          <div className="pt-section">
+            <h3 className="pt-h3">LLM (Language &amp; Reasoning)</h3>
+            <div style={twoCol}>
+              <div className="pt-field">
+                <label htmlFor="llm-provider">Provider</label>
+                <select id="llm-provider" className="pt-input" value={llmProvider} onChange={(e) => setLlmProvider(e.target.value)}>
+                  <option value="stub">StubLLM (3 canned clauses)</option>
+                  <option value="litellm">LiteLLM Fleet (SpacePilot proxy)</option>
+                  <option value="openai">OpenAI Compatible (Live)</option>
+                </select>
+              </div>
+              <div className="pt-field">
+                <label htmlFor="llm-model">Model</label>
+                <input
+                  id="llm-model"
+                  className="pt-input"
+                  type="text"
+                  placeholder="e.g. claude-3-7-sonnet"
+                  value={llmModel}
+                  onChange={(e) => setLlmModel(e.target.value)}
+                  disabled={llmProvider === "stub"}
+                />
+              </div>
             </div>
             {llmProvider !== "stub" && (
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem" }}>
-                <input
-                  type="text"
-                  placeholder="Base URL (e.g. http://127.0.0.1:4000/v1)"
-                  value={llmBaseUrl}
-                  onChange={(e) => setLlmBaseUrl(e.target.value)}
-                  style={{
-                    padding: "0.4rem 0.6rem",
-                    borderRadius: 6,
-                    border: "1px solid #282c3f",
-                    background: "#090a0f",
-                    color: "#f1f3f9",
-                    fontSize: "0.75rem",
-                  }}
-                />
-                <div style={{ display: "flex", alignItems: "center" }}>
+              <div style={{ ...twoCol, marginTop: "var(--pt-s3)" }}>
+                <div className="pt-field">
+                  <label htmlFor="llm-base-url">Base URL</label>
                   <input
-                    type="password"
-                    placeholder={secretPlaceholder("llm_api_key", secretsSet) + " (optional if proxy)"}
-                    value={llmApiKey}
-                    onChange={(e) => setLlmApiKey(e.target.value)}
-                    style={{
-                      flex: 1,
-                      padding: "0.4rem 0.6rem",
-                      borderRadius: 6,
-                      border: "1px solid #282c3f",
-                      background: "#090a0f",
-                      color: "#f1f3f9",
-                      fontSize: "0.75rem",
-                    }}
+                    id="llm-base-url"
+                    className="pt-input"
+                    type="text"
+                    placeholder="e.g. http://127.0.0.1:4000/v1"
+                    value={llmBaseUrl}
+                    onChange={(e) => setLlmBaseUrl(e.target.value)}
                   />
-                  {secretsSet.llm_api_key && (
-                    <button
-                      type="button"
-                      style={clearButtonStyle}
-                      disabled={clearingField === "llm_api_key"}
-                      onClick={() => handleClearSecret("llm_api_key", () => setLlmApiKey(""))}
-                    >
-                      clear
-                    </button>
-                  )}
                 </div>
+                {secretRow("llm_api_key", "llm-api-key", "API key", llmApiKey, setLlmApiKey, "(optional if proxy)")}
               </div>
             )}
           </div>
 
           {/* TTS Settings */}
-          <div style={{ marginBottom: "1rem", padding: "0.75rem", background: "#191c26", borderRadius: 8 }}>
-            <div style={{ marginBottom: "0.4rem" }}>
-              <label style={{ fontSize: "0.8rem", fontWeight: 600, color: "#f1f3f9" }}>TTS (Voice Synthesis)</label>
-            </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem" }}>
-              <select
-                value={ttsProvider}
-                onChange={(e) => setTtsProvider(e.target.value)}
-                style={{
-                  padding: "0.4rem 0.6rem",
-                  borderRadius: 6,
-                  border: "1px solid #282c3f",
-                  background: "#090a0f",
-                  color: "#f1f3f9",
-                  fontSize: "0.8rem",
-                }}
-              >
-                <option value="stub">StubTTS (440Hz Sine WAV)</option>
-                <option value="kokoro">Kokoro SpacePilot (:8088)</option>
-                <option value="elevenlabs">ElevenLabs (Live)</option>
-                <option value="deepgram">Deepgram Aura (Live)</option>
-              </select>
+          <div className="pt-section">
+            <h3 className="pt-h3">TTS (Voice Synthesis)</h3>
+            <div style={twoCol}>
+              <div className="pt-field">
+                <label htmlFor="tts-provider">Provider</label>
+                <select id="tts-provider" className="pt-input" value={ttsProvider} onChange={(e) => setTtsProvider(e.target.value)}>
+                  <option value="stub">StubTTS (440Hz Sine WAV)</option>
+                  <option value="kokoro">Kokoro SpacePilot (:8088)</option>
+                  <option value="elevenlabs">ElevenLabs (Live)</option>
+                  <option value="deepgram">Deepgram Aura (Live)</option>
+                </select>
+              </div>
               {ttsProvider === "kokoro" && (
-                <input
-                  type="text"
-                  placeholder="Kokoro URL (:8088)"
-                  value={kokoroUrl}
-                  onChange={(e) => setKokoroUrl(e.target.value)}
-                  style={{
-                    padding: "0.4rem 0.6rem",
-                    borderRadius: 6,
-                    border: "1px solid #282c3f",
-                    background: "#090a0f",
-                    color: "#f1f3f9",
-                    fontSize: "0.8rem",
-                  }}
-                />
+                <div className="pt-field">
+                  <label htmlFor="kokoro-url">Kokoro URL</label>
+                  <input
+                    id="kokoro-url"
+                    className="pt-input"
+                    type="text"
+                    placeholder=":8088"
+                    value={kokoroUrl}
+                    onChange={(e) => setKokoroUrl(e.target.value)}
+                  />
+                </div>
               )}
             </div>
           </div>
 
           {/* VAD Settings */}
-          <div style={{ marginBottom: "1.25rem", padding: "0.75rem", background: "#191c26", borderRadius: 8 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.8rem", marginBottom: "0.35rem" }}>
-              <span style={{ fontWeight: 600 }}>Hands-Free Silence Cutoff</span>
-              <span style={{ color: "#24c1e0", fontFamily: "monospace" }}>{vadSilenceMs}ms</span>
+          <div className="pt-section">
+            <div className="pt-field">
+              <label htmlFor="vad-silence">
+                Hands-Free Silence Cutoff <span className="pt-num">{vadSilenceMs}ms</span>
+              </label>
+              <input
+                id="vad-silence"
+                type="range"
+                min="300"
+                max="1500"
+                step="50"
+                value={vadSilenceMs}
+                onChange={(e) => setVadSilenceMs(parseInt(e.target.value, 10))}
+                style={{ accentColor: "var(--mv-accent)", width: "100%" }}
+              />
             </div>
-            <input
-              type="range"
-              min="300"
-              max="1500"
-              step="50"
-              value={vadSilenceMs}
-              onChange={(e) => setVadSilenceMs(parseInt(e.target.value, 10))}
-              style={{ width: "100%", accentColor: "#24c1e0", cursor: "pointer" }}
-            />
           </div>
 
           {/* Footer Actions */}
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <span style={{ fontSize: "0.8rem", color: statusMsg.startsWith("✓") ? "#00c853" : "#ff3d00" }}>
-              {statusMsg}
-            </span>
-            <div style={{ display: "flex", gap: "0.5rem" }}>
-              <button
-                type="button"
-                onClick={onClose}
-                style={{
-                  background: "#191c26",
-                  border: "1px solid #282c3f",
-                  color: "#f1f3f9",
-                  borderRadius: "6px",
-                  padding: "0.45rem 0.85rem",
-                  fontSize: "0.8rem",
-                  cursor: "pointer",
-                }}
-              >
+          <div className="pt-sheet-head">
+            {statusMsg &&
+              (statusMsg.startsWith("✓") ? (
+                <span className="pt-chip pt-chip--signal">{statusMsg}</span>
+              ) : (
+                <div className="pt-banner">
+                  <span>{statusMsg}</span>
+                </div>
+              ))}
+            <div style={inlineRow}>
+              <button type="button" className="pt-btn" onClick={onClose}>
                 Cancel
               </button>
-              <button
-                type="submit"
-                disabled={saving}
-                style={{
-                  background: "#4285f4",
-                  color: "#ffffff",
-                  border: "none",
-                  borderRadius: "6px",
-                  padding: "0.45rem 1.25rem",
-                  fontSize: "0.8rem",
-                  fontWeight: 600,
-                  cursor: "pointer",
-                }}
-              >
+              <button type="submit" className="pt-btn pt-btn--primary" disabled={saving}>
                 {saving ? "Applying..." : "Apply Tires Live"}
               </button>
             </div>
           </div>
         </form>
       </div>
-    </div>
+    </>
   );
 };
