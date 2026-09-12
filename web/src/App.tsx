@@ -64,6 +64,7 @@ import {
   skipForward,
   startIfIdle,
 } from "./readAhead";
+import { shouldAdoptTurn, shouldApplyFrame } from "./turnGuard";
 
 type Strings = typeof en;
 const STRINGS: Record<"en" | "hi", Strings> = { en, hi };
@@ -605,6 +606,23 @@ export default function App() {
         return;
       }
 
+      // A frame for a turn the client has already moved past (typically the
+      // tail of a barged turn's pipeline still draining) is never applied —
+      // otherwise a late agent.sentence re-enters the read-ahead buffer and
+      // speaks after the user interrupted. state.idle/state.listening are
+      // the one exception (see turnGuard.ts): they are how a barge ack
+      // arrives with a freshly-minted turn id, so they are accepted for a
+      // newer turn and that turn id is then adopted as current.
+      if (!shouldApplyFrame(frame.type, frame.turn_id, turnRef.current)) {
+        console.debug(
+          `[pet-talk] ignored (stale turn): ${frame.type} turn=${frame.turn_id} current=${turnRef.current}`,
+        );
+        return;
+      }
+      if (shouldAdoptTurn(frame.type, frame.turn_id, turnRef.current)) {
+        turnRef.current = frame.turn_id;
+      }
+
       /** First playable audio of the turn, whichever frame carries it. */
       const markFirstAudio = () => {
         setTiming((prev) =>
@@ -622,6 +640,10 @@ export default function App() {
         case "state.listening":
           setState("listening");
           chunkPlayerRef.current?.stop();
+          if (frame.barged_turn) {
+            // The barged turn's buffered sentences must not be resumable.
+            setBuffer(EMPTY_READ_AHEAD);
+          }
           break;
         case "state.thinking":
           setState("thinking");
