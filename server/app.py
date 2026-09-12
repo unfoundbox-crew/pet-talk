@@ -7,6 +7,7 @@ lives in focused modules:
     runtime.py      live provider set, swap lock, memory, default persona
     frames.py       WS frame construction and safe delivery
     speak_queue.py  producer/consumer sentence queue (flush, resume_from)
+    speech.py       LLM producer + TTS consumer, one sentence out
     grounding.py    repo-relative + AX grounding via async subprocess
     turn.py         one turn: route, stall, stream, speak
     ws.py           the /ws reader loop and barge
@@ -56,7 +57,8 @@ from .speak_queue import ResumePoint, SpeakQueue, SpokenSentence
 from .control import Control, check_deterministic_control
 from .persona_runtime import build_system_prompt, resolve_persona
 from .stall import get_or_synth_stall, stall_cache_key
-from .turn import TurnResult, handle_turn, handle_turn_task, speak_sentence
+from .speech import TurnResult, run_speech, speak_sentence
+from .turn import handle_turn, handle_turn_task
 from .voices import load_voices, parse_voices_minimal
 
 CORS_ORIGINS = [

@@ -18,10 +18,13 @@ Run: ``python3 qa/test_turn_lifecycle.py``
 from __future__ import annotations
 
 import asyncio
+import io
 import os
+import struct
 import sys
 import time
 import unittest
+import wave
 from typing import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock
 
@@ -40,13 +43,26 @@ from starlette.websockets import WebSocketState
 
 from server.persona import Persona
 from server.provider_factory import ProviderSet
-from server.providers import LLMProvider, ProviderError, StubSTT, TTSProvider, _sine_wav_bytes
+# Public provider surface only — server/providers is becoming a package, so
+# nothing here may reach for an underscore-prefixed internal.
+from server.providers import LLMProvider, ProviderError, StubSTT, TTSProvider
 from server.persona_runtime import build_system_prompt, resolve_persona
 from server.speak_queue import SpeakQueue
 from server.turn import handle_turn_task
 
 BARGE_BUDGET_S = 0.100
 BUFFER_AHEAD_TARGET = 3
+
+
+def tiny_wav(duration_s: float = 0.05, sample_rate: int = 8000) -> bytes:
+    """A silent WAV, built here so the test needs no provider internals."""
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sample_rate)
+        w.writeframes(struct.pack("<h", 0) * int(duration_s * sample_rate))
+    return buf.getvalue()
 
 
 # ------------------------------------------------------------- test tyres ---
@@ -69,7 +85,7 @@ class SlowTTS(TTSProvider):
             raise ProviderError("tts_empty_text", "nothing to synthesize")
         self.calls += 1
         time.sleep(self.delay_s)
-        return _sine_wav_bytes(duration_s=0.05), []
+        return tiny_wav(), []
 
 
 class FastLLM(LLMProvider):
