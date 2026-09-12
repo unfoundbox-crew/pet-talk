@@ -8,6 +8,7 @@
 // — AgentWorth's palette plus pet-talk's own layer. No hand-rolled colour.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { EyesKind, EyesTask, ScreenGrounding } from "../ws";
+import { plainReason } from "../reasonText";
 
 /** One attachment's lifecycle, as the transcript sees it. */
 export interface EyesEntry {
@@ -179,8 +180,10 @@ export function EyesAttachDock({ onAttach, disabled, notice }: EyesAttachDockPro
 
 // ------------------------------------------------------- transcript blocks ---
 
-/** Spinner chip for `eyes.received`; collapsible transcript for `eyes.text`. */
-export function EyesBlock({ entry }: { entry: EyesEntry }) {
+/** Spinner chip for `eyes.received`; collapsible transcript for `eyes.text`.
+ * `developer` gates the raw wire reason (Finding 8) — off shows the plain
+ * mapping from reasonText.ts instead. */
+export function EyesBlock({ entry, developer = false }: { entry: EyesEntry; developer?: boolean }) {
   const [open, setOpen] = useState(false);
   const pending = entry.status === "sent" || entry.status === "received";
   const failed = entry.status === "error";
@@ -216,8 +219,8 @@ export function EyesBlock({ entry }: { entry: EyesEntry }) {
       {failed && (
         <div className="pt-banner" style={{ marginTop: "var(--pt-s2)" }}>
           <span>
-            {entry.reason}
-            {entry.detail ? ` — ${entry.detail}` : ""}
+            {developer ? entry.reason : plainReason(entry.reason)}
+            {developer && entry.detail ? ` — ${entry.detail}` : ""}
           </span>
         </div>
       )}

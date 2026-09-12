@@ -287,7 +287,7 @@ export const PromptComposer: React.FC<PromptComposerProps> = ({
           value={text}
           onChange={handleTextChange}
           onKeyDown={handleKeyDown}
-          placeholder={t["prompt_placeholder"] || "Ask Donna anything, or click Dictate…"}
+          placeholder={t["prompt_placeholder"] || "Ask anything, or click Dictate…"}
           disabled={disabled || !connected || isTranscribing}
           rows={1}
         />

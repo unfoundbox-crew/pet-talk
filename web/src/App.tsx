@@ -65,6 +65,7 @@ import {
   startIfIdle,
 } from "./readAhead";
 import { shouldAdoptTurn, shouldApplyFrame } from "./turnGuard";
+import { plainReason } from "./reasonText";
 
 type Strings = typeof en;
 const STRINGS: Record<"en" | "hi", Strings> = { en, hi };
@@ -275,6 +276,8 @@ export default function App() {
   promptRef.current = systemPrompt;
   const mutedRef = useRef(muted);
   mutedRef.current = muted;
+  const developerRef = useRef(developer);
+  developerRef.current = developer;
 
   const logFrame = useCallback(
     (direction: "in" | "out", name: string, payload: unknown) => {
@@ -770,9 +773,13 @@ export default function App() {
           } else {
             // An error is the one moment that waits for the user, so it lands
             // in the stream in plain words instead of only in the console.
+            // The raw wire reason is engineering detail (Finding 8) — shown
+            // only when Developer is on; otherwise the plain mapping.
             pushEntry({
               who: "notice",
-              text: `Could not finish that: ${frame.reason}.`,
+              text: developerRef.current
+                ? `Could not finish that: ${frame.reason}.`
+                : plainReason(frame.reason),
               frame: "agent.error",
             });
           }
@@ -1006,11 +1013,11 @@ export default function App() {
                 : "buffered";
       }
       if (entry.who === "eyes" && entry.eyesRef && eyesMap[entry.eyesRef]) {
-        line.slot = <EyesBlock entry={eyesMap[entry.eyesRef]} />;
+        line.slot = <EyesBlock entry={eyesMap[entry.eyesRef]} developer={developer} />;
       }
       return line;
     });
-  }, [entries, buffer, eyesMap]);
+  }, [entries, buffer, eyesMap, developer]);
 
   const aheadCount = bufferedAhead(buffer).length;
 
@@ -1214,6 +1221,7 @@ export default function App() {
         onClose={() => setShowMemory(false)}
         turns={memoryTurns}
         onClearMemory={handleClearMemory}
+        developer={developer}
         t={t}
       />
 
@@ -1229,6 +1237,7 @@ export default function App() {
           socket.connect(WS_URL);
           setConnected(true);
         }}
+        developer={developer}
         t={t}
       />
 

@@ -13,6 +13,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { TranscriptStream, type StreamLine } from "./components/TranscriptStream";
 import { LatencyBar } from "./components/LatencyBar";
 import { DeveloperRail, type LoggedFrame } from "./components/DeveloperRail";
+import { MemoryDrawer, type MemoryTurn } from "./components/MemoryDrawer";
+import { PromptComposer } from "./components/PromptComposer";
+import { EyesBlock, type EyesEntry } from "./components/EyesAttach";
+import { SettingsModal, type RuntimeSettings, type ActiveProviders } from "./components/SettingsModal";
+import { plainReason } from "./reasonText";
 import { STALL_BUDGET_MS } from "./latency";
 import type { ReceiptFrame } from "./components/ReceiptChip";
 import en from "./i18n/en.json";
@@ -131,6 +136,104 @@ describe("the Developer toggle is what reveals engineering", () => {
     expect(dev).toMatch(/stall/);
     expect(dev).toContain(PERSONA);
     expect(dev).toContain(String(STALL_BUDGET_MS));
+  });
+});
+
+describe("developer-off hides engineering strings in the other cockpit surfaces (Finding 8)", () => {
+  const memoryTurns: MemoryTurn[] = [
+    { turn_id: "t-1", timestamp: 1710000000, persona: "donna", user: "hi", agent: "hello" },
+  ];
+
+  const eyesEntry: EyesEntry = {
+    ref: "att-1",
+    kind: "image",
+    filename: "shot.png",
+    status: "error",
+    reason: "stt_empty_audio",
+    detail: "no audio bytes",
+    time: "10:00:00",
+  };
+
+  const settingsBaseProps = {
+    isOpen: true,
+    onClose: () => undefined,
+    settings: {
+      stt_provider: "sensevoice",
+      llm_provider: "litellm",
+      llm_base_url: "",
+      llm_model: "claude-3-7-sonnet",
+      tts_provider: "kokoro",
+      kokoro_base_url: "http://127.0.0.1:8088",
+      vad_silence_ms: 600,
+    } as RuntimeSettings,
+    activeProviders: { stt: "StubSTT", llm: "StubLLM", tts: "StubTTS" } as ActiveProviders,
+    secretsSet: {},
+    onApplySettings: async () => undefined,
+  };
+
+  function renderSurface(developer: boolean): string {
+    return renderToStaticMarkup(
+      <>
+        <MemoryDrawer
+          isOpen
+          onClose={() => undefined}
+          turns={memoryTurns}
+          onClearMemory={async () => undefined}
+          developer={developer}
+          t={en}
+        />
+        {/* Empty `t` exercises the code-level fallback placeholder, not just
+         * the i18n bundle, since that is what Finding 8 named the leak in. */}
+        <PromptComposer onSend={() => undefined} t={{}} />
+        <EyesBlock entry={eyesEntry} developer={developer} />
+        <SettingsModal {...settingsBaseProps} developer={developer} t={en} />
+      </>,
+    );
+  }
+
+  const markupOff = renderSurface(false);
+  const markupOn = renderSurface(true);
+
+  for (const { name, re } of FORBIDDEN) {
+    it(`developer-off carries no ${name}`, () => {
+      expect(markupOff).not.toMatch(re);
+    });
+  }
+
+  // The "Active" providers block, isolated from the STT/LLM/TTS <select>
+  // dropdowns just below it — those necessarily name every engine so the
+  // user can pick one, developer or not; Finding 8 is about the *active*
+  // provider readout, not the picker.
+  function activeProvidersBlock(markup: string): string {
+    const match = markup.match(/<dl class="pt-kv">[\s\S]*?<\/dl>/);
+    if (!match) throw new Error("Active providers <dl> not found in markup");
+    return match[0];
+  }
+
+  it("developer-off carries no persona name or raw wire reason", () => {
+    expect(markupOff).not.toMatch(/donna/i);
+    expect(markupOff).not.toMatch(/stt_empty_audio/);
+    expect(markupOff).not.toMatch(/no audio bytes/);
+  });
+
+  it("developer-off's Active providers block carries no provider class name", () => {
+    const block = activeProvidersBlock(markupOff);
+    expect(block).not.toContain("StubSTT");
+    expect(block).not.toContain("StubLLM");
+    expect(block).not.toContain("StubTTS");
+  });
+
+  it("developer-off still shows the plain-language reason for the failed attachment", () => {
+    // renderToStaticMarkup HTML-escapes the apostrophe as an entity.
+    const expected = plainReason("stt_empty_audio").replace("'", "&#x27;");
+    expect(markupOff).toContain(expected);
+  });
+
+  it("developer-on reveals the persona, active-provider class name, raw reason and ms unit", () => {
+    expect(markupOn).toMatch(/donna/i);
+    expect(activeProvidersBlock(markupOn)).toContain("StubSTT");
+    expect(markupOn).toMatch(/stt_empty_audio/);
+    expect(markupOn).toMatch(/\d+\s*ms\b/);
   });
 });
 

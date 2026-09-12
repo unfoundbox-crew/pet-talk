@@ -56,6 +56,9 @@ interface SettingsModalProps {
   // Fired after the "Connect" field saves a new studio token — App
   // reconnects the WS and clears the auth-error banner.
   onTokenSaved?: () => void;
+  /** Provider class names and the VAD cutoff's raw ms unit are engineering
+   * detail (Finding 8) — shown only when the Developer toggle is on. */
+  developer?: boolean;
   t: Record<string, string>;
 }
 
@@ -77,6 +80,13 @@ function secretPlaceholder(field: SecretField, secretsSet: SettingsModalProps["s
   return secretsSet[field] ? "set (hidden)" : "not set";
 }
 
+// A provider class name (e.g. "StubSTT", "FasterWhisperSTT") is engineering
+// detail (Finding 8) — developer-off gets a plain status word instead.
+function providerLabel(name: string, developer: boolean): string {
+  if (developer) return name;
+  return name === "StubSTT" || name === "StubLLM" || name === "StubTTS" ? "Off" : "Active";
+}
+
 export const SettingsModal: React.FC<SettingsModalProps> = ({
   isOpen,
   onClose,
@@ -85,6 +95,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   secretsSet,
   onApplySettings,
   onTokenSaved,
+  developer = false,
   t,
 }) => {
   const [tokenInput, setTokenInput] = useState("");
@@ -249,21 +260,21 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <dd className="pt-v">
               <span className={`pt-chip ${activeProviders.stt === "StubSTT" ? "" : "pt-chip--signal"}`}>
                 <span className={`pt-dot ${activeProviders.stt === "StubSTT" ? "pt-dot--down" : "pt-dot--live"}`} />
-                {activeProviders.stt}
+                {providerLabel(activeProviders.stt, developer)}
               </span>
             </dd>
             <dt className="pt-k">LLM</dt>
             <dd className="pt-v">
               <span className={`pt-chip ${activeProviders.llm === "StubLLM" ? "" : "pt-chip--signal"}`}>
                 <span className={`pt-dot ${activeProviders.llm === "StubLLM" ? "pt-dot--down" : "pt-dot--live"}`} />
-                {activeProviders.llm}
+                {providerLabel(activeProviders.llm, developer)}
               </span>
             </dd>
             <dt className="pt-k">TTS</dt>
             <dd className="pt-v">
               <span className={`pt-chip ${activeProviders.tts === "StubTTS" ? "" : "pt-chip--signal"}`}>
                 <span className={`pt-dot ${activeProviders.tts === "StubTTS" ? "pt-dot--down" : "pt-dot--live"}`} />
-                {activeProviders.tts}
+                {providerLabel(activeProviders.tts, developer)}
               </span>
             </dd>
           </dl>
@@ -437,7 +448,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <div className="pt-section">
             <div className="pt-field">
               <label htmlFor="vad-silence">
-                Hands-Free Silence Cutoff <span className="pt-num">{vadSilenceMs}ms</span>
+                Hands-Free Silence Cutoff{" "}
+                <span className="pt-num">
+                  {developer ? `${vadSilenceMs}ms` : `${(vadSilenceMs / 1000).toFixed(1)} seconds`}
+                </span>
               </label>
               <input
                 id="vad-silence"

@@ -13,6 +13,9 @@ interface MemoryDrawerProps {
   onClose: () => void;
   turns: MemoryTurn[];
   onClearMemory: () => Promise<void>;
+  /** The persona name is engineering detail (Finding 8) — shown only when
+   * the Developer toggle is on; otherwise every turn reads as "Agent". */
+  developer?: boolean;
   t: Record<string, string>;
 }
 
@@ -21,6 +24,7 @@ export const MemoryDrawer: React.FC<MemoryDrawerProps> = ({
   onClose,
   turns,
   onClearMemory,
+  developer = false,
   t,
 }) => {
   const [query, setQuery] = useState("");
@@ -99,7 +103,7 @@ export const MemoryDrawer: React.FC<MemoryDrawerProps> = ({
                 className="pt-section"
               >
                 <div className="pt-lbl">
-                  {turn.persona.toUpperCase()}
+                  {developer ? turn.persona.toUpperCase() : "AGENT"}
                   {" · "}
                   <span className="pt-mono">
                     {turn.timestamp ? new Date(turn.timestamp * 1000).toLocaleTimeString() : ""}
