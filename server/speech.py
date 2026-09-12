@@ -418,7 +418,13 @@ async def run_speech(
             result.sentences += 1
             result.chars += len(spoken.text)
             result.spoken.append(spoken.text)
-            if log_ is not None and result.sentences == 1 and first_seq == 0:
+            # The first sentence of the turn, stall included. This used to read
+            # `first_seq == 0` to mean "no stall preceded us" — which stopped
+            # being true the moment both answer paths started at 1. Ask the log
+            # what it already knows instead of inferring it from a seq.
+            if log_ is not None and result.sentences == 1 and not log_.marked(
+                "first_sentence"
+            ):
                 log_.mark("first_sentence")
             seq += 1
             delay = turn_delay_s()

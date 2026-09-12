@@ -127,7 +127,16 @@ export type ClientFrame =
       filename?: string;
       task?: EyesTask;
     }
-  | { type: "barge"; turn_id: string };
+  | {
+      type: "barge";
+      turn_id: string;
+      // Not read by the server today: `_on_barge` in server/ws.py only reads
+      // `turn_id` (verified 2026-09-12 by reading server/ws.py and
+      // server/speak_queue.py — `SpeakQueue.resume_from` exists but is not
+      // wired to the barge handler). Kept typed so the client can start
+      // sending it now; the server lane needs to add the read.
+      resume_from?: number;
+    };
 
 // ---- Frames: server -> client ----
 export type ServerFrame =
@@ -161,7 +170,15 @@ export type ServerFrame =
   | { type: "agent.done"; turn_id: string; path?: string; sentences?: number; dropped?: number }
   | { type: "agent.error"; turn_id: string; reason: string; detail?: string; ref?: string }
   | { type: "state.idle"; turn_id: string }
-  | { type: "state.listening"; turn_id: string }
+  | {
+      type: "state.listening";
+      turn_id: string;
+      // Present on the ack of a barge (server/ws.py `_on_barge`): the turn
+      // this listening state superseded, and how many sentences of it were
+      // dropped un-spoken.
+      barged_turn?: string;
+      dropped?: number;
+    }
   | { type: "state.thinking"; turn_id: string; screen?: ScreenGrounding }
   | { type: "state.speaking"; turn_id: string }
   | { type: "transcript.user"; turn_id: string; text: string }
@@ -326,3 +343,13 @@ export class PetTalkSocket {
 }
 
 export const socket = new PetTalkSocket();
+
+/**
+ * Send a plain `barge` for the given turn. Pulled out of App.tsx's `skip`
+ * callback so the "tell the server to stop synthesizing what was skipped
+ * past" side effect (Finding 10, Problem A) is unit-testable against a
+ * socket stub without rendering the whole app.
+ */
+export function sendBargeFrame(sock: Pick<PetTalkSocket, "send">, turnId: string): void {
+  sock.send({ type: "barge", turn_id: turnId });
+}

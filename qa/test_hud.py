@@ -627,6 +627,101 @@ class TestDumpState(unittest.TestCase):
         self.assertEqual(c.get("doubleTapWindowMs"), 400.0)
 
 
+class TestArchieGlyph(unittest.TestCase):
+    """PLAN-2026-09-12 §C: wire lane 5a's ArchieGlyphView into the capsule.
+    Archie is a state, once per screen (agentworth/docs/DESIGN.md, "Archie") —
+    exactly one instance, arriving bare, never the full hound. `--dump-state`
+    carries the live glyph read under a `glyph` block: {state, colourway,
+    visible}."""
+
+    @classmethod
+    def setUpClass(cls):
+        _skip_if_no_bin()
+        res = subprocess.run([BIN_PATH, "--dump-state"], capture_output=True,
+                              text=True, timeout=15, env=HEADLESS_ENV)
+        if res.returncode != 0:
+            raise AssertionError(f"--dump-state failed (rc={res.returncode}):\n{res.stderr}\n{res.stdout}")
+        cls.state = json.loads(res.stdout)
+        if not os.path.exists(HUD_SWIFT_SRC):
+            raise unittest.SkipTest("SKIP: cli/hotkey/hud_window.swift not present yet")
+        with open(HUD_SWIFT_SRC, "r", encoding="utf-8") as f:
+            cls.src = f.read()
+
+    def test_dump_state_carries_a_glyph_block(self):
+        glyph = self.state.get("glyph")
+        self.assertIsInstance(glyph, dict, "--dump-state must export a glyph block")
+        self.assertIn("state", glyph)
+        self.assertIn("colourway", glyph)
+        self.assertIn("visible", glyph)
+
+    def test_fresh_daemon_glyph_is_idle_c4_and_visible(self):
+        # A freshly constructed HUDController (lifecycle "hidden") has never had
+        # update(state:)/showBreadcrumb() called, so the glyph is still at its
+        # own default: idle, colourway C4 ("Quiet" — dense chrome), and visible
+        # (the default capsule height clears the 24pt threshold on any screen).
+        glyph = self.state["glyph"]
+        self.assertEqual(glyph["state"], "idle")
+        self.assertEqual(glyph["colourway"], "c4")
+        self.assertTrue(glyph["visible"])
+
+    def test_exactly_one_archie_glyph_instance(self):
+        # "Once per screen" — two Archies are two states and one of them is
+        # lying. Only one construction site may exist: the `archieGlyph`
+        # property on HUDCapsuleView.
+        constructions = re.findall(r"ArchieGlyphView\(", self.src)
+        self.assertEqual(len(constructions), 1,
+                          f"expected exactly one ArchieGlyphView(...) construction site, found {len(constructions)}")
+
+    def test_state_mapping_table_is_present(self):
+        # HUDCapsuleView.archieGlyphState(for:badge:) is the one place HUD state
+        # maps to glyph state: listening->listening, thinking->idle (steady
+        # light, not the gold pulse), speaking->speaking, and a "PAUSED" badge
+        # (sleep mode) always wins to .error (lamp off) regardless of the HUD
+        # state passed alongside it.
+        idx = self.src.find("static func archieGlyphState(for hudState: HUDState")
+        self.assertGreater(idx, -1, "missing HUDCapsuleView.archieGlyphState(for:badge:)")
+        block = self.src[idx:idx + 700]
+        self.assertIn('"PAUSED"', block)
+        self.assertIn("return .error", block)
+        self.assertIn("case .listening: return .listening", block)
+        self.assertIn("case .thinking: return .idle", block)
+        self.assertIn("case .speaking: return .speaking", block)
+
+    def test_error_shake_maps_glyph_to_off_and_restores_it(self):
+        idx = self.src.find("func triggerErrorShake(")
+        self.assertGreater(idx, -1, "missing triggerErrorShake")
+        block = self.src[idx:idx + 2400]
+        self.assertIn("archieGlyph.state = .error", block,
+                      "error must map Archie's glyph to .error (lamp off)")
+        self.assertIn("restoreGlyph", block,
+                      "the glyph must be restored to its prior state once the shake ends")
+
+    def test_glyph_hidden_below_the_height_threshold(self):
+        self.assertIn("archieGlyphMinHeight", self.src)
+        idx = self.src.find("let glyphVisible = height >= Self.archieGlyphMinHeight")
+        self.assertGreater(idx, -1,
+                            "the glyph's visibility must be gated on the capsule height threshold")
+
+    def test_glyph_hidden_when_it_does_not_fit_the_fallback_pill(self):
+        self.assertIn("minPillWidthForGlyph", self.src)
+        self.assertIn("glyphFitsPill", self.src)
+
+    def test_beat_called_once_per_sentence_not_per_word(self):
+        # Word-level timing is not delivered to the HUD today (main.swift only
+        # forwards whole "[SPEAKING]" sentence lines as breadcrumbs) — beat() is
+        # called from showBreadcrumb, once per call, i.e. once per sentence.
+        idx = self.src.find("func showBreadcrumb(")
+        self.assertGreater(idx, -1, "missing showBreadcrumb")
+        block = self.src[idx:idx + 1600]
+        self.assertIn("archieGlyph.beat()", block)
+        self.assertIn("one beat per sentence, not per word", block)
+
+    def test_c4_colourway_used_for_dense_chrome(self):
+        # agentworth/docs/DESIGN.md: "C4 is for dense chrome, where he must not
+        # out-shout the data" — the notch capsule is exactly that.
+        self.assertIn("colourway: .c4", self.src)
+
+
 class TestConfigNumericHardening(unittest.TestCase):
     """FINDING 6: config.swift must reject non-finite spring numbers (fall back
     to the built-in default) and clamp out-of-range ones — never let `nan`/`inf`/

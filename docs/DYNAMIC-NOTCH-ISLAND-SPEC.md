@@ -151,6 +151,43 @@ The HUD is never shown to prove it works:
 
 ---
 
+## 4c. Archie's small form
+
+Lane 5a shipped `cli/hotkey/ArchieGlyph.swift` (`ArchieGlyphView`, the native
+Swift twin of `web/src/components/ArchieGlyph.tsx`); this capsule wires exactly
+one instance into itself, per agentworth's placement rule — "once per screen,
+he arrives bare" (`agentworth/docs/DESIGN.md`, "Archie").
+
+* **Where**: `HUDCapsuleView.archieGlyph`, leading edge, colourway **C4**
+  ("Quiet" — dense chrome, must not out-shout the data). Small form only —
+  never the full hound, never a torch — because `ArchieGlyphView` draws
+  nothing else.
+* **Sizing**: 16 pt square, `archieGlyphLeadingPadding` (8 pt) from the
+  leading edge, vertically centred in the capsule's current height.
+* **State mapping** (`HUDCapsuleView.archieGlyphState(for:badge:)`):
+
+  | HUD state / signal | Glyph state | Note |
+  | :--- | :--- | :--- |
+  | `.listening` | `.listening` | bright halo |
+  | `.thinking` | `.idle` | the light stays steady — Archie is not the gold spinner |
+  | `.speaking` | `.speaking` | `beat()` fires once per call (see below) |
+  | error (`triggerErrorShake`) | `.error` | lamp off for the shake, restored after |
+  | sleep (badge `"PAUSED"`) | `.error` | same "off" appearance as an error — the badge always wins over the state passed alongside it |
+* **`beat()`**: word-level timing is not delivered to the HUD today — the CLI
+  forwards whole spoken sentences, not per-word events. `HUDController.showBreadcrumb`
+  is the one sentence-arrival hook (main.swift calls it once per `[SPEAKING]` line),
+  so it calls `archieGlyph.beat()` once per call when `state == .speaking`: one
+  beat per sentence, not per word.
+* **Hidden**: below `archieGlyphMinHeight` (24 pt), and in the no-notch
+  fallback pill when the pill is too narrow to fit the glyph without crowding
+  the label (`minPillWidthForGlyph`). Visible in every notch-mode compact and
+  expanded layout otherwise; the rest of the row (indicator, label, persona
+  badge) shifts right by the glyph's own footprint only while it's shown.
+* **`--dump-state`** carries the live read under `glyph`: `{state, colourway,
+  visible}` — no window shown, same headless contract as the rest of the dump.
+
+---
+
 ## 5. Where the code is
 
 | Concern | Symbol |

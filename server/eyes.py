@@ -46,6 +46,17 @@ Env knobs (config-only, AGENTS.md law 2):
                              dir — never inside the repo, never
                              ``_audio_store``)
 ``PET_TALK_DICTATION``       ``1`` => default task is ``transcribe``
+``PET_TALK_EYES_CONTEXT_MAX_CHARS``
+                             cap, in characters, on the tagged context line
+                             queued for the *next turn's prompt* (1200).
+                             Independent of ``EYES_CHAR_CAP``, which bounds
+                             only the ``eyes.text`` wire frame.
+``FLEET_VISION_MODEL``       resolves the forward-looking
+                             ``EYES_DESCRIBE_ENGINE=fleet/vision`` alias
+                             once the LiteLLM router ships a ``fleet/vision``
+                             route (expected: ``cloud-vlm``). Unset today —
+                             a describe pinned to ``fleet/vision`` fails
+                             closed as ``eyes_disabled`` naming this var.
 ===========================  =======================================
 """
 from __future__ import annotations
@@ -69,6 +80,13 @@ REASON_BAD_KIND = "eyes_bad_kind"
 REASON_OCR_FAILED = "eyes_ocr_failed"
 REASON_NO_TEXT = "eyes_no_text"
 REASON_DISABLED = "eyes_disabled"
+
+#: Forward-looking describe route (docs/SPEC.md §8): once the LiteLLM
+#: router ships a ``fleet/vision`` alias, pinning ``EYES_DESCRIBE_ENGINE``
+#: to it should reach ``cloud-vlm`` through the proxy. Today it is a stub —
+#: see ``resolve_fleet_vision_alias``.
+FLEET_VISION_ALIAS = "fleet/vision"
+FLEET_VISION_MODEL_ENV = "FLEET_VISION_MODEL"
 
 
 class EyesError(RuntimeError):
@@ -131,6 +149,14 @@ class EyesConfig:
         default_factory=lambda: os.environ.get("EYES_DESCRIBE_ENGINE") or None
     )
     char_cap: int = field(default_factory=lambda: _env_int("EYES_CHAR_CAP", 4000))
+    #: Cap on the tagged context line queued for the NEXT turn's prompt.
+    #: Separate from ``char_cap`` above: that one bounds the ``eyes.text``
+    #: wire frame, this one bounds what actually lands in the LLM's system
+    #: prompt (server/turn.py), so a long OCR cannot eat the prompt even
+    #: when a bigger ``eyes.text`` frame is allowed.
+    context_max_chars: int = field(
+        default_factory=lambda: _env_int("PET_TALK_EYES_CONTEXT_MAX_CHARS", 1200)
+    )
     timeout_s: float = field(default_factory=lambda: _env_float("EYES_TIMEOUT_S", 8.0))
     zrv_bin: str = field(default_factory=lambda: os.environ.get("EYES_ZRV_BIN", "zrv"))
     scratch_dir: str = field(default_factory=_default_scratch_dir)
@@ -264,6 +290,24 @@ class StubEngine(OcrEngine):
         return self.text
 
 
+def resolve_fleet_vision_alias(pin: str | None) -> str | None:
+    """Resolve the forward-looking ``fleet/vision`` describe pin.
+
+    Stub: the LiteLLM router does not serve a ``fleet/vision`` route yet
+    (docs/SPEC.md §8 — the intended target is ``cloud-vlm`` through the
+    proxy). Any other pin passes through untouched. ``fleet/vision`` itself
+    resolves via ``FLEET_VISION_MODEL``; unset, it fails closed with the
+    same ``eyes_disabled`` reason the describe-gate already uses, naming
+    the var — never a silent fall-through to zrv's local default engine.
+    """
+    if pin != FLEET_VISION_ALIAS:
+        return pin
+    resolved = os.environ.get(FLEET_VISION_MODEL_ENV)
+    if not resolved:
+        raise EyesError(REASON_DISABLED, f"fleet_vision_model_unset:{FLEET_VISION_MODEL_ENV}")
+    return resolved
+
+
 def make_engine(name: str | None = None, cfg: EyesConfig | None = None) -> OcrEngine:
     """Engine tyre factory. Unknown names fail closed (no silent fallback)."""
     cfg = cfg or EyesConfig()
@@ -370,6 +414,11 @@ class EyesProvider:
         self.cfg = cfg or EyesConfig()
         self.engine = engine or make_engine(self.cfg.engine, self.cfg)
         self._staged: dict[str, Attachment] = {}
+        #: Tagged context lines awaiting injection into the NEXT turn's
+        #: prompt (server/turn.py drains this via ``take_context``). Each
+        #: entry is ``(tagged_line, truncated)``. An attachment's line is
+        #: queued exactly once, at resolve time, and consumed exactly once.
+        self._pending_context: list[tuple[str, bool]] = []
 
     # -- validation -------------------------------------------------------
 
@@ -443,14 +492,21 @@ class EyesProvider:
         """WAVE3 §1.2 — ``(task, text)`` for a staged ref. Deletes the temp file."""
         att = self.get(ref)
         try:
-            if att.task == "describe" and not self.cfg.describe_engine_pin:
-                # Fail fast and name the knob (AGENTS.md law 1): describe
-                # needs a VLM another lane is landing in zero-vision
-                # (cloud-vlm / local-vlm); with no EYES_DESCRIBE_ENGINE set,
-                # this must never fall through to zrv's own default engine
-                # (apple-vision, which refuses --task describe with its own
-                # unrelated error) or hang on apple-fm's 100s+ latency.
-                raise EyesError(REASON_DISABLED, "describe_engine_unset:EYES_DESCRIBE_ENGINE")
+            if att.task == "describe":
+                if not self.cfg.describe_engine_pin:
+                    # Fail fast and name the knob (AGENTS.md law 1): describe
+                    # needs a VLM another lane is landing in zero-vision
+                    # (cloud-vlm / local-vlm); with no EYES_DESCRIBE_ENGINE
+                    # set, this must never fall through to zrv's own default
+                    # engine (apple-vision, which refuses --task describe
+                    # with its own unrelated error) or hang on apple-fm's
+                    # 100s+ latency.
+                    raise EyesError(REASON_DISABLED, "describe_engine_unset:EYES_DESCRIBE_ENGINE")
+                # Resolve the fleet/vision stub alias in place, once, so the
+                # engine below sees a real zrv --engine id either way.
+                self.cfg.describe_engine_pin = resolve_fleet_vision_alias(
+                    self.cfg.describe_engine_pin
+                )
             self.engine.preflight()
             try:
                 text = await asyncio.wait_for(
@@ -473,6 +529,32 @@ class EyesProvider:
     def context_tag(self, att: Attachment, text: str) -> str:
         """Turn-context injection shape: ``[eyes:att-1:screenshot|describe] …``."""
         return f"[{att.source}|{att.task}] {text}"
+
+    def cap_context(self, tag: str) -> tuple[str, bool]:
+        """Bound one tagged context line to ``PET_TALK_EYES_CONTEXT_MAX_CHARS``.
+
+        Independent of :meth:`cap`, which bounds the outgoing ``eyes.text``
+        frame — a client may be shown more than the prompt ever sees.
+        """
+        if len(tag) <= self.cfg.context_max_chars:
+            return tag, False
+        return tag[: self.cfg.context_max_chars], True
+
+    def queue_context(self, att: Attachment, text: str) -> tuple[str, bool]:
+        """Queue this attachment's tagged line for the NEXT turn's prompt.
+
+        ``server/turn.py`` drains the queue once per turn via
+        :meth:`take_context` — so an attachment's OCR text reaches exactly
+        one turn, never a later one.
+        """
+        capped, truncated = self.cap_context(self.context_tag(att, text))
+        self._pending_context.append((capped, truncated))
+        return capped, truncated
+
+    def take_context(self) -> list[tuple[str, bool]]:
+        """Drain and clear pending context lines. Consumed by exactly one turn."""
+        pending, self._pending_context = self._pending_context, []
+        return pending
 
 
 # --------------------------------------------------------------- helpers ---
@@ -610,6 +692,11 @@ async def handle_attach(ws, frame_in: dict, persona=None, *, send=None, provider
     except Exception as e:  # pragma: no cover - defensive
         await fail(REASON_OCR_FAILED, f"resolve_exception:{type(e).__name__}", att.ref)
         return
+
+    # Queue the tagged line for the NEXT turn's prompt (server/turn.py) —
+    # its own cap (PET_TALK_EYES_CONTEXT_MAX_CHARS), independent of the
+    # eyes.text frame's cap below.
+    prov.queue_context(att, text)
 
     capped, truncated = prov.cap(text)
     await sender(

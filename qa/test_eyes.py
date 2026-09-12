@@ -19,6 +19,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from server.eyes import (  # noqa: E402
+    FLEET_VISION_MODEL_ENV,
     EyesConfig,
     EyesError,
     EyesProvider,
@@ -26,8 +27,10 @@ from server.eyes import (  # noqa: E402
     ZrvEngine,
     handle_attach,
     make_engine,
+    resolve_fleet_vision_alias,
     task_for,
 )
+from server import eyes as eyes_module  # noqa: E402
 
 PNG_B64 = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64).decode()
 
@@ -314,6 +317,82 @@ class TestDescribeEngineGate(unittest.TestCase):
         self.assertIn("EYES_DESCRIBE_ENGINE", err["detail"])
 
 
+class TestFleetVisionAlias(unittest.TestCase):
+    """The fleet/vision describe-route stub (docs/SPEC.md §8, lane 9)."""
+
+    def tearDown(self):
+        os.environ.pop(FLEET_VISION_MODEL_ENV, None)
+
+    def test_non_alias_pin_passes_through_unchanged(self):
+        self.assertEqual(resolve_fleet_vision_alias("apple-fm"), "apple-fm")
+        self.assertIsNone(resolve_fleet_vision_alias(None))
+
+    def test_unset_env_fails_closed_naming_the_var(self):
+        os.environ.pop(FLEET_VISION_MODEL_ENV, None)
+        with self.assertRaises(EyesError) as ctx:
+            resolve_fleet_vision_alias("fleet/vision")
+        self.assertEqual(ctx.exception.reason, "eyes_disabled")
+        self.assertIn(FLEET_VISION_MODEL_ENV, ctx.exception.detail)
+
+    def test_set_env_resolves_to_its_value(self):
+        os.environ[FLEET_VISION_MODEL_ENV] = "cloud-vlm"
+        self.assertEqual(resolve_fleet_vision_alias("fleet/vision"), "cloud-vlm")
+
+    def test_describe_pinned_to_fleet_vision_routes_through_once_env_set(self):
+        os.environ[FLEET_VISION_MODEL_ENV] = "cloud-vlm"
+        sink = run(attach_frame(task="describe"), conf=cfg(describe_engine_pin="fleet/vision"))
+        self.assertNotIn("agent.error", sink.types)
+        self.assertEqual(sink.of("eyes.text")["task"], "describe")
+
+    def test_describe_pinned_to_fleet_vision_fails_closed_when_env_unset(self):
+        sink = run(attach_frame(task="describe"), conf=cfg(describe_engine_pin="fleet/vision"))
+        err = sink.of("agent.error")
+        self.assertEqual(err["reason"], "eyes_disabled")
+        self.assertIn(FLEET_VISION_MODEL_ENV, err["detail"])
+
+
+class TestContextQueue(unittest.TestCase):
+    """The tagged context line queued for server/turn.py (lane 9)."""
+
+    def test_resolved_attachment_queues_a_tagged_line(self):
+        prov = EyesProvider(cfg(), engine=StubEngine(text="INVOICE 42"))
+        sink = Collector()
+        asyncio.run(handle_attach(None, attach_frame(), None, send=sink, provider=prov))
+        pending = prov.take_context()
+        self.assertEqual(len(pending), 1)
+        tag, truncated = pending[0]
+        self.assertEqual(tag, "[eyes:att-1:screenshot|transcribe] INVOICE 42")
+        self.assertFalse(truncated)
+
+    def test_take_context_drains_exactly_once(self):
+        prov = EyesProvider(cfg(), engine=StubEngine(text="X"))
+        sink = Collector()
+        asyncio.run(handle_attach(None, attach_frame(), None, send=sink, provider=prov))
+        first = prov.take_context()
+        second = prov.take_context()
+        self.assertEqual(len(first), 1)
+        self.assertEqual(second, [])
+
+    def test_context_line_capped_independently_of_the_frame_cap(self):
+        conf = cfg(char_cap=4000, context_max_chars=10)
+        prov = EyesProvider(conf, engine=StubEngine(text="a" * 50))
+        sink = Collector()
+        asyncio.run(handle_attach(None, attach_frame(), None, send=sink, provider=prov))
+        # The eyes.text FRAME used the bigger char_cap, so it is not truncated.
+        self.assertFalse(sink.of("eyes.text")["truncated"])
+        # But the QUEUED prompt line used the small context_max_chars.
+        tag, truncated = prov.take_context()[0]
+        self.assertTrue(truncated)
+        self.assertLessEqual(len(tag), 10)
+
+    def test_failed_attach_queues_nothing(self):
+        prov = EyesProvider(cfg(), engine=StubEngine(available=False))
+        sink = Collector()
+        asyncio.run(handle_attach(None, attach_frame(), None, send=sink, provider=prov))
+        self.assertEqual(sink.of("agent.error")["reason"], "eyes_disabled")
+        self.assertEqual(prov.take_context(), [])
+
+
 PDF_FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "eyes_sample.pdf")
 with open(PDF_FIXTURE, "rb") as _f:
     PDF_B64 = base64.b64encode(_f.read()).decode()
@@ -372,6 +451,217 @@ class TestPdfOcr(unittest.TestCase):
         text_frame = sink.of("eyes.text")
         self.assertEqual(text_frame["engine"], "zrv")
         self.assertIn("Pet Talk PDF fixture", text_frame["text"])
+
+
+class TestEyesContextReachesTheTurnPrompt(unittest.IsolatedAsyncioTestCase):
+    """WAVE3 §1.2 / lane 9: server/turn.py drains server/eyes.py's queue.
+
+    Hermetic — stub OCR engine, stub LLM, no socket, no zrv, no network. A
+    real-engine variant below (gated on ``PET_TALK_REAL_ENGINE=1``) does the
+    same thing with the actual ``zrv`` CLI against the PDF fixture.
+    """
+
+    def setUp(self):
+        eyes_module.reset_provider()
+
+    def tearDown(self):
+        eyes_module.reset_provider()
+
+    @staticmethod
+    def _fake_ws():
+        from unittest.mock import AsyncMock, MagicMock
+
+        from starlette.websockets import WebSocketState
+
+        ws = MagicMock()
+        ws.client_state = WebSocketState.CONNECTED
+        ws.send_json = AsyncMock()
+        return ws
+
+    @staticmethod
+    def _capturing_llm_and_providers():
+        from server.provider_factory import ProviderSet
+        from server.providers import LLMProvider, StubSTT, StubTTS
+
+        class CapturingLLM(LLMProvider):
+            def __init__(self) -> None:
+                self.seen: list[list[dict]] = []
+
+            def route(self, text: str) -> str:
+                return "direct"
+
+            async def stream(self, messages):
+                self.seen.append(messages)
+                yield "Noted."
+
+        llm = CapturingLLM()
+        return llm, ProviderSet(stt=StubSTT(), llm=llm, tts=StubTTS())
+
+    async def test_turn_after_attach_sees_ocr_text_second_turn_does_not(self):
+        from server.persona import Persona
+        from server.speak_queue import SpeakQueue
+        from server.turn import handle_turn
+
+        eyes_module._provider = EyesProvider(
+            cfg(),
+            engine=StubEngine(text="INVOICE 42 TOTAL 9.00"),
+        )
+        sink = Collector()
+        await handle_attach(None, attach_frame(), None, send=sink)
+        self.assertEqual(sink.types, ["eyes.received", "eyes.text"])
+
+        llm, providers = self._capturing_llm_and_providers()
+        persona = Persona(
+            name="default", voice="af_heart", speed=1.0, stalls=["One moment."], tone="Plain."
+        )
+        ws = self._fake_ws()
+
+        await handle_turn(
+            ws, "t-eyes-1", "what does it say", SpeakQueue(),
+            active_persona=persona, providers=providers,
+        )
+        self.assertEqual(len(llm.seen), 1)
+        first_prompt = llm.seen[0][0]["content"]
+        # The OCR text reaches the prompt, but FENCED and escaped: the `[` of
+        # our own tag is escaped too, because inside the fence nothing can be
+        # told apart from what the picture said (server/persona_runtime.py).
+        from server.persona_runtime import (
+            OCR_FENCE_CLOSE,
+            OCR_FENCE_OPEN,
+            OCR_PREAMBLE,
+        )
+
+        self.assertIn(OCR_PREAMBLE, first_prompt)
+        body = first_prompt[
+            first_prompt.index(OCR_FENCE_OPEN) : first_prompt.index(OCR_FENCE_CLOSE)
+        ]
+        self.assertIn("eyes:att-1:screenshot|transcribe", body)
+        self.assertIn("INVOICE 42 TOTAL 9.00", body)
+        self.assertEqual(first_prompt.count("INVOICE 42 TOTAL 9.00"), 1)
+
+        await handle_turn(
+            ws, "t-eyes-2", "anything else", SpeakQueue(),
+            active_persona=persona, providers=providers,
+        )
+        self.assertEqual(len(llm.seen), 2)
+        second_prompt = llm.seen[1][0]["content"]
+        self.assertNotIn("EYES CONTEXT", second_prompt)
+        self.assertNotIn("INVOICE 42", second_prompt)
+
+    async def test_a_control_turn_consumes_the_context_it_does_not_use(self):
+        """One attachment, exactly one turn — even when that turn is a control.
+
+        The drain used to sit AFTER the control and empty-transcript returns,
+        so "status" or a blank transcript left the OCR text in the queue and a
+        LATER, unrelated turn picked it up. The picture the user attached would
+        have reached a question asked minutes afterwards.
+        """
+        from server.persona import Persona
+        from server.speak_queue import SpeakQueue
+        from server.turn import handle_turn
+
+        eyes_module._provider = EyesProvider(
+            cfg(), engine=StubEngine(text="INVOICE 42 TOTAL 9.00")
+        )
+        await handle_attach(None, attach_frame(), None, send=Collector())
+
+        llm, providers = self._capturing_llm_and_providers()
+        persona = Persona(
+            name="default", voice="af_heart", speed=1.0, stalls=["One moment."],
+            tone="Plain.",
+        )
+        ws = self._fake_ws()
+
+        # 1. A control turn. It builds no prompt at all, so the context cannot
+        #    reach the model here — and must not survive to the next turn.
+        await handle_turn(
+            ws, "t-ctl", "status", SpeakQueue(),
+            active_persona=persona, providers=providers,
+        )
+        self.assertEqual(len(llm.seen), 0, "a control turn called the LLM")
+
+        # 2. An empty transcript. Same contract.
+        await handle_turn(
+            ws, "t-empty", "   ", SpeakQueue(),
+            active_persona=persona, providers=providers,
+        )
+        self.assertEqual(len(llm.seen), 0, "an empty transcript called the LLM")
+
+        # 3. A real turn, later. The OCR text is gone.
+        await handle_turn(
+            ws, "t-real", "anything else", SpeakQueue(),
+            active_persona=persona, providers=providers,
+        )
+        self.assertEqual(len(llm.seen), 1)
+        prompt = llm.seen[0][0]["content"]
+        self.assertNotIn("INVOICE 42", prompt,
+                         "the OCR text leaked into a later, unrelated turn")
+        from server.persona_runtime import OCR_FENCE_OPEN
+
+        self.assertNotIn(OCR_FENCE_OPEN, prompt)
+
+    async def test_a_barge_before_the_turn_starts_clears_the_queue(self):
+        """A discarded turn discards its context, with a named reason.
+
+        ``handle_turn_task`` returns before the pipeline when a barge already
+        marked the id. Nothing drained the queue on that path, so the next turn
+        inherited an attachment the user had already abandoned.
+        """
+        from server.speak_queue import SpeakQueue
+        from server.turn import handle_turn_task
+
+        eyes_module._provider = EyesProvider(
+            cfg(), engine=StubEngine(text="INVOICE 42 TOTAL 9.00")
+        )
+        await handle_attach(None, attach_frame(), None, send=Collector())
+        self.assertTrue(eyes_module.get_provider()._pending_context,
+                        "fixture failed: nothing was queued to lose")
+
+        ws = self._fake_ws()
+        await handle_turn_task(
+            ws, "t-barged", "what does it say", SpeakQueue(), {},
+            barged={"t-barged"},
+        )
+        self.assertEqual(
+            eyes_module.get_provider().take_context(), [],
+            "a barged turn left its OCR context for the next turn to inherit",
+        )
+
+    @unittest.skipUnless(REAL_ENGINE, "SKIP: PET_TALK_REAL_ENGINE!=1 — this shells the real zrv CLI")
+    async def test_real_zrv_attach_then_turn_reaches_the_stub_llm_prompt(self):
+        """Real zrv OCRs the PDF fixture; the LLM stays stub (turn budget)."""
+        from server.persona import Persona
+        from server.speak_queue import SpeakQueue
+        from server.telemetry import TurnLog
+        from server.turn import handle_turn
+
+        conf = cfg(engine="zrv")
+        eyes_module._provider = EyesProvider(conf, engine=ZrvEngine(conf))
+        sink = Collector()
+        await handle_attach(
+            None,
+            attach_frame(kind="pdf", mime="application/pdf", b64=PDF_B64, task="transcribe"),
+            None,
+            send=sink,
+        )
+        self.assertNotIn("agent.error", sink.types)
+        self.assertIn(PDF_FIXTURE_TEXT, sink.of("eyes.text")["text"])
+
+        llm, providers = self._capturing_llm_and_providers()
+        persona = Persona(
+            name="default", voice="af_heart", speed=1.0, stalls=["One moment."], tone="Plain."
+        )
+        log_ = TurnLog(path=os.path.join(tempfile.gettempdir(), "pet-talk-eyes-test-turns.jsonl"))
+        log_.start("t-eyes-real", {})
+        await handle_turn(
+            self._fake_ws(), "t-eyes-real", "what does the pdf say", SpeakQueue(),
+            log_=log_, active_persona=persona, providers=providers,
+        )
+        self.assertEqual(len(llm.seen), 1)
+        self.assertIn(PDF_FIXTURE_TEXT, llm.seen[0][0]["content"])
+        eyes_ocr_ms = log_._stages.get("eyes_ocr_ms")
+        self.assertIsNotNone(eyes_ocr_ms, "TurnLog must record eyes_ocr_ms for an attach turn")
+        print(f"eyes_ocr_ms={eyes_ocr_ms}")
 
 
 if __name__ == "__main__":

@@ -25,6 +25,7 @@ from .providers import ProviderError
 from .speak_queue import SpeakQueue
 from . import runtime
 from .persona_runtime import apply_persona_overrides, resolve_persona
+from . import stt_stream
 from .turn import handle_turn_task
 
 router = APIRouter()
@@ -68,6 +69,16 @@ class Session:
     )
     turn_id: str = field(default_factory=new_turn_id)
     chunks: list[bytes] = field(default_factory=list)
+    #: The live turn's streaming-STT session (``server/stt_stream.py``), or
+    #: None when streaming is off, unsupported, or no chunk has arrived yet.
+    #: One per turn, keyed by its own ``turn_id`` — the chunk handler replaces
+    #: a session belonging to an older turn rather than feeding it.
+    stt_stream: Optional[stt_stream.SttStreamSession] = None
+    #: Reasons this socket has already been told streaming is off. A chunk
+    #: handler that logs per chunk writes ~150 identical lines for a 30-second
+    #: utterance, which is how a named reason stops being readable. Named once
+    #: per socket, not per chunk.
+    stream_off_logged: set[str] = field(default_factory=set)
     #: Returned by ``queue`` when no turn is live. Never spoken through.
     _idle_queue: SpeakQueue = field(default_factory=SpeakQueue)
 
@@ -283,11 +294,64 @@ async def _on_user_start(session: Session, msg: dict[str, Any]) -> None:
     await safe_send_json(session.ws, frame("state.listening", session.turn_id))
 
 
+def _stream_for_chunk(
+    session: Session, msg: dict[str, Any], sample_rate: int
+) -> Optional[stt_stream.SttStreamSession]:
+    """This turn's stream session, created on its first chunk.
+
+    The STT tyre is pinned here, at the first chunk, and ``_on_user_stop``
+    refuses to use the partials if the live tyre has changed since — a
+    ``POST /settings`` mid-utterance must not glue one backend's partial to
+    another backend's tail.
+    """
+    turn_id = str(msg.get("turn_id") or session.turn_id)
+    live = session.stt_stream
+    if live is not None and live.turn_id == turn_id:
+        return None if live.cancelled else live
+    if live is not None:
+        live.cancel("superseded_by_new_turn")
+        session.stt_stream = None
+    provider = runtime.snapshot().stt
+    usable, reason = stt_stream.streaming_available(provider)
+    if not usable:
+        # Named once per SOCKET, not per chunk: a PET_TALK_STT_STREAM=1 that
+        # cannot stream must never read as if it did, and must not bury the
+        # log either. `stt_stream_disabled` is the default and says nothing.
+        if reason != "stt_stream_disabled" and reason not in session.stream_off_logged:
+            session.stream_off_logged.add(reason)
+            log.info("stt_stream_off turn_id=%s reason=%s", turn_id, reason)
+        return None
+    created = stt_stream.SttStreamSession(
+        provider,
+        turn_id,
+        sample_rate=sample_rate,
+        on_partial=(
+            (lambda text: stt_stream.send_partial_transcript(session.ws, turn_id, text))
+            if stt_stream.partials_enabled()
+            else None
+        ),
+    )
+    session.stt_stream = created
+    log.debug(
+        "stt_stream_started turn_id=%s window_ms=%d", turn_id, created.window_ms
+    )
+    return created
+
+
 async def _on_user_chunk(session: Session, msg: dict[str, Any]) -> None:
     b64 = msg.get("chunk") or ""
     if not b64:
         return
-    session.chunks.append(_decode_b64(str(b64), "chunk"))
+    pcm = _decode_b64(str(b64), "chunk")
+    session.chunks.append(pcm)
+    # Streaming STT: feed the rolling window. ``feed`` returns as soon as a
+    # decode is SCHEDULED (it runs in a worker thread), so the reader loop
+    # stays free for a barge exactly as it is without streaming.
+    stream = _stream_for_chunk(
+        session, msg, parse_int_field(msg, "sample_rate", 16000, minimum=1)
+    )
+    if stream is not None:
+        await stream.feed(pcm)
 
 
 async def _on_user_stop(session: Session, msg: dict[str, Any]) -> None:
@@ -313,6 +377,14 @@ async def _on_user_stop(session: Session, msg: dict[str, Any]) -> None:
     # the same tick has something to flush. After ``preempt_reused`` this is
     # always a fresh queue, never the dead twin's.
     queue = session.queue_for(turn_id)
+
+    # Streaming STT (server/stt_stream.py): the partials are already decoded,
+    # so the stall goes out at end-of-speech and only the TAIL is transcribed.
+    if await _stream_stop(
+        session, turn_id, audio, sample_rate, persona, queue, handover
+    ):
+        return
+
     # Fire and forget: STT runs inside the task, so the reader loop stays free
     # for a mid-turn barge.
     session.start_turn(
@@ -331,6 +403,98 @@ async def _on_user_stop(session: Session, msg: dict[str, Any]) -> None:
             handover=handover,
         ),
     )
+
+
+async def _stream_stop(
+    session: Session,
+    turn_id: str,
+    audio: bytes,
+    sample_rate: int,
+    persona: Persona,
+    queue: SpeakQueue,
+    handover: bool,
+) -> bool:
+    """Serve ``user.stop`` from the turn's stream session, if it has one.
+
+    ``False`` means "not served" and the caller runs the unchanged
+    whole-utterance path. Every ``False`` is logged with its reason, so a run
+    can never be reported as streaming when it was not.
+    """
+    stream = session.stt_stream
+    if stream is None or stream.turn_id != turn_id or stream.cancelled:
+        return False
+    session.stt_stream = None  # this turn owns it from here
+    # Under the swap lock, like every turn: the stall, the tail decode and the
+    # answer must all agree on one provider triple.
+    providers = await runtime.snapshot_under_lock()
+    if stream.provider is not providers.stt:
+        stream.cancel("stt_provider_swapped_mid_utterance")
+        log.info(
+            "stt_stream_off turn_id=%s reason=stt_provider_swapped_mid_utterance",
+            turn_id,
+        )
+        return False
+
+    # Set the moment a turn is actually started. Past that point the
+    # whole-utterance fallback would be a SECOND turn for one utterance — two
+    # answers speaking over each other — so a failure after it re-raises
+    # instead of falling back. The dispatcher names it and keeps the socket.
+    committed = False
+
+    def _start(text: str, stall_sent: bool):
+        nonlocal committed
+        committed = True
+        kwargs: dict[str, Any] = {}
+        if stall_sent and "stall_sent" in stt_stream.handle_turn_task_params():
+            # turn.py is another lane's file: the parameter is threaded only
+            # once it exists there. Until then a stall this lane already sent
+            # is told to nobody, and turn.py sends its own — which is exactly
+            # why turn_accepts_stall_sent() keeps the early stall off by
+            # default. See the hook line in this lane's report.
+            kwargs["stall_sent"] = True
+        session.start_turn(
+            turn_id,
+            lambda: handle_turn_task(
+                session.ws,
+                turn_id,
+                text,
+                queue,
+                session.turn_tasks,
+                active_persona=persona,
+                providers=providers,
+                on_cancel=session.cancel_others,
+                barged=session.barged,
+                handover=handover,
+                **kwargs,
+            ),
+        )
+
+    try:
+        return await stt_stream.run_streaming_stop(
+            session.ws,
+            turn_id,
+            stream,
+            persona,
+            providers,
+            _start,
+            audio=audio,
+            handover=handover,
+            is_barged=lambda: turn_id in session.barged,
+        )
+    except ProviderError:
+        raise
+    except Exception as e:
+        # The streaming path is an optimization; a bug in it must not cost the
+        # turn. Named, then the whole-utterance path runs — UNLESS the turn is
+        # already started, in which case falling back would run it twice.
+        reason = "stt_stream_stop_failed_after_commit" if committed else "stt_stream_stop_failed"
+        log.warning(
+            "%s turn_id=%s reason=%s", reason, turn_id,
+            swallowed(reason, e, turn_id=turn_id),
+        )
+        if committed:
+            raise
+        return False
 
 
 async def _on_user_text(session: Session, msg: dict[str, Any]) -> None:
@@ -367,6 +531,16 @@ async def _on_user_text(session: Session, msg: dict[str, Any]) -> None:
 
 async def _on_barge(session: Session, msg: dict[str, Any]) -> None:
     ref = msg.get("turn_id") or session.turn_id
+    # The stream session goes too. Cancelling the turn task left it attached to
+    # the socket with a decode in a worker thread: that decode landed after the
+    # ack and pushed a `transcript.user partial` for a turn the person had
+    # already abandoned. Cancel first, so the flag is set before the thread
+    # finishes and the partial is discarded on arrival.
+    stream = session.stt_stream
+    if stream is not None:
+        stream.cancel("barged")
+        session.stt_stream = None
+        log.info("stt_stream_cancelled turn_id=%s reason=barged", stream.turn_id)
     dropped = await session.barge(ref)
     session.turn_id = new_turn_id()
     await safe_send_json(

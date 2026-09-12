@@ -1,0 +1,69 @@
+/* ===========================================================================
+   ArchieGlyph — motion only, no colour.
+   Every fill Archie's small form uses comes from ../brand/archie/archie.css
+   (vendored, unmodified) via the archie-c3 / archie-c4 colourway classes —
+   this file adds no palette of its own, per the product rule that pet-talk
+   never invents a new colour. It only times the "beat" (see ArchieGlyph.tsx)
+   and the idle/listening brightness.
+
+   Motion follows motionvector/studio/docs/design/motion-language.md:
+   reduced motion keeps the state change and drops the beat.
+   =========================================================================== */
+
+.archie-glyph {
+  display: inline-block;
+  line-height: 0;
+}
+
+/* Scale the paw-light about its own center, not the 48-unit viewBox origin —
+   same convention as AgentWorth's found-it beat in archie.css. */
+.archie-glyph .archie-halo,
+.archie-glyph .archie-lens {
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: transform 90ms ease-out, opacity 90ms ease-out;
+}
+
+/* idle: lit, steady. */
+.archie-glyph-idle .archie-halo {
+  opacity: 0.55;
+}
+
+/* listening: the same lamp, brighter — no beat, just up. */
+.archie-glyph-listening .archie-halo {
+  opacity: 1;
+  transform: scale(1.08);
+}
+
+/* speaking: bright base state; the beat itself is a transient "kick" class
+   toggled by ArchieGlyph.tsx in time with word arrival, not a CSS loop —
+   a loop can't know when a sentence actually lands. */
+.archie-glyph-speaking .archie-halo {
+  opacity: 0.85;
+}
+.archie-glyph-kick .archie-halo,
+.archie-glyph-kick .archie-lens {
+  transform: scale(1.2);
+  opacity: 1;
+}
+
+/* error: data-lamp="off" (set on the SVG root by ArchieGlyph.tsx) already
+   hides the halo and fills the lens with --archie-body via archie.css; this
+   is a belt-and-suspenders in case a consumer overrides the attribute. */
+.archie-glyph-error .archie-halo {
+  opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Keep the state change (opacity still differs per state above), drop
+     the transform-based beat/brighten motion. */
+  .archie-glyph .archie-halo,
+  .archie-glyph .archie-lens {
+    transition: opacity 90ms ease-out;
+  }
+  .archie-glyph-listening .archie-halo,
+  .archie-glyph-kick .archie-halo,
+  .archie-glyph-kick .archie-lens {
+    transform: none;
+  }
+}

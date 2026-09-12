@@ -674,6 +674,7 @@ class TestTurnHook(ReceiptsTestCase):
 
 CHIP_TSX = os.path.join(ROOT, "web", "src", "components", "ReceiptChip.tsx")
 APP_TSX = os.path.join(ROOT, "web", "src", "App.tsx")
+STREAM_TSX = os.path.join(ROOT, "web", "src", "components", "TranscriptStream.tsx")
 
 
 _BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
@@ -744,8 +745,26 @@ class TestReceiptChipSurface(unittest.TestCase):
         self.assertIn("void write(source.id)", self.chip, "the chip copies something other than the id")
 
     def test_the_app_renders_the_chip_under_the_spoken_line(self):
-        self.assertIn('from "./components/ReceiptChip"', self.app, "App.tsx never imports the chip")
-        self.assertIn("<ReceiptChip receipt={line.receipt} />", self.app)
+        """The claim and its proof render together, wherever the stream lives.
+
+        The cockpit rebuild (2026-09-12) moved the transcript out of App.tsx
+        into components/TranscriptStream.tsx, so the chip's render site moved
+        with it. App.tsx still owns narrowing the frame; the render assertion
+        now looks in whichever of the two files draws the stream, so this test
+        keeps proving "the proof is under the claim" rather than "App.tsx has
+        a particular line in it".
+        """
+        surfaces = "\n".join(
+            open(path, encoding="utf-8").read()
+            for path in (APP_TSX, STREAM_TSX)
+            if os.path.isfile(path)
+        )
+        self.assertIn(
+            'from "./ReceiptChip"',
+            surfaces,
+            "no transcript surface imports the chip",
+        )
+        self.assertIn("<ReceiptChip receipt={line.receipt} />", surfaces)
         self.assertIn("asReceiptFrame(frame)", self.app, "App.tsx never narrows an agent.receipt frame")
 
 

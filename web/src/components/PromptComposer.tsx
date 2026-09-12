@@ -11,6 +11,14 @@ interface PromptComposerProps {
   t: Record<string, string>;
 }
 
+// Left-aligned action rows. Layout only — spacing from the ladder token, so
+// this stays exempt from the "no ad-hoc pixel" rule.
+const actionRow: React.CSSProperties = {
+  display: "flex",
+  alignItems: "baseline",
+  gap: "var(--pt-s2)",
+};
+
 export const PromptComposer: React.FC<PromptComposerProps> = ({
   onSend,
   disabled = false,
@@ -233,179 +241,55 @@ export const PromptComposer: React.FC<PromptComposerProps> = ({
   const hasText = text.trim().length > 0;
 
   return (
-    <div
-      style={{
-        width: "100%",
-        display: "flex",
-        flexDirection: "column",
-        gap: "0.5rem",
-        marginTop: "1.25rem",
-      }}
-    >
+    <div className="pt-section">
       {errorMessage && (
-        <div
-          style={{
-            fontSize: "0.75rem",
-            color: "#ff5252",
-            background: "rgba(255, 82, 82, 0.1)",
-            border: "1px solid rgba(255, 82, 82, 0.3)",
-            borderRadius: "8px",
-            padding: "0.4rem 0.8rem",
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-          }}
-        >
+        <div className="pt-banner">
           <span>{errorMessage}</span>
           <button
             type="button"
+            className="pt-btn pt-btn--icon pt-btn--ghost"
             onClick={() => setErrorMessage(null)}
-            style={{
-              background: "none",
-              border: "none",
-              color: "#ff5252",
-              cursor: "pointer",
-              fontSize: "0.8rem",
-              padding: 0,
-            }}
+            aria-label="Dismiss"
           >
             ✕
           </button>
         </div>
       )}
 
-      <div
-        style={{
-          background: "#12141c",
-          border: isRecording ? "1px solid rgba(255, 61, 0, 0.5)" : "1px solid #282c3f",
-          borderRadius: "16px",
-          padding: "0.75rem 1rem",
-          boxShadow: isRecording
-            ? "0 0 20px rgba(255, 61, 0, 0.2), 0 4px 16px rgba(0,0,0,0.5)"
-            : "0 4px 16px rgba(0,0,0,0.4)",
-          transition: "border 0.2s, box-shadow 0.2s",
-          display: "flex",
-          flexDirection: "column",
-          gap: "0.6rem",
-        }}
-      >
+      <div className="pt-panel">
         {/* Recording active state banner */}
         {isRecording && (
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              background: "rgba(255, 61, 0, 0.1)",
-              border: "1px solid rgba(255, 61, 0, 0.25)",
-              borderRadius: "10px",
-              padding: "0.4rem 0.75rem",
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
-              <span
-                style={{
-                  display: "inline-block",
-                  width: "10px",
-                  height: "10px",
-                  borderRadius: "50%",
-                  background: "#ff3d00",
-                  boxShadow: "0 0 8px #ff3d00",
-                  animation: "pulse 1.2s infinite",
-                }}
-              />
-              <span
-                style={{
-                  fontSize: "0.85rem",
-                  fontWeight: 600,
-                  fontFamily: "monospace",
-                  color: "#ff5252",
-                  letterSpacing: "0.05em",
-                }}
-              >
-                {formatTimer(recordSeconds)}
-              </span>
-              <span style={{ fontSize: "0.8rem", color: "#e0e0e0" }}>
-                {t["recording"] || "Recording…"}
-              </span>
-            </div>
-
+          <div className="pt-chipline">
+            <span className="pt-chip pt-chip--danger">{formatTimer(recordSeconds)}</span>
+            <span className="pt-note">{t["recording"] || "Recording…"}</span>
             <button
               type="button"
+              className="pt-btn pt-btn--primary"
               data-testid="dictate-done-button"
               onClick={stopDictation}
-              style={{
-                background: "linear-gradient(135deg, #00c853, #00e676)",
-                color: "#090a0f",
-                border: "none",
-                borderRadius: "999px",
-                padding: "0.35rem 0.9rem",
-                fontSize: "0.75rem",
-                fontWeight: 700,
-                cursor: "pointer",
-                boxShadow: "0 2px 8px rgba(0, 200, 83, 0.4)",
-                transition: "transform 0.1s",
-              }}
             >
-              ✓ {t["done"] || "Done"}
+              {t["done"] || "Done"}
             </button>
           </div>
         )}
 
         {/* Transcribing indicator */}
         {isTranscribing && (
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "0.6rem",
-              background: "rgba(36, 193, 224, 0.1)",
-              border: "1px solid rgba(36, 193, 224, 0.3)",
-              borderRadius: "10px",
-              padding: "0.4rem 0.75rem",
-              color: "#24c1e0",
-              fontSize: "0.8rem",
-              fontWeight: 500,
-            }}
-          >
-            <span
-              style={{
-                display: "inline-block",
-                width: "12px",
-                height: "12px",
-                border: "2px solid #24c1e0",
-                borderTopColor: "transparent",
-                borderRadius: "50%",
-                animation: "spin 0.8s linear infinite",
-              }}
-            />
-            <span>{t["transcribing"] || "Transcribing…"}</span>
+          <div className="pt-chipline">
+            <span className="pt-chip pt-chip--signal">{t["transcribing"] || "Transcribing…"}</span>
           </div>
         )}
 
         {/* Text input area */}
         <textarea
           ref={textareaRef}
+          className="pt-input"
           value={text}
           onChange={handleTextChange}
           onKeyDown={handleKeyDown}
-          placeholder={t["prompt_placeholder"] || "Ask Donna anything, or click Dictate…"}
+          placeholder={t["prompt_placeholder"] || "Ask anything, or click Dictate…"}
           disabled={disabled || !connected || isTranscribing}
           rows={1}
-          style={{
-            width: "100%",
-            background: "transparent",
-            border: "none",
-            outline: "none",
-            resize: "none",
-            color: "#f1f3f9",
-            fontSize: "0.95rem",
-            lineHeight: "1.45",
-            fontFamily: "inherit",
-            minHeight: "28px",
-            maxHeight: "160px",
-            boxSizing: "border-box",
-          }}
         />
 
         {/* Action button bar */}
@@ -413,36 +297,23 @@ export const PromptComposer: React.FC<PromptComposerProps> = ({
           style={{
             display: "flex",
             justifyContent: "space-between",
-            alignItems: "center",
-            paddingTop: "0.25rem",
-            borderTop: "1px solid #1a1e2b",
+            alignItems: "baseline",
+            gap: "var(--pt-s3)",
+            paddingTop: "var(--pt-s2)",
+            borderTop: "var(--pt-hair) solid var(--mv-border-soft)",
           }}
         >
-          {/* Left: Dictate Mic Button + Clean Prose Badge */}
-          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+          {/* Left: Dictate Mic Button + Clean Prose pill */}
+          <div style={actionRow}>
             {!isRecording ? (
               <>
                 <button
                   type="button"
+                  className="pt-btn pt-btn--ghost"
                   data-testid="dictate-mic-button"
                   onClick={startDictation}
                   disabled={disabled || !connected || isTranscribing}
                   title={t["dictate"] || "Dictate"}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "0.45rem",
-                    background: "#191c26",
-                    border: "1px solid #282c3f",
-                    borderRadius: "999px",
-                    padding: "0.4rem 0.85rem",
-                    color: "#e2e8f0",
-                    fontSize: "0.8rem",
-                    fontWeight: 600,
-                    cursor: disabled || !connected || isTranscribing ? "not-allowed" : "pointer",
-                    transition: "background 0.15s, border-color 0.15s",
-                    opacity: disabled || !connected || isTranscribing ? 0.5 : 1,
-                  }}
                 >
                   {/* Clean Mic SVG */}
                   <svg
@@ -450,7 +321,7 @@ export const PromptComposer: React.FC<PromptComposerProps> = ({
                     height="14"
                     viewBox="0 0 24 24"
                     fill="none"
-                    stroke="#24c1e0"
+                    stroke="currentColor"
                     strokeWidth="2.2"
                     strokeLinecap="round"
                     strokeLinejoin="round"
@@ -465,64 +336,31 @@ export const PromptComposer: React.FC<PromptComposerProps> = ({
 
                 <button
                   type="button"
+                  className={`pt-chip ${cleanProse ? "pt-chip--signal" : ""}`}
                   data-testid="clean-prose-toggle"
+                  aria-pressed={cleanProse}
                   onClick={() => setCleanProse((prev) => !prev)}
                   title={cleanProse ? "Clean Prose enabled" : "Clean Prose disabled"}
-                  style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: "0.35rem",
-                    background: cleanProse ? "rgba(36, 193, 224, 0.12)" : "rgba(255, 255, 255, 0.04)",
-                    border: `1px solid ${cleanProse ? "rgba(36, 193, 224, 0.4)" : "#282c3f"}`,
-                    borderRadius: "999px",
-                    padding: "0.35rem 0.65rem",
-                    fontSize: "0.72rem",
-                    fontWeight: cleanProse ? 600 : 400,
-                    color: cleanProse ? "#24c1e0" : "#718096",
-                    cursor: "pointer",
-                    transition: "all 0.15s ease",
-                    userSelect: "none",
-                  }}
                 >
-                  <span style={{ fontSize: "0.75rem" }}>{cleanProse ? "✨" : "○"}</span>
                   <span>{t["clean_prose"] || "Clean Prose"}</span>
                 </button>
               </>
             ) : (
-              <span style={{ fontSize: "0.75rem", color: "#9ba3b8", fontStyle: "italic" }}>
-                Speak clearly into microphone…
-              </span>
+              <span className="pt-note">Speak clearly into microphone…</span>
             )}
           </div>
 
           {/* Right: Hint + Send Button */}
-          <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
-            <span style={{ fontSize: "0.7rem", color: "#636c84" }}>Enter ↵</span>
+          <div style={actionRow}>
+            <span className="pt-note pt-mono">Enter ↵</span>
 
             <button
               type="button"
+              className="pt-btn pt-btn--icon"
               data-testid="send-prompt-button"
               onClick={handleSend}
               disabled={!hasText || disabled || !connected || isRecording || isTranscribing}
               title={t["send_prompt"] || "Send"}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                width: "34px",
-                height: "34px",
-                borderRadius: "50%",
-                background: hasText && connected && !isRecording && !isTranscribing
-                  ? "linear-gradient(135deg, #4285f4, #24c1e0)"
-                  : "#191c26",
-                color: hasText && connected && !isRecording && !isTranscribing ? "#ffffff" : "#636c84",
-                border: "none",
-                cursor: hasText && connected && !isRecording && !isTranscribing ? "pointer" : "default",
-                boxShadow: hasText && connected && !isRecording && !isTranscribing
-                  ? "0 2px 10px rgba(66, 133, 244, 0.4)"
-                  : "none",
-                transition: "background 0.2s, transform 0.1s, box-shadow 0.2s",
-              }}
             >
               {/* Sleek Send Up Arrow SVG */}
               <svg
@@ -542,18 +380,6 @@ export const PromptComposer: React.FC<PromptComposerProps> = ({
           </div>
         </div>
       </div>
-
-      <style>{`
-        @keyframes pulse {
-          0% { opacity: 1; transform: scale(1); }
-          50% { opacity: 0.4; transform: scale(1.15); }
-          100% { opacity: 1; transform: scale(1); }
-        }
-        @keyframes spin {
-          0% { transform: rotate(0deg); }
-          100% { transform: rotate(360deg); }
-        }
-      `}</style>
     </div>
   );
 };

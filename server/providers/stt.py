@@ -27,6 +27,16 @@ from ._shared import (
 
 
 class STTProvider(abc.ABC):
+    #: Can this tyre be called repeatedly on a growing prefix of one
+    #: utterance, cheaply enough to be worth it? `server/stt_stream.py` reads
+    #: this flag and nothing else — it never infers capability from a class
+    #: name. False is the honest default: a tyre that pays an HTTPS round trip
+    #: per window would be slower AND billed per call, and a tyre that reloads
+    #: its model per call (mlx today) would be slower still. Streaming with
+    #: `PET_TALK_STT_STREAM=1` on a tyre that says False is refused by name
+    #: (`stt_stream_unsupported_provider`), never quietly downgraded.
+    supports_streaming: bool = False
+
     @abc.abstractmethod
     def transcribe(self, pcm16_bytes: bytes, sample_rate: int = 16000) -> str:
         """PCM16 mono bytes -> text. Raises ProviderError on failure."""
@@ -39,6 +49,9 @@ class StubSTT(STTProvider):
     `delay_s` (default 0) sleeps before returning, so lifecycle tests can
     simulate a slow STT backend without a real model.
     """
+
+    #: No model, so a repeated decode costs `delay_s` and nothing else.
+    supports_streaming = True
 
     def __init__(self, fixed_text: str = "hello agent, what is the weather", delay_s: float = 0.0) -> None:
         self.fixed_text = fixed_text
@@ -56,6 +69,11 @@ class StubSTT(STTProvider):
 
 class WhisperLocalSTT(STTProvider):
     """Real backend (lazy import). Not installed by default."""
+
+    #: In-process and model-loaded-once, so a repeated prefix decode is legal.
+    #: It writes a temp WAV per call, which makes it the slowest of the local
+    #: tyres to stream; faster-whisper is the measured one.
+    supports_streaming = True
 
     def __init__(self, model_name: str = "base") -> None:
         self.model_name = model_name
@@ -95,6 +113,12 @@ class DeepgramSTT(STTProvider):
     """
 
     LISTEN_URL = "https://api.deepgram.com/v1/listen"
+
+    #: One HTTPS round trip per window, billed per call. Deepgram DOES have a
+    #: real streaming socket (`wss://api.deepgram.com/v1/listen`) that would
+    #: belong here instead of repeated POSTs — deliberately out of scope for
+    #: lane 2b (2026-09-12), which fixed the local default first.
+    supports_streaming = False
 
     def __init__(self, model: str = "nova-3", api_key: str = "") -> None:
         self.model = model
@@ -274,7 +298,17 @@ class WhisperKitSTT(STTProvider):
 
     Select with STT_PROVIDER=whisperkit.
     Default model openai/whisper-large-v3_turbo.
+
+    NOT MEASURED on this machine (2026-09-12, lane 2b): `whisperkit-cli` is
+    not on PATH and no CoreML model is on disk, so nothing here has ever run.
+    Its latency is unknown — do not repeat the guess that the Neural Engine
+    makes it the fastest tyre until somebody has a number.
     """
+
+    #: One process spawn plus one temp WAV per window, and the model is
+    #: reloaded by that process every time. Streaming this would spend more
+    #: than it saves; a persistent whisperkit daemon could change the answer.
+    supports_streaming = False
 
     def __init__(
         self,
@@ -350,6 +384,11 @@ class MLXWhisperSTT(STTProvider):
     Select with STT_PROVIDER=mlx.
     Default model mlx-community/whisper-large-v3-turbo.
     """
+
+    #: `mlx_whisper.transcribe` reloads the weights on every call (docs/SPEC.md
+    #: 10), so a per-window decode would pay a model load per window. Flip
+    #: this the day this tyre loads once, not before.
+    supports_streaming = False
 
     def __init__(
         self,
@@ -453,6 +492,11 @@ class FasterWhisperSTT(STTProvider):
     #: 16kHz is whisper's native rate and the wire protocol's default, so the
     #: resample below is normally a no-op.
     TARGET_SAMPLE_RATE = 16000
+
+    #: The streaming tyre. Model loads once, the PCM goes in as an ndarray
+    #: with no temp file, and a 0.7s window decodes in a fraction of the
+    #: whole-utterance pass — see `server/stt_stream.py` and docs/SPEC.md 9.2.
+    supports_streaming = True
 
     def __init__(
         self,

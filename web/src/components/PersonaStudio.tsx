@@ -28,6 +28,8 @@ interface PersonaStudioProps {
   onSavePersona: (persona: PersonaData) => Promise<void>;
   onDeletePersona: (name: string) => Promise<void>;
   onPreviewVoice: (voiceId: string) => void;
+  /** The sheet needs a way out: the scrim and Escape both call this. */
+  onClose?: () => void;
   t: Record<string, string>;
 }
 
@@ -45,6 +47,7 @@ export const PersonaStudio: React.FC<PersonaStudioProps> = ({
   onSavePersona,
   onDeletePersona,
   onPreviewVoice,
+  onClose,
   t,
 }) => {
   const [isCreatingNew, setIsCreatingNew] = useState(false);
@@ -89,238 +92,141 @@ export const PersonaStudio: React.FC<PersonaStudioProps> = ({
   };
 
   return (
-    <div
-      style={{
-        background: "#12141c",
-        border: "1px solid #282c3f",
-        borderRadius: "16px",
-        padding: "1.25rem",
-        margin: "1rem 0",
-        color: "#f1f3f9",
-        boxShadow: "0 8px 24px rgba(0,0,0,0.5)",
-      }}
-    >
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          marginBottom: "1rem",
-        }}
-      >
-        <h3 style={{ margin: 0, fontSize: "1.1rem", fontWeight: 600 }}>
-          {t["custom-persona"] || "Persona Studio"}
-        </h3>
-        <button
-          type="button"
-          onClick={() => setIsCreatingNew(!isCreatingNew)}
-          style={{
-            background: isCreatingNew ? "#282c3f" : "#24c1e0",
-            color: isCreatingNew ? "#f1f3f9" : "#090a0f",
-            border: "none",
-            borderRadius: "6px",
-            padding: "0.35rem 0.75rem",
-            fontSize: "0.8rem",
-            fontWeight: 600,
-            cursor: "pointer",
-          }}
-        >
-          {isCreatingNew ? "Cancel" : `+ ${t["new-persona"] || "New Persona"}`}
-        </button>
-      </div>
-
-      {isCreatingNew ? (
-        <form onSubmit={handleCreateSubmit} style={{ marginBottom: "1rem" }}>
-          <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.75rem" }}>
-            <input
-              type="text"
-              placeholder="Persona identifier (e.g. athena)"
-              value={newPersonaName}
-              onChange={(e) => setNewPersonaName(e.target.value)}
-              style={{
-                flex: 1,
-                padding: "0.5rem 0.75rem",
-                borderRadius: "6px",
-                border: "1px solid #282c3f",
-                background: "#090a0f",
-                color: "#f1f3f9",
-                fontSize: "0.85rem",
-              }}
-              required
-            />
-            <button
-              type="submit"
-              disabled={saving}
-              style={{
-                background: "#00c853",
-                color: "#090a0f",
-                border: "none",
-                borderRadius: "6px",
-                padding: "0.5rem 1rem",
-                fontWeight: 600,
-                cursor: "pointer",
-              }}
-            >
-              {saving ? "Saving..." : t["save"] || "Save"}
+    <>
+      <div className="pt-scrim" onClick={onClose} />
+      <div className="pt-sheet">
+        <div className="pt-sheet-head">
+          <h2 className="pt-h2">{t["custom-persona"] || "Persona Studio"}</h2>
+          {onClose ? (
+            <button type="button" className="pt-btn pt-btn--icon" onClick={onClose} aria-label="Close">
+              ×
             </button>
-          </div>
-        </form>
-      ) : null}
-
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem", marginBottom: "1rem" }}>
-        {/* Persona Select */}
-        <div>
-          <label style={{ display: "block", fontSize: "0.75rem", color: "#9ba3b8", marginBottom: "0.35rem" }}>
-            {t["persona"] || "Persona"}
-          </label>
-          <div style={{ display: "flex", gap: "0.5rem" }}>
-            <select
-              value={currentPersona}
-              onChange={(e) => onSelectPersona(e.target.value)}
-              style={{
-                flex: 1,
-                padding: "0.5rem 0.75rem",
-                borderRadius: "8px",
-                border: "1px solid #282c3f",
-                background: "#191c26",
-                color: "#f1f3f9",
-                fontSize: "0.85rem",
-              }}
-            >
-              {personas.map((p) => (
-                <option key={p.name} value={p.name}>
-                  {p.name.charAt(0).toUpperCase() + p.name.slice(1)}
-                </option>
-              ))}
-            </select>
-            {!isBuiltin && (
-              <button
-                type="button"
-                onClick={() => onDeletePersona(currentPersona)}
-                title="Delete custom persona"
-                style={{
-                  background: "rgba(255, 61, 0, 0.2)",
-                  color: "#ff3d00",
-                  border: "1px solid #ff3d00",
-                  borderRadius: "8px",
-                  padding: "0.35rem 0.65rem",
-                  fontSize: "0.75rem",
-                  cursor: "pointer",
-                }}
-              >
-                {t["delete"] || "Del"}
-              </button>
-            )}
-          </div>
+          ) : null}
+          <button
+            type="button"
+            className="pt-btn"
+            aria-pressed={isCreatingNew}
+            onClick={() => setIsCreatingNew(!isCreatingNew)}
+          >
+            {isCreatingNew ? "Cancel" : `+ ${t["new-persona"] || "New Persona"}`}
+          </button>
         </div>
 
-        {/* Voice Select + Preview */}
-        <div>
-          <label style={{ display: "block", fontSize: "0.75rem", color: "#9ba3b8", marginBottom: "0.35rem" }}>
-            {t["voice"] || "Voice"}
-          </label>
-          <div style={{ display: "flex", gap: "0.5rem" }}>
-            <select
-              value={currentVoice}
-              onChange={(e) => onSelectVoice(e.target.value)}
-              style={{
-                flex: 1,
-                padding: "0.5rem 0.75rem",
-                borderRadius: "8px",
-                border: "1px solid #282c3f",
-                background: "#191c26",
-                color: "#f1f3f9",
-                fontSize: "0.85rem",
-              }}
-            >
-              {voices.map((v) => (
-                <option key={v.id} value={v.id}>
-                  {v.display_name} ({v.lang})
-                </option>
-              ))}
-            </select>
+        {isCreatingNew ? (
+          <form onSubmit={handleCreateSubmit} className="pt-section">
+            <div className="pt-field">
+              <label>{t["persona"] || "Persona"} identifier</label>
+              <div style={{ display: "flex", gap: "var(--pt-s2)" }}>
+                <input
+                  type="text"
+                  className="pt-input"
+                  placeholder="Persona identifier (e.g. athena)"
+                  value={newPersonaName}
+                  onChange={(e) => setNewPersonaName(e.target.value)}
+                  required
+                />
+                <button type="submit" className="pt-btn pt-btn--primary" disabled={saving}>
+                  {saving ? "Saving..." : t["save"] || "Save"}
+                </button>
+              </div>
+            </div>
+          </form>
+        ) : null}
+
+        <div className="pt-section">
+          <div className="pt-lbl">{t["persona"] || "Persona"}</div>
+          <div className="pt-rail-group pt-scroll-y">
+            {personas.map((p) => (
+              <button
+                key={p.name}
+                type="button"
+                className="pt-rail-row"
+                aria-current={p.name === currentPersona}
+                onClick={() => onSelectPersona(p.name)}
+              >
+                {p.name.charAt(0).toUpperCase() + p.name.slice(1)}
+              </button>
+            ))}
+          </div>
+          {!isBuiltin && (
             <button
               type="button"
-              onClick={() => onPreviewVoice(currentVoice)}
-              title="Preview Voice Sample"
-              style={{
-                background: "#282c3f",
-                color: "#24c1e0",
-                border: "none",
-                borderRadius: "8px",
-                padding: "0.35rem 0.65rem",
-                fontSize: "0.75rem",
-                fontWeight: 600,
-                cursor: "pointer",
-              }}
+              className="pt-btn pt-btn--danger"
+              onClick={() => onDeletePersona(currentPersona)}
+              title="Delete custom persona"
             >
-              ▶
+              {t["delete"] || "Delete"}
             </button>
+          )}
+        </div>
+
+        <div className="pt-section">
+          <div className="pt-field">
+            <label>{t["voice"] || "Voice"}</label>
+            <div style={{ display: "flex", gap: "var(--pt-s2)" }}>
+              <select
+                className="pt-input"
+                value={currentVoice}
+                onChange={(e) => onSelectVoice(e.target.value)}
+              >
+                {voices.map((v) => (
+                  <option key={v.id} value={v.id}>
+                    {v.display_name} ({v.lang})
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                className="pt-btn pt-btn--icon"
+                onClick={() => onPreviewVoice(currentVoice)}
+                title="Preview Voice Sample"
+              >
+                ▶
+              </button>
+            </div>
           </div>
         </div>
-      </div>
 
-      {/* Speed Slider */}
-      <div style={{ marginBottom: "1rem" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.75rem", color: "#9ba3b8", marginBottom: "0.35rem" }}>
-          <span>{t["speed"] || "Speed"}</span>
-          <span style={{ color: "#24c1e0", fontFamily: "monospace", fontWeight: 600 }}>{speed.toFixed(2)}x</span>
+        <div className="pt-section">
+          <div className="pt-field">
+            <label>
+              {t["speed"] || "Speed"} <span className="pt-num">{speed.toFixed(2)}x</span>
+            </label>
+            <input
+              type="range"
+              min="0.5"
+              max="2.0"
+              step="0.05"
+              value={speed}
+              onChange={(e) => onSpeedChange(parseFloat(e.target.value))}
+            />
+          </div>
         </div>
-        <input
-          type="range"
-          min="0.5"
-          max="2.0"
-          step="0.05"
-          value={speed}
-          onChange={(e) => onSpeedChange(parseFloat(e.target.value))}
-          style={{ width: "100%", accentColor: "#24c1e0", cursor: "pointer" }}
-        />
-      </div>
 
-      {/* System Prompt & Tone */}
-      <div style={{ marginBottom: "0.75rem" }}>
-        <label style={{ display: "block", fontSize: "0.75rem", color: "#9ba3b8", marginBottom: "0.35rem" }}>
-          {t["system-prompt"] || "System Prompt & Tone"}
-        </label>
-        <textarea
-          rows={4}
-          value={systemPrompt}
-          onChange={(e) => onSystemPromptChange(e.target.value)}
-          placeholder="Define voice personality, cognitive constraints, and reflex instructions..."
-          style={{
-            width: "100%",
-            boxSizing: "border-box",
-            padding: "0.6rem 0.75rem",
-            borderRadius: "8px",
-            border: "1px solid #282c3f",
-            background: "#090a0f",
-            color: "#f1f3f9",
-            fontSize: "0.8rem",
-            fontFamily: "inherit",
-            resize: "vertical",
-          }}
-        />
-      </div>
+        <div className="pt-section">
+          <div className="pt-field">
+            <label>{t["system-prompt"] || "System Prompt & Tone"}</label>
+            <textarea
+              className="pt-input"
+              rows={4}
+              value={systemPrompt}
+              onChange={(e) => onSystemPromptChange(e.target.value)}
+              placeholder="Define voice personality, cognitive constraints, and reflex instructions..."
+            />
+          </div>
+        </div>
 
-      <div style={{ display: "flex", justifyContent: "flex-end" }}>
-        <button
-          type="button"
-          onClick={handleUpdateCurrent}
-          disabled={saving}
-          style={{
-            background: "#4285f4",
-            color: "#ffffff",
-            border: "none",
-            borderRadius: "8px",
-            padding: "0.45rem 1rem",
-            fontSize: "0.8rem",
-            fontWeight: 600,
-            cursor: "pointer",
-          }}
-        >
-          {saving ? "Saving..." : t["save"] || "Save Persona"}
-        </button>
+        <div className="pt-section">
+          <button
+            type="button"
+            className="pt-btn pt-btn--primary"
+            onClick={handleUpdateCurrent}
+            disabled={saving}
+          >
+            {saving ? "Saving..." : t["save"] || "Save Persona"}
+          </button>
+        </div>
       </div>
-    </div>
+    </>
   );
 };

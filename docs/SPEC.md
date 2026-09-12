@@ -86,12 +86,11 @@ Every frame carries `turn_id`. `Frame.__post_init__` raises `frame_no_turn_id` i
 | Frame | Fields | Handler |
 |---|---|---|
 | `user.start` | `turn_id?` | `_on_user_start` — resets chunk buffer, sends `state.listening` |
-| `user.chunk` | `chunk` (b64 PCM16) | `_on_user_chunk` — appends to buffer |
+| `user.chunk` | `chunk` (b64 PCM16), `sample_rate?` | `_on_user_chunk` — appends to buffer, and feeds `server/stt_stream.py`'s rolling window when `PET_TALK_STT_STREAM=1` |
 | `user.stop` | `turn_id?`, `pcm_b64?`, `sample_rate?` | `_on_user_stop` — runs STT in the turn task, fires `handle_turn_task` |
 | `user.text` | `text`, `turn_id?`, persona overrides | `_on_user_text` — skips STT, fires `handle_turn_task` directly |
 | `user.attach` | `ref?`, `kind`, `mime?`, `b64`/`bytes_b64`, `filename?`, `task?` | `_on_user_attach` — delegates to `server.eyes.handle_attach` if importable, else `agent.error` reason `eyes_disabled` |
-| `user.handover` | client → server | `{turn_id, source}` | Hand-over chord (Option+Shift+Tab). Marks the next turn as delegated work and opens the mic. |
-| `handover.received` | server → client | `{turn_id, source}` | Acknowledges `user.handover`; followed by `state.listening`. |
+| `user.handover` | `turn_id?`, `source?` | `_on_user_handover` — hand-over chord (Option+Shift+Tab). Marks the next turn as delegated work and opens the mic; acks with `handover.received` (§4.2) then `state.listening` |
 | `barge` | `turn_id?` | `_on_barge` — cancels the live turn(s), flushes the queue, returns the true dropped count |
 
 An unrecognized frame type gets `agent.error` reason `unknown_frame` (detail: the type string, or `<missing type>`). Undecodable JSON gets reason `bad_frame`.
@@ -100,12 +99,14 @@ An unrecognized frame type gets `agent.error` reason `unknown_frame` (detail: th
 
 | Frame | Fields | Emitted by |
 |---|---|---|
-| `state.idle` / `state.listening` / `state.thinking` / `state.speaking` | — | `ws.py`, `turn.py` |
-| `transcript.user` | `text`, `handover` | after STT, or immediately for `user.text`; `handover` is true when a `user.handover` chord preceded this turn (consumed once) |
-| `agent.stall` | `phrase_id`, `text` | `turn.py` worker path, before the LLM answer starts |
-| `agent.sentence` | `seq`, `text`, `audio_url`, `word_times`, `estimated`, `stream_url`, `chunked` | `speech.py:speak_sentence` — one per spoken sentence |
+| `state.idle` / `state.thinking` / `state.speaking` | — | `ws.py`, `turn.py` |
+| `state.listening` | `barged_turn?`, `dropped?` | `ws.py`. The barge ack carries both: `barged_turn` is the id of the turn that was killed (which is NOT this frame's `turn_id` — a barge mints a fresh one, and the client adopts it), `dropped` is the true count of cancelled tasks. Absent on a plain `user.start` or hand-over ack |
+| `handover.received` | `source` | `ws.py:_on_user_handover` — acknowledges `user.handover`; `state.listening` follows it |
+| `transcript.user` | `text`, `handover`, `partial?`, `final?` | after STT, or immediately for `user.text`; `handover` is true when a `user.handover` chord preceded this turn (consumed once). Under streaming STT the frame carries `final: true`, and `partial: true` frames may precede it when `PET_TALK_STT_PARTIALS=1` — every partial precedes the one final frame, and a client that ignores both fields sees exactly today's wire |
+| `agent.stall` | `phrase_id`, `text` | `turn.py` worker path, before the LLM answer starts — or `stt_stream.emit_early_stall` at end-of-speech under streaming STT, from the latest partial, BEFORE the final transcript exists (§9.2) |
+| `agent.sentence` | `seq`, `text`, `audio_url`, `word_times`, `estimated`, `stream_url`, `chunked` | `speech.py:speak_sentence` — one per spoken sentence. The two STALL sites (`turn.py`'s worker path and `stt_stream.emit_early_stall`) send the SAME field set, with `stream_url: null` and `chunked: false` — a stall is never chunked, and a client must not need a special case to find that out. `seq=0` is the stall's on every path; both answer paths start at `first_seq=1` |
 | `agent.chunk` | `seq`, `chunk_no`, `audio_b64`, `url`, `final` | `speech.py:stream_chunks` — one per synthesis chunk, only on a chunk-capable tyre |
-| `agent.done` | `path`, `sentences`, `dropped?`, `reason?` | end of every turn; `path` is one of `empty`, `control`, `control_cancel`, `worker`, `direct`, `interrupted`, `error`. `path="error"` follows the `agent.error` that named the failure and repeats its `reason`, so a client always sees a turn end |
+| `agent.done` | `path`, `sentences`, `dropped?`, `reason?` | end of every turn; `path` is one of `empty`, `control`, `control_cancel`, `worker`, `direct`, `interrupted`, `error`. `sentences` is on EVERY path, `interrupted` included, where it is always `0` — a barged turn's spoken count is not claimed. `path="error"` follows the `agent.error` that named the failure and repeats its `reason`, so a client always sees a turn end |
 | `agent.error` | `reason`, `detail?`, plus per-call fields (`seq`, `ref`, ...) | any failure, see catalogue in §4.3 |
 | `eyes.received` | `ref`, `kind`, `task`, `bytes` | `eyes.py:handle_attach` as soon as the payload is accepted |
 | `eyes.text` | `ref`, `source`, `kind`, `task`, `engine`, `text`, `truncated` | `eyes.py:handle_attach` after OCR resolves |
@@ -177,6 +178,8 @@ Every reason a running server can actually emit today, grepped from `ProviderErr
 
 **TTS (`providers/tts.py`, `speech.py`, `stall.py`):** `tts_unknown_provider`, `tts_empty_text`, `tts_empty_audio`, `tts_synth_failed`, `tts_request_failed`, `tts_no_key`, `tts_no_token`, `tts_no_job_id`, `tts_job_failed`, `tts_job_timeout`, `tts_download_failed`, `stall_synth_failed`, `tts_chunk_format_mismatch`, `tts_chunk_not_wav`, `tts_chunk_too_large` (one `agent.chunk` over `PET_TALK_CHUNK_MAX_BYTES`, default 512 KiB — refused before it is stored or sent), `tts_cancelled`. Two more are telemetry only — logged by `speak_sentence`, never sent as a frame, because they describe which synthesis path ran rather than a failure: `tts_no_chunk_support`, `tts_chunking_disabled`. `stall_warm_disabled` / `stall_warm_skipped` / `stall_warm_failed` are the same kind of record for the startup pre-synth.
 
+**Streaming STT (`stt_stream.py`, `ws.py` — all logged, not sent as frames; a lost partial is an optimization lost, never a turn lost):** `stt_stream_disabled` (the default; says nothing and is not logged), `stt_stream_unsupported_provider` (`PET_TALK_STT_STREAM=1` on a tyre whose `supports_streaming` is `False` — refused by name, never downgraded), `stt_stream_off` (named once per SOCKET, not per chunk), `stt_stream_started`, `stt_partial_failed`, `stt_partial_callback_failed`, `stt_stream_cancelled` (`reason=barged` — a barge cancels the stream session as well as the turn), `superseded_by_new_turn`, `stt_provider_swapped_mid_utterance`, `stt_stream_inflight_wait_expired`, `stt_stream_no_partial` (fell back to the whole-utterance pass, by name), `stt_stream_len_mismatch` (the caller's `pcm_b64` is a different length from the stream's buffer, so `_partial_offset` is not a valid seam — the whole utterance is decoded instead), `stt_stream_early_stall_skipped` (`reason=no_partial` / `routed_direct`), `stt_stream_early_stall_abandoned` (`reason=barged_during_stall` — a barge landed during the filler's synth, so no filler is sent), `stt_stream_empty_final`, `stt_stream_stop_abandoned` (`reason=barged_before_finalize` / `barged_during_finalize`), `stt_stream_stop_failed` (the streaming path broke BEFORE a turn was started; the whole-utterance path runs), `stt_stream_stop_failed_after_commit` (it broke AFTER — the failure re-raises rather than starting a second turn for one utterance, and surfaces as `frame_handler_failed`).
+
 **SpeakQueue (`speak_queue.py`):** `queue_closed`, `queue_no_spoken_sentence`, `queue_bad_word_idx`, `queue_close_failed`.
 
 **Persona (`persona.py`, `routes_http.py`, `turn.py`):** `persona_unloadable`, `persona_no_name`, `persona_save_failed`, `persona_protected`, `persona_no_stalls`, `unknown_persona`.
@@ -201,10 +204,28 @@ Every provider is a config swap: `STT_PROVIDER` / `LLM_PROVIDER` / `TTS_PROVIDER
 
 ```
 STTProvider.transcribe(pcm16_bytes: bytes, sample_rate: int = 16000) -> str
+STTProvider.supports_streaming: bool = False   # class attribute, not a method
 LLMProvider.route(text: str) -> "stall" | "answer"     # deterministic keyword routing, no LLM call
 LLMProvider.stream(messages: list[dict]) -> AsyncIterator[str]   # yields whole sentences
 TTSProvider.synth(text: str, voice: str, speed: float) -> tuple[bytes, list[dict]]   # (wav_bytes, word_times)
 ```
+
+`supports_streaming` says whether a tyre can be called repeatedly on a growing
+prefix of ONE utterance cheaply enough to be worth it. `server/stt_stream.py`
+reads that flag and nothing else — it never infers capability from a class name,
+and `PET_TALK_STT_STREAM=1` on a tyre that says `False` is refused by name
+(`stt_stream_unsupported_provider`), never quietly downgraded. Today:
+
+| tyre | `supports_streaming` | why |
+|---|---|---|
+| `stub`, `faster-whisper`, `whisper-local` | `true` | in-process, model loaded once |
+| `groq`, `deepgram`, `openai`, `sensevoice` | `false` | one HTTPS round trip per window, billed per call |
+| `mlx` | `false` | reloads the weights on every call (§10) |
+| `whisperkit` | `false` | a process spawn plus a model load per window |
+
+Deepgram's real streaming socket would belong behind this flag instead of
+repeated POSTs; it is deliberately out of scope (2026-09-12), which fixed the
+local default first.
 
 One optional async method, on tyres that can stream. It is deliberately NOT on
 the ABC: a backend that can only return a finished file stays legal rather than
@@ -265,6 +286,8 @@ All three are gathered even on failure (`return_exceptions=True`); a failed look
 
 `server/eyes.py`. A client attaches an image/screenshot/PDF over the existing `/ws` socket (`user.attach`); the server OCRs it locally and injects `[eyes:<ref>:<kind>|<task>] <text>` into the next turn's context. No pixels or vision tokens leave the machine.
 
+**Context injection (fixed this pass, 2026-09-12).** `EyesProvider.context_tag` had existed since the lane landed but nothing called it — OCR text was read and then dropped before the prompt was built. Now: `handle_attach` queues the tagged line on the provider (`EyesProvider.queue_context`, capped independently by `PET_TALK_EYES_CONTEXT_MAX_CHARS`, default 1200 — separate from `EYES_CHAR_CAP`, which only bounds the outgoing `eyes.text` wire frame) as soon as OCR resolves. `server/turn.py::handle_turn` drains that queue once per turn (`EyesProvider.take_context`) and folds it into the system prompt as an `[EYES CONTEXT]` block (`server/persona_runtime.py::build_system_prompt`'s `eyes_context` param) — so an attachment's text reaches exactly the next turn and never a later one; `TurnLog.mark("eyes_ocr_ms")` records the checkpoint on any turn that carried pending eyes context. Tested hermetically in `qa/test_eyes.py` (`TestContextQueue`, `TestEyesContextReachesTheTurnPrompt`) with the stub OCR engine and a capturing stub LLM; a `PET_TALK_REAL_ENGINE=1`-gated variant does the same against the real `zrv` CLI on the PDF fixture.
+
 **Engines that actually exist** (`make_engine`, `EyesConfig.engine`, default `zrv`):
 - `zrv` — shells out to the real `zrv` CLI. `zrv`'s own `--engine` ids (verified against `zrv --help` 2026-09-12): `apple-vision`, `apple-fm`, `local-vlm`, `cloud-vlm`, `tesseract`. `apple-vision` is zrv's local default on Apple silicon and is **OCR-only** — it refuses `--task describe`.
 - `stub` — deterministic canned text, used by `qa/test_eyes.py`; never touches the filesystem or a subprocess.
@@ -273,7 +296,9 @@ An unknown engine name fails closed (`make_engine` raises `EyesError(eyes_disabl
 
 **Describe-mode measurement (2026-09-12):** the only local engine that can actually run `--task describe` is `apple-fm` (`apple-vision` refuses it in ~0.2s with a clean error). `apple-fm` was measured at **101.9s for one 2280×600 PNG** — 12x the 8s `EYES_TIMEOUT_S` default and ~68x an earlier 1.5s target. Because of this, **`describe` ships disabled by default**: `EyesConfig.describe_engine_pin` is unset, so a `describe` task hits `apple-vision`'s fast, honest refusal instead of a 100+ second hang. Set `EYES_DESCRIBE_ENGINE=apple-fm` and raise `EYES_TIMEOUT_S` well past 100s if you want describe mode anyway. `EYES_DEFAULT_TASK` and persona frontmatter `eyes_task`/`eyes_default` both default to `transcribe`.
 
-Other knobs: `EYES_MAX_BYTES` (8MB decoded cap), `EYES_CHAR_CAP` (4000 chars before `truncated:true`), `EYES_TIMEOUT_S` (8.0s OCR wall clock), `EYES_ZRV_BIN`, `EYES_SCRATCH_DIR` (system temp dir, never inside the repo). A PDF is always `transcribe` (`task_for`), capped at `pdf_max_pages=5`.
+**Describe over the LiteLLM proxy — `fleet/vision` (stub, 2026-09-12).** The intended long-term describe route is `cloud-vlm` through the house LiteLLM proxy (`server/providers/llm.py`'s `LITELLM_BASE_URL`), once the router ships a `fleet/vision` alias — not shipped yet. `EYES_DESCRIBE_ENGINE=fleet/vision` resolves today through `resolve_fleet_vision_alias()`, which reads `FLEET_VISION_MODEL`: unset (the default), it fails closed as `eyes_disabled` naming `FLEET_VISION_MODEL`, same as any other unset describe pin; set, it substitutes that value as the zrv `--engine` pin (expected `cloud-vlm` once the router exists). Tested hermetically in `qa/test_eyes.py::TestFleetVisionAlias`.
+
+Other knobs: `EYES_MAX_BYTES` (8MB decoded cap), `EYES_CHAR_CAP` (4000 chars before `truncated:true` on the `eyes.text` frame), `PET_TALK_EYES_CONTEXT_MAX_CHARS` (1200 chars before the queued *prompt* line truncates, independent of `EYES_CHAR_CAP`), `EYES_TIMEOUT_S` (8.0s OCR wall clock), `EYES_ZRV_BIN`, `EYES_SCRATCH_DIR` (system temp dir, never inside the repo). A PDF is always `transcribe` (`task_for`), capped at `pdf_max_pages=5`.
 
 ## 8a. Receipts lane (Archie / AgentWorth)
 
@@ -353,7 +378,80 @@ Source of truth: `qa/budgets.json`.
 | `llm_ms` | 800 |
 | `tts_ms` | 200 |
 
-### 9.1 MEASURED (2026-09-12d, quiet re-measure, load ~7)
+### 9.1 MEASURED (2026-09-12f, streaming-STT default decision, turn-level)
+
+**What this pass was for.** §9.2's `stall_sent` hook has since landed in
+`server/turn.py` (`handle_turn_task`/`handle_turn` take `stall_sent: bool =
+False`, guard is `if stall_text and not stall_sent:`). That was the one
+missing piece §9.2 named for a turn-level re-measure of the early-stall path,
+so this pass ran the real server (Kokoro + faster-whisper + the LiteLLM
+proxy) both ways, `PET_TALK_STT_STREAM=0` and `=1`, to decide the default.
+
+**Machine note.** The bounded 10-minute wait for 1-min load under 6 never
+succeeded — load swung from ~7 up to a **peak 1-min of 435** (six-plus other
+sessions building/running on this box) and was still ramping down when the
+wait timed out at 10.27. Measurements below were taken as load fell through
+the 6-14 range; every run's load is quoted next to its numbers, per
+"never soften a budget" — this is not the quiet machine either.
+
+**Turn-level, `APP_PORT=8089 python3 qa/latency.py`, N=5, x3 per mode, median
+kept by `stall_ms` p50:**
+
+| mode | run loads (1-min) | kept run load | `stall_ms` p50 | p95 | budget | result |
+|---|---|---|---|---|---|---|
+| `PET_TALK_STT_STREAM=0` | 8.80, 9.09, 8.98 (run 3 retried once after a `ws_send_disconnected` blip) | 9.09 | **223.1** | 367.0 | 400 | **PASS** |
+| `PET_TALK_STT_STREAM=1` | 12.82, 12.28, 11.69 (run 3 retried once, same reason) | 12.82 | **194.3** | 919.4 | 400 | **FAIL** (p95 only) |
+
+**The central finding: this harness cannot exercise the early-stall path at
+all, in either mode.** `qa/latency.py` and `qa/live_ws_turn.py` both hand the
+*entire* utterance to the server in one `user.stop` message — neither ever
+sends a `user.chunk` frame. `server/ws.py`'s `_stream_stop` only serves
+`user.stop` "from the turn's stream session, **if it has one**", and a stream
+session is only created by `_on_user_chunk` when a `user.chunk` frame
+arrives. With none sent, `_stream_stop` returns `False` every time and every
+turn falls through to the identical whole-utterance path — confirmed by
+`grep -c stream` on the `PET_TALK_STT_STREAM=1` server log (**0** matches)
+and by `server/turns.jsonl`: every turn in both passes reads `"path":
+"worker"`, never `"path": "stream"`. This is why the two modes' `stall_ms`
+numbers are statistically indistinguishable (223.1ms vs 194.3ms, well within
+this run-to-run noise band) — **the flag made no observable difference
+because the mechanism it gates was never invoked**, not because the early
+stall doesn't work (§9.2 already proved it does, component-level, with a
+harness that does send `user.chunk`).
+
+**`qa/live_ws_turn.py`** (also whole-utterance in one `user.stop`, same
+limitation): time-to-stall 180.2ms streaming=0, 196.5ms streaming=1, both
+PASS (budget 400) — barge ack 0.7-0.8ms both, both PASS.
+
+**`qa/test_real_engine_e2e.py` (`PET_TALK_REAL_ENGINE=1`): 3/3 pass, both
+modes.** Kokoro synthesized 278,444 bytes of valid RIFF both times;
+`/transcribe` read back *"Good morning. Donna Paulson here. Executive
+Secretary Mode is fully operational."* both times; a live `/ws` turn drove
+Donna to a playable WAV both times (280,844 bytes streaming=0, 228,044 bytes
+streaming=1 — text differed slightly turn to turn, as the LLM is not
+seeded, but both were coherent, on-topic answers).
+
+**Final-transcript comparison, same clip, streaming vs not** (N=3 each,
+`qa/fixtures/weather_turn.wav`, captured via the `transcript.user` frame):
+transcript text was **identical in all 6 turns** — `"What is the weather
+today?"` — zero word-error difference. This is expected given the finding
+above (both modes ran the identical whole-utterance decode) and is not
+evidence either way about the streaming path's accuracy cost; that question
+is still open per §9.2's finalize-seam note.
+
+**Decision (§9.2 follow-up): `PET_TALK_STT_STREAM` stays `0`.** Not because
+streaming failed a budget this pass — it was never actually driven — but
+because this pass cannot honestly claim to have proven it, and flipping a
+default on a measurement that didn't exercise the code path would be a fake
+green. The real gap is now named precisely: a turn-level harness that speaks
+`user.chunk` frames (pacing PCM the way `cli/client.py` does, the way
+`qa/test_stt_streaming.py` already does at component level) against the live
+Kokoro+faster-whisper+LiteLLM server is what's still missing before this
+default can be revisited. §9.2's component-level evidence (early-stall
+`stall_ms` 0.2-0.8ms p50 even at load 88) stands unchanged and is still the
+only real evidence the mechanism works.
+
+### 9.1-history: MEASURED (2026-09-12d, quiet re-measure, load ~7)
 
 **The 12c "quiet re-measure owed" caveat, followed up — only partially resolved.**
 `uptime` read 3.93 (1-min) before this pass started. By the time the turn-level
@@ -504,11 +602,105 @@ it. Its headline numbers: `tts_ms` 236.6 p50 **FAIL**, `stall_ms` 245.5 **PASS**
 `first_sentence_ms` 245.5 **PASS**, `stt_ms` 143.4 **PASS**, cold first turn
 1455.3 **FAIL**.
 
-### 9.2 Acceptance gates and their proof
+### 9.2 MEASURED: streaming STT vs the whole-utterance pass (2026-09-12e, load 42-88)
+
+**What this measures.** 9.1 named the `stall_ms` breach precisely: of 642.2ms
+p50, `stt` was 590.0ms — one `faster-whisper` pass over the WHOLE utterance,
+started only once `user.stop` arrived, with the stall landing 49.3ms behind it.
+`server/stt_stream.py` changes the shape: `user.chunk` frames feed a rolling
+window that decodes the prefix in a worker thread every
+`PET_TALK_STT_STREAM_MS` (default 700) of new audio, so at end-of-speech a
+partial transcript already exists, `agent.stall` goes out from it, and only the
+TAIL is decoded to finalize.
+
+**Harness and its limits, stated up front.** `qa/test_stt_streaming.py`
+(`PET_TALK_REAL_ENGINE=1`), component-level: the real `faster-whisper tiny.en`
+tyre driven through the real `_on_user_chunk` / `_stream_stop` handlers with
+20ms chunks paced in REAL TIME (what `cli/client.py` sends), stub TTS and stub
+LLM. This is **not** a turn-level re-measure of 9.1 — it does not include
+Kokoro or the proxy, so its "streaming OFF" column is NOT comparable to 9.1's
+642.2ms. What it compares is the one stage this lane changed, on one clock, in
+the same process, back to back. Clip: `qa/fixtures/weather_turn.wav` repeated to
+**2.88s** (the 1.44s fixture alone is shorter than two windows). N=5 per mode
+plus a discarded warm-up turn, five runs kept below.
+
+**The machine was far from quiet: 1-min load 42 to 88**, against ~7 for the 9.1
+pass — six other lanes were building in this worktree. That makes the absolute
+numbers a ceiling, and it makes the ON/OFF comparison *more* informative, not
+less, because contention is exactly what 9.1 found this stage cannot survive.
+
+| mode | `stall_ms` p50 | `stall_ms` p95 | budget | result |
+|---|---|---|---|---|
+| streaming ON, **early stall** | **0.2 - 0.8** | **8.8 - 39.7** | 400 | **PASS**, every run |
+| streaming ON, tail-only (no early stall) | 537.9 - 808.8 | 1104.9 - 1313.4 | 400 | **FAIL** |
+| streaming OFF (today's shape) | 209.2 - 542.1 | 426.9 - 1563.6 | 400 | **FAIL** |
+
+Five runs, at 1-min load 42.3 / 52.4 / 53.4 / 74.3 / 88.2. Raw per-turn samples
+are printed by the test and not summarised away.
+
+**What the numbers say, including what they do not say.**
+
+* **The early stall is the whole fix, and it is structural.** With
+  `agent.stall` emitted from the partial before finalization, `stall_ms` stops
+  being an STT number at all — 0.2-0.8ms p50 is a warm cache lookup and a frame
+  send. It PASSED at load 88, which no amount of tuning the old shape has ever
+  done at load 7.
+* **Tail-only streaming is NOT a win — it is a regression at load.** Left with
+  `turn.py` owning the stall, the stall still waits for the transcript, and the
+  transcript now waits on `PET_TALK_STT_STREAM_WAIT_MS` (1200ms) for an
+  in-flight prefix decode: 537.9-808.8ms p50, worse than streaming off. At
+  load 50+ a prefix decode takes longer than the 700ms window, so one is almost
+  always in flight at `user.stop`. Dropping the wait instead puts two
+  `faster-whisper` decodes on the CPU at once and produced a 2534ms outlier when
+  measured that way. **So streaming without the early stall must stay off**, and
+  `PET_TALK_STT_STREAM` defaults to `0` for exactly that reason.
+* **The final transcript is not improved.** 411.9-486.8ms p50 with streaming on
+  against 362.5-541.8ms off, with fatter tails (up to 2136ms) from the in-flight
+  wait. Streaming buys the STALL off the critical path; it does not make the
+  ANSWER start sooner. Any claim that it does would be a fake green.
+* **`stall_ms` in 9.1 is not yet re-measured turn-level.** ~~That needs a live
+  server pass with Kokoro and the proxy, on a machine at load ~7, and it needs
+  the one-line hook below.~~ **Follow-up 2026-09-12f (§9.1):** the hook landed
+  and a live-server pass ran both modes at load 9-13, but turn-level
+  `stall_ms` is **still NOT MEASURED** for the streaming path — one more gap
+  turned up: `qa/latency.py` and `qa/live_ws_turn.py` both hand the whole
+  utterance to one `user.stop` message and never send `user.chunk`, so
+  `_stream_stop` never gets a stream session to serve and every turn falls
+  through to the whole-utterance path regardless of the flag. A harness that
+  paces `user.chunk` frames against the live server (the way this file's own
+  `qa/test_stt_streaming.py` already does component-level) is what's still
+  needed.
+* **`STT_PROVIDER=whisperkit` is still NOT MEASURED.** `whisperkit-cli` is not
+  on PATH and no CoreML model is on disk, so nothing has ever run on the Neural
+  Engine here; the model plus CLI is far over the 200MB this lane was allowed to
+  download. Its latency remains unknown — the belief that the ANE must be
+  fastest is still a belief. It is also flagged `supports_streaming = False`
+  because it spawns a process and reloads its model per call.
+
+**The one line this needed from `server/turn.py` has landed** (2026-09-12f):
+`handle_turn_task` and `handle_turn` take `stall_sent: bool = False`, threaded
+through `_turn_pipeline`, and the worker path's guard is
+`if stall_text and not stall_sent:`. `stt_stream.turn_accepts_stall_sent()`
+reads the live signature and now returns `True`, so the early stall is emitted
+and only one `agent.stall` reaches the person. The measured numbers above were
+taken with that shape pinned by the test harness and are unchanged by the hook
+landing. Streaming STT still ships OFF by default — see §10 for why that is a
+measurement, not caution.
+
+**How to reproduce:**
+
+```bash
+PET_TALK_SILENT=1 PET_TALK_REAL_ENGINE=1 STT_PROVIDER=faster-whisper \
+  TTS_PROVIDER=stub LLM_PROVIDER=stub \
+  ~/miniconda3/envs/local-ml-py311/bin/python \
+  qa/test_stt_streaming.py TestRealEngineStreamingLatency
+```
+
+### 9.3 Acceptance gates and their proof
 
 | Gate | Proven by |
 |---|---|
-| 1. Stall plays ≤400ms after user stops, on a routed question | `qa/latency.py` (`stall_ms` vs budget), `qa/test_turn_lifecycle.py` |
+| 1. Stall plays ≤400ms after user stops, on a routed question | `qa/latency.py` (`stall_ms` vs budget), `qa/test_turn_lifecycle.py`, `qa/test_stt_streaming.py` (§9.2 — PASSES only on the streaming early-stall path; the `stall_sent` hook it needs has landed, but that path still ships OFF by default and turn-level `stall_ms` for it is NOT MEASURED. The whole-utterance path, which is what ships, still FAILS) |
 | 2. Barge-in kills audio ≤100ms and reports the true dropped count | `qa/latency.py` (`barge_ms`), `qa/test_turn_lifecycle.py`, `qa/test_socket_resilience.py` |
 | 3. Worker streams ≥3 sentences behind playing audio without a gap | `qa/test_turn_lifecycle.py` — **partially exercised**: `StubLLM` emits exactly 3 sentences by default, and the queue high-water test uses a 4-sentence variant; there is no fixture that streams a long, unbounded answer to confirm the queue keeps buffering past 4-5 sentences under sustained LLM-faster-than-TTS pressure |
 | 4. Provider swap via config only, zero code change | `qa/test_providers.py`, `qa/test_settings_api.py` |
@@ -516,8 +708,10 @@ it. Its headline numbers: `tts_ms` 236.6 p50 **FAIL**, `stall_ms` 245.5 **PASS**
 
 ## 10. Known gaps
 
+- **Streaming STT ships OFF.** `PET_TALK_STT_STREAM=1` plus the early stall measured `stall_ms` p50 0.2-0.8ms at load 88 (§9.2), and the `stall_sent` hook that path needs has since landed in `server/turn.py` — so the early stall now runs when the flag is on. It still ships off because streaming WITHOUT the early stall measured *worse* than streaming off (537.9-808.8ms p50) and turn-level `stall_ms` for the streaming path is NOT MEASURED (§9.2 follow-up): the default is `0` by measurement, not by caution. The finalize seam (prefix decode + tail decode) is also a real accuracy cost that is not quantified: nothing measures word error rate across the seam, and `PET_TALK_STT_FINAL_FULL=1` is the escape hatch rather than a measured comparison.
+
 - **The speak queue is per-socket**, not per-turn: `Session.queue` is one `SpeakQueue` reused across turns via `reopen()`. Two turns on the same socket can never interleave (the newer one barges the older via `supersede()`), but this means there is exactly one live turn per socket at a time by design, not by accident.
-- **Gate 3 (≥3 gapless sentences) is only partially exercised** — see §9.2. `StubLLM` hardcodes 3 sentences; nothing in `qa/` currently proves the queue keeps buffering ahead past a 4th or 5th sentence under sustained pressure.
+- **Gate 3 (≥3 gapless sentences) is only partially exercised** — see §9.3. `StubLLM` hardcodes 3 sentences; nothing in `qa/` currently proves the queue keeps buffering ahead past a 4th or 5th sentence under sustained pressure.
 - **PDF OCR now has a fixture and coverage (fixed this pass, 2026-09-12).** `qa/fixtures/eyes_sample.pdf` (a hand-built, stdlib-only, single-page real-text PDF) plus `qa/test_eyes.py::TestPdfOcr` — a hermetic path (`StubEngine`, always runs) and a `PET_TALK_REAL_ENGINE=1`-gated path that shells the real `zrv` CLI. Measured: `zrv ocr qa/fixtures/eyes_sample.pdf --task transcribe --json` returns `engine: apple-vision`, exact text match, in ~370ms — `zrv` reads the PDF's real text layer directly rather than rasterizing and OCRing, so there was no OCR noise to account for. `pdf_max_pages=5` (multi-page truncation) is still unexercised — this fixture is one page.
 - **`EYES_DESCRIBE_ENGINE` now fails fast by name when unset (fixed this pass, 2026-09-12).** Previously an unset pin meant `describe` fell through to `zrv`'s own default engine (`apple-vision`, which refuses `--task describe` with its own unrelated error) instead of a clean `eyes_disabled`. `EyesProvider.resolve()` now raises `eyes_disabled` with detail `describe_engine_unset:EYES_DESCRIBE_ENGINE` before touching any engine when `task == "describe"` and `describe_engine_pin` is unset — tested hermetically in `qa/test_eyes.py::TestDescribeEngineGate` (unset fails closed naming the var; set routes through; transcribe is unaffected; an explicit `task: describe` on a PDF still hits the gate since a frame's explicit task wins over the PDF default per `task_for`'s own precedence).
 - **Kokoro word timings are estimated, not measured.** `KokoroSpacePilotTTS` does not appear to report real per-word timestamps from the daemon; `word_times` for Kokoro-synthesized audio comes from `estimate_word_times()` (uniform-per-word or char-length-weighted), always carrying `estimated: true`. Any UI that highlights the currently-spoken word against Kokoro audio is highlighting a guess, not a measurement.
