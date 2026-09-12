@@ -3,8 +3,10 @@
 
 What this proves (no network, no daemon, no audio device, no sound):
 
-1. Barge during a slow TTS cancels the in-flight turn in under 100ms and the
-   ack reports the TRUE dropped count (>= 2).
+1. Barge through the REAL ``Session`` handlers (``_on_user_text`` then
+   ``_on_barge``) with a slow TTS: the ack arrives in under 100ms and
+   reports the TRUE dropped count (>= 2). A second, separately named test
+   covers the task-cancel + queue-flush mechanics on their own.
 2. The LLM producer buffers at least 3 sentences ahead of TTS when it is the
    faster side (TECH-SPEC section 9, gate 3).
 3. An unknown persona name is an error (``unknown_persona``), never a blank
@@ -149,16 +151,109 @@ TEST_PERSONA = Persona(
 # ------------------------------------------------------------- barge/queue ---
 
 
+def live_queue(session, turn_id: str) -> SpeakQueue:
+    """The SpeakQueue a live turn is speaking through.
+
+    Per-turn queues are the shape; ``session.queue`` is the older per-socket
+    one. The test asks the session rather than assuming which it is.
+    """
+    per_turn = getattr(session, "turn_queues", None)
+    if isinstance(per_turn, dict) and turn_id in per_turn:
+        return per_turn[turn_id]
+    return session.queue
+
+
+async def run_until_buffered(get_queue, target: int, timeout_s: float = 2.0) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        queue = get_queue()
+        if queue is not None and queue.high_water >= target:
+            return True
+        await asyncio.sleep(0.005)
+    return False
+
+
+class TestBargeThroughTheRealSession(unittest.IsolatedAsyncioTestCase):
+    """Barge via the REAL ``Session`` handlers — no inlined re-implementation.
+
+    This test used to cancel the task and flush the queue itself, in the same
+    order ws.py happens to use. That proves asyncio works, not that the
+    server barges: the ordering bug in Session.barge would have passed.
+    """
+
+    async def _session(self, providers):
+        from server import ws as ws_module
+
+        session = ws_module.Session(ws=fake_ws())
+        old_snapshot = ws_module.runtime.snapshot_under_lock
+
+        async def _snapshot():
+            return providers
+
+        ws_module.runtime.snapshot_under_lock = _snapshot
+        self.addCleanup(
+            setattr, ws_module.runtime, "snapshot_under_lock", old_snapshot
+        )
+        return session, ws_module
+
+    async def test_session_barge_acks_within_budget_and_drops_the_buffer(self):
+        providers = ProviderSet(
+            stt=StubSTT(),
+            llm=FastLLM(
+                [
+                    "First sentence of the answer.",
+                    "Second sentence of the answer.",
+                    "Third sentence of the answer.",
+                    "Fourth sentence of the answer.",
+                ]
+            ),
+            tts=SlowTTS(delay_s=0.4),
+        )
+        session, ws_module = await self._session(providers)
+        turn_id = "t-session-barge"
+        await ws_module._on_user_text(
+            session,
+            {"type": "user.text", "turn_id": turn_id, "text": "research the weather"},
+        )
+        buffered = await run_until_buffered(
+            lambda: live_queue(session, turn_id), BUFFER_AHEAD_TARGET
+        )
+        self.assertTrue(buffered, "producer never buffered ahead of the slow TTS")
+
+        started = time.monotonic()
+        await ws_module._on_barge(session, {"type": "barge", "turn_id": turn_id})
+        elapsed = time.monotonic() - started
+
+        acks = [
+            f for f in sent_frames(session.ws)
+            if f.get("type") == "state.listening" and "barged_turn" in f
+        ]
+        self.assertTrue(acks, "no barge ack frame")
+        ack = acks[-1]
+        self.assertEqual(ack.get("barged_turn"), turn_id)
+        self.assertGreaterEqual(
+            ack.get("dropped"), 2, f"barge under-reported dropped: {ack}"
+        )
+        self.assertLess(
+            elapsed,
+            BARGE_BUDGET_S,
+            f"barge ack took {elapsed * 1000:.1f}ms, budget is "
+            f"{BARGE_BUDGET_S * 1000:.0f}ms",
+        )
+        self.assertEqual(session.last_barge_cancelled, 1)
+        await session.shutdown()
+        print(
+            f"    session barge: ack in {elapsed * 1000:.1f}ms, "
+            f"dropped={ack.get('dropped')}"
+        )
+
+
 class TestBargeCancelsInFlightTurn(unittest.IsolatedAsyncioTestCase):
     async def _run_until_buffered(self, queue: SpeakQueue, target: int, timeout_s: float = 2.0):
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
-            if queue.high_water >= target:
-                return True
-            await asyncio.sleep(0.005)
-        return False
+        return await run_until_buffered(lambda: queue, target, timeout_s)
 
-    async def test_barge_cancels_within_budget_and_counts_dropped(self):
+    async def test_task_cancel_then_queue_flush_counts_dropped(self):
+        """Queue/task mechanics only — the barge path itself is the test above."""
         ws = fake_ws()
         tts = SlowTTS(delay_s=0.4)
         providers = ProviderSet(
