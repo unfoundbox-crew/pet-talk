@@ -3,7 +3,8 @@
 Identity comes from the ACTIVE persona and nowhere else. There is no baked-in
 character: a persona with an ``instruction_spec`` supplies its own prompt, and
 one without gets a neutral prompt built from its own ``persona.md`` fields. An
-unknown persona name is an error, never a silent substitution.
+unknown persona name is an error, never a silent substitution. Either way the
+prompt ends with :data:`VOICE_RULES` — the Noun Rule belongs to the product.
 """
 from __future__ import annotations
 
@@ -172,7 +173,8 @@ def build_system_prompt(
     A persona carrying an ``instruction_spec`` supplies its own prompt
     verbatim. One without it gets a neutral prompt derived from its own
     ``persona.md`` fields (name, tone body) — no other persona's identity
-    ever leaks in.
+    ever leaks in. BOTH shapes end with :data:`VOICE_RULES`: the Noun Rule is
+    the product's, not a persona's to opt out of.
 
     ``handover`` adds :data:`HANDOVER_LINE`, and nothing else — a hand-over
     changes what the turn is for, not who the persona is. It reaches both
@@ -189,9 +191,14 @@ def build_system_prompt(
     eyes_block = fence_ocr(eyes_context)
     handover_block = HANDOVER_LINE if handover else ""
     if spec:
+        # VOICE_RULES is appended here too, and last. A persona that writes its
+        # own prompt used to get no voice rules at all — no 45-word ceiling, no
+        # subject requirement — while server/speech.py went on refusing its
+        # over-long sentences for a rule nobody had told it. The spec still
+        # leads and is still verbatim; the rules follow it.
         return "\n\n".join(
             part
-            for part in (spec, grounding_block, eyes_block, handover_block)
+            for part in (spec, grounding_block, eyes_block, handover_block, VOICE_RULES)
             if part
         )
 

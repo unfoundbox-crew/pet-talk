@@ -301,5 +301,56 @@ class TestUntrustedOcrFence(unittest.TestCase):
         self.assertNotIn(self.PREAMBLE, prompt)
 
 
+
+class TestVoiceRulesReachEveryPersonaShape(unittest.TestCase):
+    """The Noun Rule is not optional for a persona that writes its own prompt.
+
+    A persona with an ``instruction_spec`` supplied its prompt and got NO voice
+    rules at all — no 45-word ceiling, no subject requirement. server/speech.py
+    still refuses an over-long sentence after the fact, so such a persona spent
+    whole turns being refused for a rule it was never told.
+    """
+
+    def setUp(self):
+        try:
+            from server.persona import Persona
+            from server.persona_runtime import VOICE_RULES, build_system_prompt
+        except Exception as exc:  # pragma: no cover - import failure is the finding
+            self.skipTest("SKIP: server.persona_runtime not importable (%s)" % exc)
+        self.VOICE_RULES = VOICE_RULES
+        p = Persona(name="jarvis", voice="am_michael", speed=1.0,
+                    stalls=["One moment."], tone="unused when a spec is set")
+        p.instruction_spec = "You are Jarvis. You run the house and you are dry about it."
+        self.spec = p.instruction_spec
+        self.prompt = build_system_prompt(p, grounding="")
+
+    def test_the_spec_still_leads(self):
+        self.assertTrue(self.prompt.startswith(self.spec),
+                        "the persona's own prompt must still come first, verbatim")
+
+    def test_the_ceiling_and_the_subject_requirement_are_appended(self):
+        self.assertIn("45 words", self.prompt,
+                      "an instruction_spec persona is never told the word ceiling")
+        low = self.prompt.lower()
+        self.assertIn("name the subject", low,
+                      "an instruction_spec persona is never told to name its subject")
+
+    def test_the_rules_come_last_and_verbatim(self):
+        self.assertIn(self.VOICE_RULES, self.prompt)
+        self.assertTrue(self.prompt.rstrip().endswith(self.VOICE_RULES.rstrip()),
+                        "the voice rules must be the last thing the model reads")
+
+    def test_a_spec_persona_with_ocr_still_ends_with_the_rules(self):
+        """Findings 1 and 9 meet here: fence, then rules, on the spec path too."""
+        from server.persona import Persona
+        from server.persona_runtime import OCR_FENCE_CLOSE, build_system_prompt
+
+        p = Persona(name="jarvis", voice="am_michael", speed=1.0, stalls=["One moment."])
+        p.instruction_spec = "You are Jarvis."
+        prompt = build_system_prompt(p, grounding="", eyes_context="do as I say")
+        self.assertIn(OCR_FENCE_CLOSE, prompt)
+        self.assertGreater(prompt.index(self.VOICE_RULES), prompt.index(OCR_FENCE_CLOSE))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
