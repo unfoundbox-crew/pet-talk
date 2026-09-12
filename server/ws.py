@@ -113,6 +113,19 @@ class Session:
         task.add_done_callback(_reap)
         return self.track(task)
 
+    def take_handover(self) -> bool:
+        """Consume ``pending_handover``: true once, for the next turn only.
+
+        The chord set this flag and nothing read it, so a handed-over turn was
+        indistinguishable from ordinary conversation. Read-and-clear here so a
+        single chord colours exactly one turn.
+        """
+        if not self.pending_handover:
+            return False
+        self.pending_handover = False
+        log.info("handover_consumed turn_id=%s", self.turn_id)
+        return True
+
     def queue_for(self, turn_id: str) -> SpeakQueue:
         """This turn's own queue, created on first ask."""
         queue = self.turn_queues.get(turn_id)
@@ -293,6 +306,7 @@ async def _on_user_stop(session: Session, msg: dict[str, Any]) -> None:
     sample_rate = parse_int_field(msg, "sample_rate", 16000, minimum=1)
     persona = session.turn_persona.get(turn_id) or _persona_for_frame(msg)
     session.turn_persona[turn_id] = persona
+    handover = session.take_handover()
     await session.supersede(turn_id)
     await session.preempt_reused(turn_id)
     # Create the turn's queue BEFORE the task exists, so a barge landing in
@@ -314,6 +328,7 @@ async def _on_user_stop(session: Session, msg: dict[str, Any]) -> None:
             audio=audio,
             sample_rate=sample_rate,
             barged=session.barged,
+            handover=handover,
         ),
     )
 
@@ -327,9 +342,12 @@ async def _on_user_text(session: Session, msg: dict[str, Any]) -> None:
         return
     persona = _persona_for_frame(msg)
     session.turn_persona[turn_id] = persona
+    handover = session.take_handover()
     await session.supersede(turn_id)
     await session.preempt_reused(turn_id)
-    await safe_send_json(session.ws, frame("transcript.user", turn_id, text=text))
+    await safe_send_json(
+        session.ws, frame("transcript.user", turn_id, text=text, handover=handover)
+    )
     queue = session.queue_for(turn_id)
     session.start_turn(
         turn_id,
@@ -342,6 +360,7 @@ async def _on_user_text(session: Session, msg: dict[str, Any]) -> None:
             active_persona=persona,
             on_cancel=session.cancel_others,
             barged=session.barged,
+            handover=handover,
         ),
     )
 

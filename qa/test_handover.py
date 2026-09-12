@@ -16,6 +16,73 @@ from server import app as server_module  # noqa: E402
 from server import auth  # noqa: E402
 
 
+class TestHandoverIsConsumedByTheNextTurn(unittest.TestCase):
+    """`Session.pending_handover` was write-only: set by the chord, read by
+    nobody, so a handed-over turn was indistinguishable from a normal one."""
+
+    def setUp(self):
+        self.client = TestClient(server_module.app)
+        self.token = auth.studio_token()
+
+    def test_the_next_user_text_carries_handover_and_clears_the_flag(self):
+        from server import ws as ws_module
+
+        with self.client.websocket_connect(f"/ws?token={self.token}") as ws:
+            ws.receive_json()  # state.idle
+            ws.send_json({"type": "user.handover", "turn_id": "t-ho-3", "source": "hotkey"})
+            ws.receive_json()  # handover.received
+            ws.receive_json()  # state.listening
+
+            ws.send_json({"type": "user.text", "turn_id": "t-ho-3b", "text": "ship the fix"})
+            transcript = ws.receive_json()
+            self.assertEqual(transcript["type"], "transcript.user")
+            self.assertTrue(
+                transcript.get("handover"),
+                f"transcript.user does not carry handover: {transcript}",
+            )
+            for _ in range(24):
+                if ws.receive_json().get("type") == "agent.done":
+                    break
+
+            # A second turn is ordinary work again — the flag is consumed once.
+            ws.send_json({"type": "user.text", "turn_id": "t-ho-3c", "text": "and again"})
+            second = ws.receive_json()
+            self.assertEqual(second["type"], "transcript.user")
+            self.assertFalse(
+                second.get("handover"),
+                f"handover leaked into the next turn: {second}",
+            )
+            for _ in range(24):
+                if ws.receive_json().get("type") == "agent.done":
+                    break
+
+    def test_a_handover_turn_gets_the_delegated_work_line_in_its_prompt(self):
+        from server.persona import Persona
+        from server.persona_runtime import HANDOVER_LINE, build_system_prompt
+
+        p = Persona(
+            name="default", voice="af_heart", speed=1.0,
+            stalls=["One moment."], tone="Plain and brief.",
+        )
+        plain = build_system_prompt(p, "")
+        handed = build_system_prompt(p, "", handover=True)
+        self.assertNotIn(HANDOVER_LINE, plain)
+        self.assertIn(HANDOVER_LINE, handed)
+        self.assertIn("state what you will do", HANDOVER_LINE)
+        self.assertIn("confirm the target file or repo", HANDOVER_LINE)
+
+    def test_the_line_also_reaches_a_persona_with_its_own_instruction_spec(self):
+        from server.persona import Persona
+        from server.persona_runtime import HANDOVER_LINE, build_system_prompt
+
+        p = Persona(
+            name="default", voice="af_heart", speed=1.0,
+            stalls=["One moment."], tone="Plain.",
+        )
+        p.instruction_spec = "You are a very specific character."
+        self.assertIn(HANDOVER_LINE, build_system_prompt(p, "", handover=True))
+
+
 class TestHandoverFrame(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(server_module.app)

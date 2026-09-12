@@ -92,22 +92,42 @@ VOICE_RULES = (
 )
 
 
-def build_system_prompt(p: Persona, grounding: str) -> str:
+#: The one line a handed-over turn adds. The chord (Option+Shift+Tab) means
+#: "this is delegated work, not conversation", so the reply has to name the
+#: work and its target rather than chatting back.
+HANDOVER_LINE = (
+    "The user is handing this over as delegated work: state what you will do "
+    "and confirm the target file or repo"
+)
+
+
+def build_system_prompt(p: Persona, grounding: str, handover: bool = False) -> str:
     """Build the system prompt from the ACTIVE persona only.
 
     A persona carrying an ``instruction_spec`` supplies its own prompt
     verbatim. One without it gets a neutral prompt derived from its own
     ``persona.md`` fields (name, tone body) — no other persona's identity
     ever leaks in.
+
+    ``handover`` adds :data:`HANDOVER_LINE`, and nothing else — a hand-over
+    changes what the turn is for, not who the persona is. It reaches both
+    prompt shapes, including a persona with its own ``instruction_spec``.
     """
     spec = str(getattr(p, "instruction_spec", "") or "").strip()
     grounding_block = f"[ACTIVE SYSTEM GROUNDING]\n{grounding}" if grounding else ""
+    handover_block = HANDOVER_LINE if handover else ""
     if spec:
-        return "\n\n".join(part for part in (spec, grounding_block) if part)
+        return "\n\n".join(
+            part for part in (spec, grounding_block, handover_block) if part
+        )
 
     name = (getattr(p, "name", "") or "the assistant").strip()
     tone = str(getattr(p, "tone", "") or "").strip()
     identity = f"You are {name}." if name else ""
-    parts = [part for part in (identity, tone, grounding_block, VOICE_RULES) if part]
+    parts = [
+        part
+        for part in (identity, tone, grounding_block, handover_block, VOICE_RULES)
+        if part
+    ]
     return "\n\n".join(parts)
 

@@ -101,7 +101,7 @@ An unrecognized frame type gets `agent.error` reason `unknown_frame` (detail: th
 | Frame | Fields | Emitted by |
 |---|---|---|
 | `state.idle` / `state.listening` / `state.thinking` / `state.speaking` | — | `ws.py`, `turn.py` |
-| `transcript.user` | `text` | after STT, or immediately for `user.text` |
+| `transcript.user` | `text`, `handover` | after STT, or immediately for `user.text`; `handover` is true when a `user.handover` chord preceded this turn (consumed once) |
 | `agent.stall` | `phrase_id`, `text` | `turn.py` worker path, before the LLM answer starts |
 | `agent.sentence` | `seq`, `text`, `audio_url`, `word_times`, `estimated`, `stream_url`, `chunked` | `speech.py:speak_sentence` — one per spoken sentence |
 | `agent.chunk` | `seq`, `chunk_no`, `audio_b64`, `url`, `final` | `speech.py:stream_chunks` — one per synthesis chunk, only on a chunk-capable tyre |

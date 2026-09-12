@@ -50,8 +50,14 @@ async def handle_turn(
     active_persona: Optional[Persona] = None,
     providers: Optional[ProviderSet] = None,
     on_cancel: Optional[BargeFn] = None,
+    handover: bool = False,
 ) -> TurnResult:
-    """Router: deterministic control vs stall+worker vs direct answer."""
+    """Router: deterministic control vs stall+worker vs direct answer.
+
+    ``handover`` is the Option+Shift+Tab chord's flag, consumed once by this
+    turn: it adds one line to the system prompt (see
+    :data:`server.persona_runtime.HANDOVER_LINE`) and changes nothing else.
+    """
     providers = providers or runtime.snapshot()
     if not text or not text.strip():
         await send_error(ws, turn_id, "empty_transcript")
@@ -117,7 +123,7 @@ async def handle_turn(
     history = runtime.memory.get_history_messages(pname, limit=6)
     grounding = await collect_grounding()
     messages = [
-        {"role": "system", "content": build_system_prompt(p, grounding)},
+        {"role": "system", "content": build_system_prompt(p, grounding, handover=handover)},
         *history,
         {"role": "user", "content": text},
     ]
@@ -229,6 +235,7 @@ async def _turn_pipeline(
     on_cancel: Optional[BargeFn],
     audio: Optional[bytes],
     sample_rate: int,
+    handover: bool = False,
 ) -> None:
     """STT (if needed) then the turn. Cancellable at every await."""
     if audio is not None:
@@ -244,7 +251,9 @@ async def _turn_pipeline(
             log_.end(path="stt_error", chars=0, sentences=0)
             return
         log_.mark("stt")
-        await safe_send_json(ws, frame("transcript.user", turn_id, text=text))
+        await safe_send_json(
+            ws, frame("transcript.user", turn_id, text=text, handover=handover)
+        )
     await handle_turn(
         ws,
         turn_id,
@@ -254,6 +263,7 @@ async def _turn_pipeline(
         active_persona=active_persona,
         providers=providers,
         on_cancel=on_cancel,
+        handover=handover,
     )
 
 
@@ -269,6 +279,7 @@ async def handle_turn_task(
     audio: Optional[bytes] = None,
     sample_rate: int = 16000,
     barged: Optional[set] = None,
+    handover: bool = False,
 ) -> None:
     """Run one turn as a cancellable task so barge can kill it mid-flight.
 
@@ -316,6 +327,7 @@ async def handle_turn_task(
             on_cancel,
             audio,
             sample_rate,
+            handover,
         )
     )
     turn_tasks[turn_id] = task
