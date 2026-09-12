@@ -20,7 +20,6 @@ Run: `python3 qa/latency.py`. Exit 0 unless a live measurement breaches budget.
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import os
 import socket
@@ -57,7 +56,14 @@ _BASE_WS_URL = os.environ.get("LATENCY_WS_URL", f"ws://127.0.0.1:{APP_PORT}/ws")
 WS_URL = f"{_BASE_WS_URL}?token={STUDIO_TOKEN}" if STUDIO_TOKEN else _BASE_WS_URL
 N_TURNS = int(os.environ.get("LATENCY_N", "5"))
 
-PCM_B64 = base64.b64encode(bytes(320 * 2)).decode()
+sys.path.insert(0, os.path.join(ROOT, "qa"))
+from fixture_audio import load_b64  # noqa: E402  (needs ROOT on the path first)
+
+#: Real spoken audio when a fixture is baked, silence otherwise. Silence is
+#: fine against stub STT and useless against a real tyre — it transcribes to
+#: nothing and every metric below reads NOT-MEASURED off the error path
+#: instead of a turn. `qa/fixture_audio.py` explains the resolution order.
+PCM_B64, PCM_SAMPLE_RATE, PCM_IS_REAL, PCM_SOURCE = load_b64()
 
 
 def load_budgets() -> dict:
@@ -99,7 +105,8 @@ async def _measure_turn(ws_connect, turn_no):
         await _recv(ws, 5.0)  # state.listening
         t0 = time.monotonic()
         await ws.send(json.dumps({"type": "user.stop", "turn_id": turn_id,
-                                  "pcm_b64": PCM_B64}))
+                                  "pcm_b64": PCM_B64,
+                                  "sample_rate": PCM_SAMPLE_RATE}))
         stall_ms = None
         first_sentence_ms = None
         while True:
@@ -121,7 +128,8 @@ async def _measure_barge(ws_connect):
         await ws.send(json.dumps({"type": "user.start", "turn_id": turn_id}))
         await _recv(ws, 5.0)  # state.listening
         await ws.send(json.dumps({"type": "user.stop", "turn_id": turn_id,
-                                  "pcm_b64": PCM_B64}))
+                                  "pcm_b64": PCM_B64,
+                                  "sample_rate": PCM_SAMPLE_RATE}))
         t0 = time.monotonic()
         await ws.send(json.dumps({"type": "barge", "turn_id": turn_id}))
         while True:
@@ -167,6 +175,8 @@ def run_measurements():
 
 def main():
     budgets = load_budgets()
+    print("audio: %s (%s, %d Hz)"
+          % (PCM_SOURCE, "real speech" if PCM_IS_REAL else "SILENCE", PCM_SAMPLE_RATE))
     print("budgets (qa/budgets.json, ms):")
     for k, v in budgets.items():
         print("  %-15s %6d" % (k, v))

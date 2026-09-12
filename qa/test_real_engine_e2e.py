@@ -6,9 +6,16 @@ stack (network calls, real synthesis), never the default QA gate. `make
 qa-real` sets the flag; plain `make qa`/`qa/run_all.sh` SKIP this file.
 
 Verifies:
-1. Kokoro TTS on http://127.0.0.1:8088 (real WAV synthesis >10KB).
+1. The configured TTS tyre really synthesizes (>10KB valid RIFF WAV).
 2. STT via /transcribe (real transcription of audio input).
-3. LLM via /ws (LiteLLM proxy with Donna persona, returning playable Kokoro audio).
+3. LLM via /ws (LiteLLM proxy with Donna persona, returning playable audio).
+
+Provider-agnostic by design. It used to pin `KokoroSpacePilotTTS` by class and
+so failed the moment the default TTS tyre changed to the in-process
+`kokoro-local` — a test that asserts *which* tyre is fitted cannot survive a
+tyre swap, which is the one thing the provider contract promises (gate 4,
+config-only swap). What it asserts now is that whatever tyre is fitted is a
+real one and that it works.
 """
 import base64
 import os
@@ -38,16 +45,31 @@ class TestRealEngineEndpoints(unittest.TestCase):
                 "Kokoro/STT/LLM stack; run `make qa-real` to exercise it"
             )
         os.makedirs(SCRATCH, exist_ok=True)
-        cls.client = TestClient(server_module.app)
+        # Every /transcribe and /ws call needs the studio token — the server
+        # is 401/4401 without it (see server/auth.py). Resolved the same way
+        # the server resolves it, so an in-process TestClient and the live
+        # server agree.
+        from server.auth import studio_token
+
+        token = studio_token()
+        if not token:
+            raise unittest.SkipTest(
+                "SKIP: no studio token resolvable (STUDIO_TOKEN, "
+                "STUDIO_TOKEN_FILE, or .qa-scratch/studio.token) — every "
+                "/transcribe and /ws call would 401"
+            )
+        cls.client = TestClient(server_module.app, headers={"X-Studio-Token": token})
 
     def test_01_kokoro_tts_synthesis(self):
         """Verify Kokoro TTS is reachable and produces >10KB valid RIFF WAV."""
         tts = server_module.tts
-        self.assertIsInstance(
-            tts,
-            providers.KokoroSpacePilotTTS,
-            f"Expected KokoroSpacePilotTTS, got {type(tts).__name__}",
-        )
+        # Whatever tyre is configured, as long as it is a real one: a stub
+        # would pass the byte-count assertion below on a sine wave, and an
+        # Unavailable* placeholder must surface its build failure by name.
+        self.assertNotIsInstance(tts, providers.StubTTS,
+                                 "real-engine test ran against StubTTS")
+        self.assertIsInstance(tts, providers.TTSProvider)
+        print(f"\n[TYRE] TTS = {type(tts).__name__}")
         test_text = "Good morning. Donna Paulsen here, executive secretary mode is fully operational."
         wav_bytes, _ = tts.synth(test_text, voice="af_heart", speed=1.05)
         self.assertTrue(len(wav_bytes) > 10000, f"Audio too small: {len(wav_bytes)} bytes")

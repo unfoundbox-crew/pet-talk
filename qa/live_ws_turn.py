@@ -20,7 +20,6 @@ is reported as a number.
 Run: `python3 qa/live_ws_turn.py` (unittest, verbose). Exit 0 = pass/skip.
 """
 import asyncio
-import base64
 import json
 import os
 import sys
@@ -76,13 +75,14 @@ HTTP_BASE = os.environ.get("LIVE_HTTP_BASE", f"http://127.0.0.1:{PORT}")
 STALL_CEILING_MS = float(BUDGETS["stall_ms"])
 BARGE_CEILING_MS = float(BUDGETS["barge_ms"])
 
-# Use real audio fixture with spoken text if present, otherwise 320ms PCM fallback
-WEATHER_FIXTURE = "/tmp/weather_turn_fixture.wav"
-if os.path.exists(WEATHER_FIXTURE):
-    with open(WEATHER_FIXTURE, "rb") as f:
-        PCM_B64 = base64.b64encode(f.read()).decode()
-else:
-    PCM_B64 = base64.b64encode(bytes(320 * 2)).decode()
+# Real spoken audio when a fixture is baked, silence otherwise — resolved in
+# ONE place (qa/fixture_audio.py) so this script and qa/latency.py cannot send
+# different bytes at the same turn. This used to read the WAV file whole and
+# hand the 44-byte RIFF header to the STT tyre as if it were samples.
+sys.path.insert(0, os.path.join(ROOT, "qa"))
+from fixture_audio import load_b64  # noqa: E402  (needs ROOT on the path first)
+
+PCM_B64, PCM_SAMPLE_RATE, PCM_IS_REAL, PCM_SOURCE = load_b64()
 
 
 async def _recv(ws, timeout=10.0):
@@ -95,7 +95,8 @@ async def _full_turn(ws, turn_id):
     assert got.get("type") == "state.listening", got
     t_stop = time.monotonic()
     await ws.send(json.dumps({"type": "user.stop", "turn_id": turn_id,
-                              "pcm_b64": PCM_B64}))
+                              "pcm_b64": PCM_B64,
+                              "sample_rate": PCM_SAMPLE_RATE}))
     frames, stall_ms = [], None
     while True:
         m = await _recv(ws, 10.0)
@@ -209,7 +210,8 @@ class TestLiveWsTurn(unittest.TestCase):
                 assert got.get("type") == "state.listening", got
                 # stop then barge with no read between: barge lands mid-turn.
                 await ws.send(json.dumps({"type": "user.stop", "turn_id": turn,
-                                          "pcm_b64": PCM_B64}))
+                                          "pcm_b64": PCM_B64,
+                                          "sample_rate": PCM_SAMPLE_RATE}))
                 t_barge = time.monotonic()
                 await ws.send(json.dumps({"type": "barge", "turn_id": turn}))
                 ack = None
