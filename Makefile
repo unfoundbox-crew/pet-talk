@@ -1,10 +1,11 @@
 .PHONY: build-hotkey qa qa-silent qa-real
 
-# Fan rule: the real `swiftc -O` build never runs on this MacBook — it runs
-# on `ssh air` via cli/hotkey/build.sh (lane C owns that script). This
-# target just calls it by path; it does not build anything itself.
+# The hotkey build is five Swift files and ~8 s on Apple silicon: it runs
+# locally at low priority. It is the one exception to the fan rule (Saurabh,
+# 2026-09-12). `air` is Intel and would produce an x86_64 binary that cannot
+# run on this Mac, so never route it there.
 build-hotkey:
-	cli/hotkey/build.sh bin/
+	nice -n 19 cli/hotkey/build.sh bin/
 
 qa:
 	bash qa/run_all.sh
