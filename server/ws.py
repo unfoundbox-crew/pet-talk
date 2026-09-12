@@ -82,6 +82,9 @@ class Session:
         """
         task = asyncio.create_task(coro_factory(), name=f"turn:{turn_id}")
         self.turn_tasks[turn_id] = task
+        # The per-turn persona dies with the turn. It used to accumulate one
+        # entry per turn for the life of the socket.
+        task.add_done_callback(lambda _t: self.turn_persona.pop(turn_id, None))
         return self.track(task)
 
     async def barge(self, ref: Optional[str] = None, exclude: Optional[str] = None) -> int:

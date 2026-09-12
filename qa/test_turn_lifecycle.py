@@ -386,6 +386,76 @@ class TestBargeBeforeTheTurnRegisters(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("t-race-2", barged, "barged id was not cleared after the turn")
 
 
+class TestBoundedPerTurnState(unittest.IsolatedAsyncioTestCase):
+    """Nothing keyed on client input may grow without a ceiling."""
+
+    async def test_two_hundred_turns_bound_the_stall_cache_and_personas(self):
+        from server import stall as stall_module
+        from server import ws as ws_module
+
+        cap = stall_module.stall_cache_max()
+        session = ws_module.Session(ws=fake_ws())
+        providers = ProviderSet(
+            stt=StubSTT(),
+            llm=FastLLM(["One short answer."], path="stall"),
+            tts=SlowTTS(delay_s=0.0),
+        )
+        old_snapshot = ws_module.runtime.snapshot_under_lock
+
+        async def _snapshot():
+            return providers
+
+        ws_module.runtime.snapshot_under_lock = _snapshot
+        self.addCleanup(
+            setattr, ws_module.runtime, "snapshot_under_lock", old_snapshot
+        )
+
+        for i in range(200):
+            turn_id = f"t-mem-{i}"
+            await ws_module._on_user_text(
+                session,
+                {
+                    "type": "user.text",
+                    "turn_id": turn_id,
+                    "text": "research the weather",
+                    # A different float every turn: the old cache key space.
+                    "custom_speed": 0.5 + (i * 0.0037),
+                    "custom_voice": f"voice-{i}",
+                },
+            )
+            task = session.turn_tasks.get(turn_id)
+            if task is not None:
+                await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
+
+        self.assertLessEqual(
+            stall_module.stall_cache_size(),
+            cap,
+            f"stall cache grew past its cap: {stall_module.stall_cache_size()} > {cap}",
+        )
+        self.assertLessEqual(
+            len(session.turn_persona),
+            1,
+            f"turn_persona leaked {len(session.turn_persona)} entries across 200 turns",
+        )
+        self.assertLessEqual(len(session.turn_tasks), 1)
+        self.assertLessEqual(len(session.barged), ws_module.MAX_BARGED_IDS)
+        print(
+            f"    200 turns: stall_cache={stall_module.stall_cache_size()} (cap {cap}), "
+            f"turn_persona={len(session.turn_persona)}"
+        )
+
+    def test_client_speed_is_quantised_and_clamped(self):
+        from server.persona_runtime import SPEED_MAX, SPEED_MIN, clamp_speed
+
+        self.assertEqual(clamp_speed(0.01), SPEED_MIN)
+        self.assertEqual(clamp_speed(99.0), SPEED_MAX)
+        self.assertEqual(clamp_speed(1.234), 1.25)
+        distinct = {clamp_speed(0.5 + i * 0.0037) for i in range(200)}
+        self.assertLessEqual(
+            len(distinct), 15, f"speed key space is not finite: {sorted(distinct)}"
+        )
+
+
 class TestSpeakQueueMechanics(unittest.IsolatedAsyncioTestCase):
     async def test_flush_counts_queued_and_inflight(self):
         q = SpeakQueue()

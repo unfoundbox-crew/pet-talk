@@ -18,6 +18,20 @@ from . import runtime
 #: Personas that need no ``personas/<name>.md`` on disk.
 VIRTUAL_PERSONAS = frozenset({"default"})
 
+#: Client-supplied speed is quantised and clamped before it reaches a
+#: persona. It is part of the stall cache key, so an unclamped float from a
+#: frame meant a client could mint unlimited cache entries (and ask a backend
+#: for absurd rates). 0.05 steps inside [0.7, 1.4] is a finite set of 15.
+SPEED_MIN = 0.7
+SPEED_MAX = 1.4
+SPEED_STEP = 0.05
+
+
+def clamp_speed(value: float) -> float:
+    """Quantise to ``SPEED_STEP`` and clamp into [SPEED_MIN, SPEED_MAX]."""
+    stepped = round(float(value) / SPEED_STEP) * SPEED_STEP
+    return round(min(SPEED_MAX, max(SPEED_MIN, stepped)), 2)
+
 def persona_exists(name: str) -> bool:
     if name in VIRTUAL_PERSONAS:
         return True
@@ -50,7 +64,7 @@ def apply_persona_overrides(p: Persona, msg: dict) -> Persona:
     speed = msg.get("custom_speed") or msg.get("speed")
     if speed not in (None, ""):
         try:
-            p.speed = float(speed)
+            p.speed = clamp_speed(speed)
         except (TypeError, ValueError) as e:
             raise ProviderError("bad_frame", f"speed={speed!r} is not a number") from e
     tone = msg.get("custom_tone") or msg.get("system_prompt")

@@ -8,16 +8,60 @@ exist — a 404 mid-stall is worse than a named error.
 from __future__ import annotations
 
 import asyncio
+import collections
+import os
 import uuid
+
+from typing import Optional
 
 from .audio_store import has_audio, store_audio
 from .dictation import VoiceProseFormatter
+from .logs import swallowed
 from .persona import Persona
 from .providers import ProviderError
 
 MAX_STALL_WORDS = 15
 
-_STALL_AUDIO_CACHE: dict[str, tuple[str, bytes]] = {}
+#: The cache key carries persona, voice, speed and backend identity — and
+#: voice and speed come from the client. An unbounded dict was therefore a
+#: client-controlled memory leak: every distinct speed held another WAV for
+#: the life of the process. Bounded LRU, oldest evicted first.
+DEFAULT_STALL_CACHE_MAX = 64
+
+
+def stall_cache_max() -> int:
+    raw = os.environ.get("PET_TALK_STALL_CACHE_MAX", str(DEFAULT_STALL_CACHE_MAX))
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        swallowed("bad_stall_cache_max_env", None, value=raw)
+        return DEFAULT_STALL_CACHE_MAX
+
+
+_STALL_AUDIO_CACHE: "collections.OrderedDict[str, tuple[str, bytes]]" = (
+    collections.OrderedDict()
+)
+
+
+def _cache_get(key: str) -> Optional[tuple[str, bytes]]:
+    """Read and mark as most-recently-used."""
+    if key in _STALL_AUDIO_CACHE:
+        _STALL_AUDIO_CACHE.move_to_end(key)
+        return _STALL_AUDIO_CACHE[key]
+    return None
+
+
+def _cache_put(key: str, value: tuple[str, bytes]) -> None:
+    _STALL_AUDIO_CACHE[key] = value
+    _STALL_AUDIO_CACHE.move_to_end(key)
+    cap = stall_cache_max()
+    while len(_STALL_AUDIO_CACHE) > cap:
+        _STALL_AUDIO_CACHE.popitem(last=False)
+
+
+def stall_cache_size() -> int:
+    """Entries held right now. Used by the QA gate, not by the loop."""
+    return len(_STALL_AUDIO_CACHE)
 
 
 def _tts_identity(tts: object) -> str:
@@ -43,7 +87,7 @@ async def get_or_synth_stall(stall_text: str, p: Persona, tts: object) -> tuple[
     """
     clean_text = VoiceProseFormatter.sanitize(stall_text, max_words=MAX_STALL_WORDS) or stall_text
     key = stall_cache_key(clean_text, p, tts)
-    cached = _STALL_AUDIO_CACHE.get(key)
+    cached = _cache_get(key)
     if cached is not None and has_audio(cached[0]):
         return cached
     _STALL_AUDIO_CACHE.pop(key, None)
@@ -61,6 +105,6 @@ async def get_or_synth_stall(stall_text: str, p: Persona, tts: object) -> tuple[
 
     audio_id = f"stall-{uuid.uuid4().hex[:8]}"
     store_audio(audio_id, wav)
-    _STALL_AUDIO_CACHE[key] = (audio_id, wav)
+    _cache_put(key, (audio_id, wav))
     return audio_id, wav
 
