@@ -308,6 +308,86 @@ async def _with_early_stall(coro, forced: bool = True):
         stt_stream.turn_accepts_stall_sent = real
 
 
+# ----------------------------------------------------------- frame shapes ---
+
+
+class TestEveryAgentSentenceHasOneShape(unittest.TestCase):
+    """A client must not need a special case for the stall's sentence frame.
+
+    docs/SPEC.md 4.2 gives `agent.sentence` one field list including
+    ``stream_url`` and ``chunked``. ``speech.py:speak_sentence`` sends all of
+    them; the two STALL sites — ``turn.py``'s worker path and
+    ``stt_stream.emit_early_stall`` — omitted both, so a client reading
+    ``frame.chunked`` got undefined on exactly the first frame of the turn.
+    """
+
+    KEYS = {"seq", "text", "audio_url", "word_times", "estimated",
+            "stream_url", "chunked"}
+
+    def _sentences(self, w) -> list[dict]:
+        return [f for f in frames(w) if f.get("type") == "agent.sentence"]
+
+    def test_the_early_stall_sentence_carries_the_full_field_set(self) -> None:
+        async def go():
+            pset = ProviderSet(stt=SegmentSTT(), llm=RouterLLM(), tts=StubTTS())
+            runtime.install(pset)
+            w = fake_ws()
+            sent = await stt_stream.emit_early_stall(
+                w, "t-shape-early", "did the provider tests pass", TEST_PERSONA, pset
+            )
+            self.assertTrue(sent)
+            got = self._sentences(w)
+            self.assertEqual(len(got), 1, f"expected one stall sentence: {got}")
+            self.assertLessEqual(self.KEYS, set(got[0]),
+                                 "missing: %s" % (self.KEYS - set(got[0])))
+            self.assertFalse(got[0]["chunked"])
+            self.assertIsNone(got[0]["stream_url"])
+
+        asyncio.run(go())
+
+    def test_the_worker_path_stall_sentence_carries_it_too(self) -> None:
+        async def go():
+            from server.speak_queue import SpeakQueue
+            from server.turn import handle_turn
+
+            pset = ProviderSet(stt=SegmentSTT(), llm=RouterLLM(), tts=StubTTS())
+            runtime.install(pset)
+            w = fake_ws()
+            await handle_turn(
+                w, "t-shape-worker", "did the provider tests pass?", SpeakQueue(),
+                active_persona=TEST_PERSONA, providers=pset,
+            )
+            got = self._sentences(w)
+            self.assertGreaterEqual(len(got), 2, f"expected stall + answer: {got}")
+            for f in got:
+                self.assertLessEqual(self.KEYS, set(f),
+                                     "seq %s missing: %s" % (f.get("seq"),
+                                                             self.KEYS - set(f)))
+
+        asyncio.run(go())
+
+    def test_an_interrupted_done_reports_a_sentence_count(self) -> None:
+        """SPEC 4.2 lists `sentences` on agent.done. `interrupted` omitted it."""
+
+        async def go():
+            from server.speak_queue import SpeakQueue
+            from server.turn import handle_turn_task
+
+            runtime.install(ProviderSet(stt=SegmentSTT(), llm=RouterLLM(), tts=StubTTS()))
+            w = fake_ws()
+            await handle_turn_task(
+                w, "t-interrupt", "anything", SpeakQueue(), {}, barged={"t-interrupt"},
+            )
+            dones = [f for f in frames(w) if f.get("type") == "agent.done"]
+            self.assertEqual(len(dones), 1, f"expected one agent.done: {dones}")
+            self.assertEqual(dones[0].get("path"), "interrupted")
+            self.assertIn("sentences", dones[0],
+                          "agent.done path=interrupted carries no sentence count")
+            self.assertEqual(dones[0]["sentences"], 0)
+
+        asyncio.run(go())
+
+
 # --------------------------------------------------------------- numbering ---
 
 

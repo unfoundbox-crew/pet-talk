@@ -522,6 +522,11 @@ async def emit_early_stall(
                 audio_url=f"/audio/{stall_audio.audio_id}",
                 word_times=stall_audio.word_times,
                 estimated=True,
+                # The same field set as every other agent.sentence
+                # (docs/SPEC.md 4.2). A stall is never chunked, but a client
+                # must not need a special case to find that out.
+                stream_url=None,
+                chunked=False,
             ),
         )
     return True

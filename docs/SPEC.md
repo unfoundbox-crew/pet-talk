@@ -90,8 +90,7 @@ Every frame carries `turn_id`. `Frame.__post_init__` raises `frame_no_turn_id` i
 | `user.stop` | `turn_id?`, `pcm_b64?`, `sample_rate?` | `_on_user_stop` — runs STT in the turn task, fires `handle_turn_task` |
 | `user.text` | `text`, `turn_id?`, persona overrides | `_on_user_text` — skips STT, fires `handle_turn_task` directly |
 | `user.attach` | `ref?`, `kind`, `mime?`, `b64`/`bytes_b64`, `filename?`, `task?` | `_on_user_attach` — delegates to `server.eyes.handle_attach` if importable, else `agent.error` reason `eyes_disabled` |
-| `user.handover` | client → server | `{turn_id, source}` | Hand-over chord (Option+Shift+Tab). Marks the next turn as delegated work and opens the mic. |
-| `handover.received` | server → client | `{turn_id, source}` | Acknowledges `user.handover`; followed by `state.listening`. |
+| `user.handover` | `turn_id?`, `source?` | `_on_user_handover` — hand-over chord (Option+Shift+Tab). Marks the next turn as delegated work and opens the mic; acks with `handover.received` (§4.2) then `state.listening` |
 | `barge` | `turn_id?` | `_on_barge` — cancels the live turn(s), flushes the queue, returns the true dropped count |
 
 An unrecognized frame type gets `agent.error` reason `unknown_frame` (detail: the type string, or `<missing type>`). Undecodable JSON gets reason `bad_frame`.
@@ -100,12 +99,14 @@ An unrecognized frame type gets `agent.error` reason `unknown_frame` (detail: th
 
 | Frame | Fields | Emitted by |
 |---|---|---|
-| `state.idle` / `state.listening` / `state.thinking` / `state.speaking` | — | `ws.py`, `turn.py` |
+| `state.idle` / `state.thinking` / `state.speaking` | — | `ws.py`, `turn.py` |
+| `state.listening` | `barged_turn?`, `dropped?` | `ws.py`. The barge ack carries both: `barged_turn` is the id of the turn that was killed (which is NOT this frame's `turn_id` — a barge mints a fresh one, and the client adopts it), `dropped` is the true count of cancelled tasks. Absent on a plain `user.start` or hand-over ack |
+| `handover.received` | `source` | `ws.py:_on_user_handover` — acknowledges `user.handover`; `state.listening` follows it |
 | `transcript.user` | `text`, `handover`, `partial?`, `final?` | after STT, or immediately for `user.text`; `handover` is true when a `user.handover` chord preceded this turn (consumed once). Under streaming STT the frame carries `final: true`, and `partial: true` frames may precede it when `PET_TALK_STT_PARTIALS=1` — every partial precedes the one final frame, and a client that ignores both fields sees exactly today's wire |
 | `agent.stall` | `phrase_id`, `text` | `turn.py` worker path, before the LLM answer starts — or `stt_stream.emit_early_stall` at end-of-speech under streaming STT, from the latest partial, BEFORE the final transcript exists (§9.2) |
-| `agent.sentence` | `seq`, `text`, `audio_url`, `word_times`, `estimated`, `stream_url`, `chunked` | `speech.py:speak_sentence` — one per spoken sentence |
+| `agent.sentence` | `seq`, `text`, `audio_url`, `word_times`, `estimated`, `stream_url`, `chunked` | `speech.py:speak_sentence` — one per spoken sentence. The two STALL sites (`turn.py`'s worker path and `stt_stream.emit_early_stall`) send the SAME field set, with `stream_url: null` and `chunked: false` — a stall is never chunked, and a client must not need a special case to find that out. `seq=0` is the stall's on every path; both answer paths start at `first_seq=1` |
 | `agent.chunk` | `seq`, `chunk_no`, `audio_b64`, `url`, `final` | `speech.py:stream_chunks` — one per synthesis chunk, only on a chunk-capable tyre |
-| `agent.done` | `path`, `sentences`, `dropped?`, `reason?` | end of every turn; `path` is one of `empty`, `control`, `control_cancel`, `worker`, `direct`, `interrupted`, `error`. `path="error"` follows the `agent.error` that named the failure and repeats its `reason`, so a client always sees a turn end |
+| `agent.done` | `path`, `sentences`, `dropped?`, `reason?` | end of every turn; `path` is one of `empty`, `control`, `control_cancel`, `worker`, `direct`, `interrupted`, `error`. `sentences` is on EVERY path, `interrupted` included, where it is always `0` — a barged turn's spoken count is not claimed. `path="error"` follows the `agent.error` that named the failure and repeats its `reason`, so a client always sees a turn end |
 | `agent.error` | `reason`, `detail?`, plus per-call fields (`seq`, `ref`, ...) | any failure, see catalogue in §4.3 |
 | `eyes.received` | `ref`, `kind`, `task`, `bytes` | `eyes.py:handle_attach` as soon as the payload is accepted |
 | `eyes.text` | `ref`, `source`, `kind`, `task`, `engine`, `text`, `truncated` | `eyes.py:handle_attach` after OCR resolves |
@@ -176,6 +177,8 @@ Every reason a running server can actually emit today, grepped from `ProviderErr
 **STT (`providers/stt.py`, `turn.py`):** `stt_unknown_provider`, `stt_empty_audio`, `stt_empty_result`, `stt_bad_response`, `stt_request_failed`, `stt_no_key`, `stt_failed`, `stt_faster_whisper_not_installed`, `stt_whisper_not_installed`, `stt_whisperkit_failed`, `stt_mlx_failed`, `stt_mlx_not_installed`.
 
 **TTS (`providers/tts.py`, `speech.py`, `stall.py`):** `tts_unknown_provider`, `tts_empty_text`, `tts_empty_audio`, `tts_synth_failed`, `tts_request_failed`, `tts_no_key`, `tts_no_token`, `tts_no_job_id`, `tts_job_failed`, `tts_job_timeout`, `tts_download_failed`, `stall_synth_failed`, `tts_chunk_format_mismatch`, `tts_chunk_not_wav`, `tts_chunk_too_large` (one `agent.chunk` over `PET_TALK_CHUNK_MAX_BYTES`, default 512 KiB — refused before it is stored or sent), `tts_cancelled`. Two more are telemetry only — logged by `speak_sentence`, never sent as a frame, because they describe which synthesis path ran rather than a failure: `tts_no_chunk_support`, `tts_chunking_disabled`. `stall_warm_disabled` / `stall_warm_skipped` / `stall_warm_failed` are the same kind of record for the startup pre-synth.
+
+**Streaming STT (`stt_stream.py`, `ws.py` — all logged, not sent as frames; a lost partial is an optimization lost, never a turn lost):** `stt_stream_disabled` (the default; says nothing and is not logged), `stt_stream_unsupported_provider` (`PET_TALK_STT_STREAM=1` on a tyre whose `supports_streaming` is `False` — refused by name, never downgraded), `stt_stream_off` (named once per SOCKET, not per chunk), `stt_stream_started`, `stt_partial_failed`, `stt_partial_callback_failed`, `stt_stream_cancelled` (`reason=barged` — a barge cancels the stream session as well as the turn), `superseded_by_new_turn`, `stt_provider_swapped_mid_utterance`, `stt_stream_inflight_wait_expired`, `stt_stream_no_partial` (fell back to the whole-utterance pass, by name), `stt_stream_len_mismatch` (the caller's `pcm_b64` is a different length from the stream's buffer, so `_partial_offset` is not a valid seam — the whole utterance is decoded instead), `stt_stream_early_stall_skipped` (`reason=no_partial` / `routed_direct`), `stt_stream_early_stall_abandoned` (`reason=barged_during_stall` — a barge landed during the filler's synth, so no filler is sent), `stt_stream_empty_final`, `stt_stream_stop_abandoned` (`reason=barged_before_finalize` / `barged_during_finalize`), `stt_stream_stop_failed` (the streaming path broke BEFORE a turn was started; the whole-utterance path runs), `stt_stream_stop_failed_after_commit` (it broke AFTER — the failure re-raises rather than starting a second turn for one utterance, and surfaces as `frame_handler_failed`).
 
 **SpeakQueue (`speak_queue.py`):** `queue_closed`, `queue_no_spoken_sentence`, `queue_bad_word_idx`, `queue_close_failed`.
 
@@ -674,13 +677,15 @@ are printed by the test and not summarised away.
   fastest is still a belief. It is also flagged `supports_streaming = False`
   because it spawns a process and reloads its model per call.
 
-**The one line this needs from `server/turn.py`** (another lane's file, so it is
-reported and not taken): `handle_turn_task` and `handle_turn` take
-`stall_sent: bool = False`, threaded through, and the worker path's guard
-becomes `if stall_text and not stall_sent:`. Until that lands,
-`stt_stream.turn_accepts_stall_sent()` reads `False` and the early stall is not
-emitted at all — two `agent.stall` frames would speak two fillers at the person,
-which is worse than the latency it fixes.
+**The one line this needed from `server/turn.py` has landed** (2026-09-12f):
+`handle_turn_task` and `handle_turn` take `stall_sent: bool = False`, threaded
+through `_turn_pipeline`, and the worker path's guard is
+`if stall_text and not stall_sent:`. `stt_stream.turn_accepts_stall_sent()`
+reads the live signature and now returns `True`, so the early stall is emitted
+and only one `agent.stall` reaches the person. The measured numbers above were
+taken with that shape pinned by the test harness and are unchanged by the hook
+landing. Streaming STT still ships OFF by default — see §10 for why that is a
+measurement, not caution.
 
 **How to reproduce:**
 
@@ -695,7 +700,7 @@ PET_TALK_SILENT=1 PET_TALK_REAL_ENGINE=1 STT_PROVIDER=faster-whisper \
 
 | Gate | Proven by |
 |---|---|
-| 1. Stall plays ≤400ms after user stops, on a routed question | `qa/latency.py` (`stall_ms` vs budget), `qa/test_turn_lifecycle.py`, `qa/test_stt_streaming.py` (§9.2 — PASSES only on the streaming early-stall path, which needs the `stall_sent` hook named in §9.2; the whole-utterance path still FAILS) |
+| 1. Stall plays ≤400ms after user stops, on a routed question | `qa/latency.py` (`stall_ms` vs budget), `qa/test_turn_lifecycle.py`, `qa/test_stt_streaming.py` (§9.2 — PASSES only on the streaming early-stall path; the `stall_sent` hook it needs has landed, but that path still ships OFF by default and turn-level `stall_ms` for it is NOT MEASURED. The whole-utterance path, which is what ships, still FAILS) |
 | 2. Barge-in kills audio ≤100ms and reports the true dropped count | `qa/latency.py` (`barge_ms`), `qa/test_turn_lifecycle.py`, `qa/test_socket_resilience.py` |
 | 3. Worker streams ≥3 sentences behind playing audio without a gap | `qa/test_turn_lifecycle.py` — **partially exercised**: `StubLLM` emits exactly 3 sentences by default, and the queue high-water test uses a 4-sentence variant; there is no fixture that streams a long, unbounded answer to confirm the queue keeps buffering past 4-5 sentences under sustained LLM-faster-than-TTS pressure |
 | 4. Provider swap via config only, zero code change | `qa/test_providers.py`, `qa/test_settings_api.py` |
@@ -703,7 +708,7 @@ PET_TALK_SILENT=1 PET_TALK_REAL_ENGINE=1 STT_PROVIDER=faster-whisper \
 
 ## 10. Known gaps
 
-- **Streaming STT ships OFF, and the mode that fixes `stall_ms` needs one line in another lane's file.** `PET_TALK_STT_STREAM=1` plus the early stall measured `stall_ms` p50 0.2-0.8ms at load 88 (§9.2) — but the early stall is only emitted once `server/turn.py` takes a `stall_sent` flag, or the person hears two fillers. Streaming WITHOUT it measured *worse* than streaming off (537.9-808.8ms p50), so the default is `0` by measurement, not by caution. The finalize seam (prefix decode + tail decode) is also a real accuracy cost that is not quantified: nothing measures word error rate across the seam, and `PET_TALK_STT_FINAL_FULL=1` is the escape hatch rather than a measured comparison.
+- **Streaming STT ships OFF.** `PET_TALK_STT_STREAM=1` plus the early stall measured `stall_ms` p50 0.2-0.8ms at load 88 (§9.2), and the `stall_sent` hook that path needs has since landed in `server/turn.py` — so the early stall now runs when the flag is on. It still ships off because streaming WITHOUT the early stall measured *worse* than streaming off (537.9-808.8ms p50) and turn-level `stall_ms` for the streaming path is NOT MEASURED (§9.2 follow-up): the default is `0` by measurement, not by caution. The finalize seam (prefix decode + tail decode) is also a real accuracy cost that is not quantified: nothing measures word error rate across the seam, and `PET_TALK_STT_FINAL_FULL=1` is the escape hatch rather than a measured comparison.
 
 - **The speak queue is per-socket**, not per-turn: `Session.queue` is one `SpeakQueue` reused across turns via `reopen()`. Two turns on the same socket can never interleave (the newer one barges the older via `supersede()`), but this means there is exactly one live turn per socket at a time by design, not by accident.
 - **Gate 3 (≥3 gapless sentences) is only partially exercised** — see §9.3. `StubLLM` hardcodes 3 sentences; nothing in `qa/` currently proves the queue keeps buffering ahead past a 4th or 5th sentence under sustained pressure.

@@ -226,6 +226,11 @@ async def handle_turn(
                         audio_url=f"/audio/{stall_audio.audio_id}",
                         word_times=stall_audio.word_times,
                         estimated=True,
+                        # The same field set as every other agent.sentence
+                        # (docs/SPEC.md 4.2). A stall is never chunked, but a
+                        # client must not need a special case to find that out.
+                        stream_url=None,
+                        chunked=False,
                     ),
                 ):
                     return result
@@ -381,7 +386,7 @@ async def handle_turn_task(
         log_ = TurnLog(path=TURNS_PATH)
         log_.start(turn_id, {})
         log_.end(path="interrupted", chars=0, sentences=0)
-        await safe_send_json(ws, frame("agent.done", turn_id, path="interrupted"))
+        await safe_send_json(ws, frame("agent.done", turn_id, path="interrupted", sentences=0))
         return
     providers = providers or await runtime.snapshot_under_lock()
     log_ = TurnLog(path=TURNS_PATH)
@@ -396,7 +401,7 @@ async def handle_turn_task(
         # A barge landed while we were waiting on the swap lock.
         discard_eyes_context("barged_awaiting_swap_lock", turn_id)
         log_.end(path="interrupted", chars=0, sentences=0)
-        await safe_send_json(ws, frame("agent.done", turn_id, path="interrupted"))
+        await safe_send_json(ws, frame("agent.done", turn_id, path="interrupted", sentences=0))
         return
     task = asyncio.ensure_future(
         _turn_pipeline(
@@ -420,7 +425,7 @@ async def handle_turn_task(
     except asyncio.CancelledError:
         cancel_token.set()
         log_.end(path="interrupted", chars=0, sentences=0)
-        await safe_send_json(ws, frame("agent.done", turn_id, path="interrupted"))
+        await safe_send_json(ws, frame("agent.done", turn_id, path="interrupted", sentences=0))
     except ProviderError as e:
         # docs/SPEC.md 4.2 lists `error` among agent.done's paths, and nothing
         # emitted it: a turn that died here sent agent.error and then silence,

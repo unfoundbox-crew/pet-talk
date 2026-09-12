@@ -216,7 +216,7 @@
           ],
           "budget": 400,
           "result": "PASS",
-          "note": "agent.stall is emitted from the latest partial BEFORE finalization, so stall_ms stops being an STT number: a warm stall-cache lookup and a frame send. PASSED in every run, including load 88.2. REQUIRES the one-line stall_sent hook in server/turn.py named in docs/SPEC.md 9.2 - until that lands turn.py would send a second agent.stall and the person would hear two fillers, so stt_stream.turn_accepts_stall_sent() reads False and this path does not run."
+          "note": "agent.stall is emitted from the latest partial BEFORE finalization, so stall_ms stops being an STT number: a warm stall-cache lookup and a frame send. PASSED in every run, including load 88.2. Taken with the stall_sent hook pinned by the test harness; that hook has since LANDED in server/turn.py (2026-09-12f), so stt_stream.turn_accepts_stall_sent() now reads True and this path runs whenever PET_TALK_STT_STREAM=1. The numbers above are unchanged by it. Streaming still ships off by default - see docs/SPEC.md 10."
         },
         "streaming_on_tail_only": {
           "p50_range": [
