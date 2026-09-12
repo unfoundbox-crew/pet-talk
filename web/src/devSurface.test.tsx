@@ -15,6 +15,8 @@ import { LatencyBar } from "./components/LatencyBar";
 import { DeveloperRail, type LoggedFrame } from "./components/DeveloperRail";
 import { STALL_BUDGET_MS } from "./latency";
 import type { ReceiptFrame } from "./components/ReceiptChip";
+import en from "./i18n/en.json";
+import hi from "./i18n/hi.json";
 
 const PERSONA = "donna";
 
@@ -130,4 +132,19 @@ describe("the Developer toggle is what reveals engineering", () => {
     expect(dev).toContain(PERSONA);
     expect(dev).toContain(String(STALL_BUDGET_MS));
   });
+});
+
+describe("no persona name reaches a user-facing string", () => {
+  // The persona is chosen on the server and can be renamed there; these three
+  // ship in the repo, so a placeholder that names one is a leak we can catch.
+  const SHIPPED = ["donna", "jarvis", "zuck", "डोना"];
+
+  for (const [name, bundle] of [["en", en], ["hi", hi]] as const) {
+    it(`${name}.json names no persona`, () => {
+      const blob = JSON.stringify(bundle).toLowerCase();
+      for (const persona of SHIPPED) {
+        expect(blob).not.toContain(persona);
+      }
+    });
+  }
 });
