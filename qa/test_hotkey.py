@@ -297,5 +297,99 @@ class TestKillSwitchAndPause(unittest.TestCase):
         )
 
 
+class TestCliLauncherIsResolvable(unittest.TestCase):
+    """The daemon must be able to find a CLI to spawn.
+
+    The regression this pins down: `bin/pet-talk-cli` was an untracked binary
+    and nothing in the tree built it, so after a clean checkout the daemon
+    started with "Target CLI: (unresolved)" and Option+Tab was a silent no-op
+    on Saurabh's machine. `make build-cli` (which `make build-hotkey` now
+    depends on) writes the launcher; `--dump-state` reports what would be
+    spawned, so the resolution is testable and not just visible in a log.
+
+    Hermetic: no daemon, no server, no audio. `--dump-state` is one stateless
+    subprocess call, and `--help` exits without touching a socket or a mic.
+    """
+
+    def test_the_builder_exists_and_is_executable(self):
+        builder = os.path.join(ROOT, "cli", "build-cli.sh")
+        self.assertTrue(os.path.isfile(builder),
+                        "cli/build-cli.sh is missing — nothing builds bin/pet-talk-cli")
+        self.assertTrue(os.access(builder, os.X_OK), "cli/build-cli.sh is not executable")
+
+    def test_the_makefile_builds_the_cli_before_the_daemon(self):
+        with open(os.path.join(ROOT, "Makefile")) as f:
+            mk = f.read()
+        self.assertIn("build-cli:", mk, "no `make build-cli` target")
+        self.assertIn("cli/build-cli.sh bin/", mk)
+        self.assertIn("build-hotkey: build-cli", mk,
+                      "build-hotkey must depend on build-cli — a daemon with no "
+                      "CLI to spawn has a hotkey that does nothing")
+
+    def test_the_launcher_prints_help_with_no_server(self):
+        """Needs no server, no mic: proves the launcher starts the CLI at all.
+
+        Specifically it proves the module form is used. `python3 cli/client.py`
+        raises ImportError (cli/client.py does `from .audio import ...`, a
+        relative import with no parent package), so a launcher that got this
+        wrong would fail here and nowhere else until a hotkey press.
+        """
+        cli = os.path.join(ROOT, "bin", "pet-talk-cli")
+        if not (os.path.isfile(cli) and os.access(cli, os.X_OK)):
+            raise unittest.SkipTest(
+                f"SKIP: no launcher at {cli} — run `make build-cli` (cheap, no "
+                "compiler) to write it"
+            )
+        res = subprocess.run([cli, "--help"], capture_output=True, text=True,
+                             timeout=60, env=HEADLESS_ENV)
+        self.assertEqual(res.returncode, 0,
+                         f"`pet-talk-cli --help` failed (rc={res.returncode}):\n"
+                         f"{res.stderr}\n{res.stdout}")
+        self.assertIn("pet-talk-cli", res.stdout)
+        self.assertIn("--hotkey", res.stdout,
+                      "--help did not print the real CLI's options, so the "
+                      "launcher did not reach cli/client.py:main")
+
+    def test_the_launcher_bakes_in_no_absolute_repo_path(self):
+        cli = os.path.join(ROOT, "bin", "pet-talk-cli")
+        if not os.path.isfile(cli):
+            raise unittest.SkipTest("SKIP: no launcher at %s — run `make build-cli`" % cli)
+        with open(cli) as f:
+            text = f.read()
+        self.assertNotIn(ROOT, text,
+                         "the launcher must resolve the repo root from its own "
+                         "location, never bake one in")
+        self.assertIn("-m cli.client", text,
+                      "the CLI must be started as a module, not as a script")
+
+    def test_dump_state_resolves_the_cli_path(self):
+        _skip_if_no_bin()
+        cli = os.path.join(ROOT, "bin", "pet-talk-cli")
+        if not (os.path.isfile(cli) and os.access(cli, os.X_OK)):
+            raise unittest.SkipTest(
+                f"SKIP: no launcher at {cli} — run `make build-cli` first; "
+                "resolution is what this test reads"
+            )
+        res = subprocess.run([BIN_PATH, "--dump-state"], capture_output=True,
+                             text=True, timeout=15, env=HEADLESS_ENV)
+        if res.returncode != 0:
+            raise AssertionError(
+                f"--dump-state failed (rc={res.returncode}):\n{res.stderr}\n{res.stdout}")
+        import json
+        state = json.loads(res.stdout)
+        info = state.get("cli")
+        self.assertIsInstance(info, dict,
+                             "--dump-state must report what Option+Tab would spawn")
+        self.assertTrue(
+            info.get("resolved"),
+            "the daemon could not resolve a CLI launcher even though one "
+            f"exists at {cli}: {info.get('reason')!r}",
+        )
+        self.assertTrue(str(info.get("path", "")).endswith("pet-talk-cli"),
+                        f"resolved path is not the launcher: {info!r}")
+        self.assertTrue(os.access(info["path"], os.X_OK),
+                        f"resolved path is not executable: {info!r}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
