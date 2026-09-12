@@ -268,6 +268,7 @@ async def _turn_pipeline(
     audio: Optional[bytes],
     sample_rate: int,
     handover: bool = False,
+    stall_sent: bool = False,
 ) -> None:
     """STT (if needed) then the turn. Cancellable at every await."""
     if audio is not None:
@@ -374,6 +375,7 @@ async def handle_turn_task(
             audio,
             sample_rate,
             handover,
+            stall_sent,
         )
     )
     turn_tasks[turn_id] = task
