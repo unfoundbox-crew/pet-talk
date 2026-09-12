@@ -5,6 +5,144 @@ All notable changes to pet-talk are documented in this file. Format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-12
+
+Wave 2 plus this release pass. The cockpit became a real inspector, the notch
+grew Archie's glyph, the eyes lane started feeding the prompt, and the first
+turn after a boot stopped being the slow one.
+
+Commit shas below name the individual `feat/wave-2` commits, which reached
+`main` squashed as `a26eef1` — the sha is the audit trail, not something you
+will find in `git log main`.
+
+### Added
+
+- **Inspector cockpit** on AgentWorth's design tokens (`4c4de45`, `e18d59c`):
+  read-ahead buffer with arrow-key skip (`web/src/readAhead.ts`), a per-stage
+  latency bar (`web/src/latency.ts`, `components/LatencyBar.tsx`), and a
+  Developer toggle. Engineering numbers, frame names, provider class names and
+  the persona name live behind that toggle and nowhere else — greppable in
+  `web/src/devSurface.test.tsx`.
+- **Archie's glyph**, small form, in the cockpit (`d0540de`) and in the notch
+  capsule HUD (`8becdf9`, `cli/hotkey/ArchieGlyph.swift`). The mascot is
+  Archie's existing small form; no new creature, no accessories.
+- **Streaming STT** behind `PET_TALK_STT_STREAM` (`978354b`,
+  `server/stt_stream.py`): 0.7s windows decode as they arrive so the stall
+  stops waiting for a whole-utterance pass. **Default 0**, and the reason is a
+  harness gap rather than a failure — `qa/latency.py` and
+  `qa/live_ws_turn.py` both hand the whole utterance to one `user.stop` and
+  never send a `user.chunk`, so every measured turn fell through to the
+  whole-utterance path (`"path": "worker"` in all 6 captured turns, both flag
+  settings). Turn-level benefit is NOT MEASURED.
+- **Eyes OCR context in the prompt** (`8a0bf1e`): attached-image text reaches
+  the turn, fenced as untrusted (see Security).
+- **AX screen grounding exercised live** on this Mac, 2026-09-12: with the
+  Accessibility permission granted, `pet-talk-hotkey ax` returned the focused
+  app and window. The `ax` command itself landed in 0.3.0; this release is
+  where it was documented (README, "Screen grounding"). Re-checking it during
+  this release pass returned `ax_permission_denied` from both the rebuilt and
+  the previously-granted binary — macOS ties Accessibility trust to the
+  binary, and both had been rebuilt since the grant. Re-run
+  `ax --request-permission` after any `make build-hotkey`.
+- **STT warm-up at startup** (`server/warmup.py`): one throwaway
+  transcription of 0.5s of silence through the active STT tyre, off-thread,
+  logged as `stt_warm_ms`. `PET_TALK_STT_WARM=0` turns it off, loudly.
+  Measured: first-turn stall 1264ms before, 198-288ms after.
+- **Enter sends in the composer** (`web/src/components/composerKeys.ts`).
+  Shift+Enter and Option+Enter insert a newline; Cmd+Enter and Ctrl+Enter send
+  too; Enter on an empty box does nothing at all; an IME's commit keystroke
+  does not fire a turn.
+- `make build-cli`, and `pet-talk-hotkey --dump-state` now reports
+  `cli: {resolved, path}`.
+
+### Changed
+
+- **The Noun Rule reaches every persona shape** (`dc84431`, `cec9def`): a
+  persona that writes its own `instruction_spec` used to get no voice rules at
+  all — no 20-word target, no 45-word ceiling, no subject requirement — while
+  `server/speech.py` went on refusing its over-long sentences for a rule
+  nobody had told it. The spec still leads and is still verbatim; the rules
+  now follow it.
+- **Stale-turn frames are ignored client-side** (`6bc105a`,
+  `web/src/turnGuard.ts`): frames are applied only when their `turn_id`
+  matches the live turn, so a barged turn cannot resume in the UI.
+- **Stall frames carry `stream_url` and `chunked`**, so a stall is played by
+  the same path as every other sentence.
+- Skip now tells the server to stop synthesizing rather than only muting the
+  client (`dfdd1a8`), and the streaming refusal is named once per socket
+  instead of once per chunk (`4c97e7c`).
+- `make build-hotkey` depends on `make build-cli`.
+
+### Fixed
+
+Six blockers from the adversarial review of the merged tree, each with a test:
+
+- `0e8fd34` — OCR text could give the model orders. Now fenced (see Security).
+- `de39cc2` — the eyes queue was not drained when the turn returned early, so
+  an attachment could leak into the *next* turn's prompt.
+- `39b84f3` — `seq` collision: the stall and the first direct-path sentence
+  both claimed `seq` 0. Seq 0 belongs to the stall; the direct path starts at 1.
+- `077dcb1` — a barge cancelled the turn but not the streaming-STT session,
+  which kept decoding into a turn that no longer existed.
+- `6bc105a` — frames from a barged turn were applied by the cockpit.
+- `bfa7dd8` — the persona name, provider class names and raw wire reasons
+  rendered with the Developer toggle **off**.
+
+Also:
+
+- `79a43a3` — a `NameError` in `_turn_pipeline` (`stall_sent` never threaded
+  through) broke eight lifecycle tests.
+- `1487713` — a caller buffer of a different length invalidated the
+  streaming-STT tail seam.
+- `bffd9c2` — the hotkey daemon could not find the CLI launcher after binaries
+  were untracked; `make` builds it now. `bin/pet-talk-cli` was an untracked
+  binary nothing in the tree built, so a clean checkout gave the daemon
+  `Target CLI: (unresolved)` and Option+Tab was a silent no-op.
+- `5cdaecf` — Enter did not send in the cockpit composer; only the Send button
+  did, while the footer hint said "Enter".
+
+### Security
+
+- **OCR text is fenced as untrusted** (`0e8fd34`,
+  `fence_ocr` in `server/persona_runtime.py`): the block sits inside a tag pair
+  the payload cannot forge, carries an explicit disclaimer, and the voice rules
+  are emitted *after* it so our rules — not the picture — are what the model
+  read last. A screenshot of the words "ignore your instructions" is data.
+- `archie` is invoked with an explicit `--` argv terminator, so a claim string
+  can never be read as a flag.
+- No `/Users/<name>` or `/home/<name>` path reaches a frame, a log line or a
+  receipt (`redact_home`, `server/logs.py`). A home directory names the person
+  at the keyboard.
+
+### Known gaps
+
+Named, not hidden. Each of these is a real limitation of 0.4.0:
+
+- **Turn-level streaming-STT benefit is NOT MEASURED** — the harness never
+  sends chunk frames, so the flag stays 0. See Added.
+- The frame log retains `audio_b64`, so a developer-rail export carries raw
+  audio bytes.
+- `qa/budgets.json` ships to the client, which tells a page our internal
+  budgets.
+- No cross-socket decode lock: two sockets can drive two concurrent decodes on
+  the same in-process model.
+- `resume_from` is wired in `server/speak_queue.py` and nothing calls it.
+- VAD is not swappable by env yet, unlike the other four capability layers:
+  `server/providers/vad.py` ships one class and no `make_vad()`.
+  `qa/test_capability_matrix.py` asserts the gap rather than hiding it.
+- The `fleet` provider alias resolves to the house tyres (LiteLLM for LLM,
+  SenseVoice for STT) and has since 0.3.0. The sovereign router's capability
+  aliases — `fleet/vision` among them — are **not in this checkout** and
+  **NOT-MEASURED**; see `docs/CAPABILITY-MATRIX.md`. There is no vision tyre
+  in 0.4.0.
+- `stall_ms` still FAILs its 400ms budget under ordinary background load
+  (642.2ms p50 at load ~7, 2026-09-12d) — the stage receipt puts the breach in
+  STT inside the server, not in isolation.
+- Kokoro word timings are estimated, never measured per-word.
+- PDF OCR has no real multi-page fixture.
+- macOS ties Accessibility trust to the binary, so rebuilding
+  `bin/pet-talk-hotkey` revokes the AX grant.
+
 ## [0.3.0] - 2026-09-12
 
 One night of hardening driven by two independent code reviews (Sonnet and

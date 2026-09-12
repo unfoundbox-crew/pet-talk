@@ -1,10 +1,10 @@
 ---
 title: pet-talk architecture
 product: pet-talk
-version: 1.0.0
+version: 1.1.0
 status: living
 updated: 2026-09-12
-verified_against: 97cdd69
+verified_against: a26eef1 + release/0.4.0
 owners: [unfoundbox]
 supersedes: []
 ---
@@ -205,15 +205,16 @@ From `docs/SPEC.md` §10, plus what this pass found:
 - 2026-09-12b (fixed this pass): the previous entry here claimed `groq/compound-mini` "cannot stream text". Wrong diagnosis. A reasoning model spends its token ceiling on `reasoning` deltas before it writes any `content`, and the ordinary 120-token ceiling ran out first — `finish_reason: "length"`, nothing spoken. Reproduced on `openai/gpt-oss-20b` and `qwen/qwen3.6-27b` as well. `_build_payload` now floors the ceiling at 400 for that family and sends `reasoning_effort: "low"` to gpt-oss; `_sentence_stream` raises `llm_no_content` instead of returning an empty generator, so this failure can never again look like a healthy provider.
 - 2026-09-12b (fixed this pass): `qa/latency.py` sent 320 samples of silence at the turn. Harmless against stub STT, fatal against a real tyre — it transcribed to nothing, the turn ended in `empty_transcript`, and every turn-level number it printed was the error path. Both live-turn scripts now share one fixture resolver (`qa/fixture_audio.py`) and send real speech with its true sample rate.
 - 2026-09-12b: **`tts_ms` still FAILs — 236.6ms against 200ms**, down from 1285.9ms. The gap that remains is structural: Kokoro's RTF here is ~0.06 and `agent.sentence` carries one finished WAV, so any sentence past ~9 words is over budget by construction. Chunked synthesis is the fix and it changes the wire contract. `stt_ms` now PASSES at 143.4ms (was 298.5ms) by going local and tuned rather than cloud.
-- 2026-09-12b: the stall cache is cold on the first turn of a fresh process, which is the only reason `turn_worst_ms` breaches (1455.3ms cold, 291.2ms warm). `KokoroLocalTTS` warms its model at startup; nothing warms the persona's stall phrases yet.
+- ~~2026-09-12b: the stall cache is cold on the first turn of a fresh process~~ — **CLOSED.** `warm_stall_cache` pre-synthesizes the persona's stalls at startup (0.3.0), and as of 0.4.0 `server/warmup.py` also runs one throwaway transcription of 0.5s of silence through the active STT tyre. STT was the remaining cold cost: with TTS and the stall cache already warm, the first turn still stalled **1264ms** while faster-whisper loaded its weights on the first call. After the STT warm, three separate boots measured **287.9 / 198.4 / 197.8ms** (2026-09-12, real providers, load ~6). The warm itself costs 3.5-3.7s, entirely off the turn path. Both warms are unawaited startup tasks, so a turn started in the first seconds can still contend with them — the first measurement of this fix read 909.6ms for exactly that reason, with STT already at 163.3ms.
 - 2026-09-12b: `kokoro-local` needs `mlx-audio` + `misaki[en]`, which on this machine live in `~/miniconda3/envs/local-ml-py311` and not in the base env. A server booted with the base `python3` gets a named `tts_mlx_audio_not_installed` on first synth. Apple Silicon only.
 - 2026-09-12 (fixed this pass): every `urllib.request`-based provider call (`server/providers/stt.py`, `server/providers/tts.py`) sent no `User-Agent`, and Cloudflare's WAF in front of `api.groq.com`'s transcription endpoint blocks Python's default UA with a 403 (measured: identical request succeeds with any ordinary UA). Fixed with a shared `DEFAULT_USER_AGENT` constant (`server/providers/_shared.py`) applied to every such request.
 - 2026-09-12: the speak queue is per-socket, not per-turn (`Session.queue` reused via `reopen()`); at most one live turn per socket by design.
 - 2026-09-12: gate 3 (≥3 gapless sentences) only partially exercised — `StubLLM` hardcodes 3 sentences, nothing proves buffering past 4-5 under sustained pressure.
 - 2026-09-12: PDF OCR (`eyes.py`, `pdf_max_pages=5`) has no test fixture with a real PDF.
 - 2026-09-12: Kokoro word timings are always estimated (`estimated: true`), never measured per-word.
-- 2026-09-12: `cli/hotkey/build.sh` does not exist yet in this checkout; `make build-hotkey` fails until another lane lands it.
-- 2026-09-12 (found this pass): `server/grounding.py` shells `pet-talk-hotkey ax` for AX snapshots, but `cli/hotkey/main.swift`'s command dispatch has no `"ax"` case as of commit `97cdd69` — an unrecognized `ax` argument falls through to the default foreground-listener branch, not a JSON snapshot. `PET_TALK_AX=1` grounding likely does not work end-to-end yet; the Swift lane may still be landing this.
+- ~~2026-09-12: `cli/hotkey/build.sh` does not exist yet in this checkout~~ — **CLOSED 2026-09-12 (0.4.0).** It landed in 0.3.0 and `make build-hotkey` works: `swiftc -O` over seven Swift files, measured 8s locally at `nice -n 19` (the standing fan-rule exception). It now depends on `make build-cli`, which writes `bin/pet-talk-cli` — that launcher was an untracked binary nothing built, which is why the daemon logged `Target CLI: (unresolved)` and Option+Tab was a silent no-op.
+- ~~2026-09-12: `cli/hotkey/main.swift` has no `"ax"` case~~ — **CLOSED 2026-09-12 (0.4.0), and the diagnosis was wrong.** The `ax` case is present in `main.swift`'s dispatch and returns JSON; a bare `ax` answers `{"ok":false,"reason":"ax_permission_denied"}` without popping a dialog, and `ax --request-permission` requests the grant. It was exercised live on 2026-09-12 and returned the focused app and window. The real friction, measured while re-checking it during the 0.4.0 pass: **macOS ties Accessibility trust to the binary, so `make build-hotkey` revokes the grant** and `ax` goes back to `ax_permission_denied` until `--request-permission` is re-run. Documented in README, "Screen grounding (opt-in)".
+- 2026-09-12 (found this pass, NOT fixed): AX output joins the system prompt in the unfenced `[ACTIVE SYSTEM GROUNDING]` block. `fence_ocr` (`server/persona_runtime.py`) covers the eyes/OCR lane only, so a window title — text a third party can choose — reaches the model as plain prompt text. This is the main reason `PET_TALK_AX` stays opt-in.
 - 2026-09-12 (found this pass): cockpit token UX is minimal — `web/src/ws.ts` reads `VITE_STUDIO_TOKEN` or `localStorage`, but there is no visible flow in `web/src/components/SettingsModal.tsx` confirmed in this pass for a first-run user to discover and paste the generated `.qa-scratch/studio.token` value; verify before calling this solved.
 
 ## Changelog
@@ -221,3 +222,4 @@ From `docs/SPEC.md` §10, plus what this pass found:
 | Version | Date | Change | Commit |
 | --- | --- | --- | --- |
 | 1.0.0 | 2026-09-12 | First ARCHITECTURE.md written against the restructured `server/`, `providers/` package, and current SPEC.md contract | 97cdd69 |
+| 1.1.0 | 2026-09-12 | 0.4.0: STT warm at startup (`server/warmup.py`), `make build-cli` writes the CLI launcher, Enter sends in the composer; three stale gaps below corrected against the tree | `release/0.4.0` |

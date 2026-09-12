@@ -1,7 +1,7 @@
 ---
 title: pet-talk roadmap
 product: pet-talk
-version: 1.0.0
+version: 1.1.0
 status: living
 updated: 2026-09-12
 horizon: 2026-Q4
@@ -12,12 +12,12 @@ horizon: 2026-Q4
 - [ ] Measure real-engine latency (real STT/LLM/TTS, not stub) — why it matters: every number in `docs/SPEC.md` §9.1 is stub-only, so we don't know actual stall/barge/turn timing — done when: `qa/latency.py` runs against `STT_PROVIDER=deepgram LLM_PROVIDER=<real> TTS_PROVIDER=kokoro` and the numbers land in SPEC.md replacing "NOT MEASURED".
 - [ ] Ship cockpit token UX — why it matters: a first-run web user has no confirmed path to find and paste the generated `.qa-scratch/studio.token` value — done when: `web/src/components/SettingsModal.tsx` has a visible "connect" flow that surfaces the token source, verified by opening the cockpit fresh with no `localStorage` entry.
 - [ ] Prove the per-turn queue buffers ≥4-5 sentences under sustained real TTS — why it matters: gate 3 in `docs/SPEC.md` §9.2 is only partially exercised by `StubLLM`'s hardcoded 3 sentences — done when: a `qa/test_turn_lifecycle.py` fixture streams an unbounded answer against real or slow-TTS timing and asserts no gap past the 4th sentence.
-- [ ] Prove `PET_TALK_AX=1` grounding live — why it matters: `server/grounding.py` shells out to `pet-talk-hotkey ax`, which now exists in `main.swift` but has only been typechecked, and it needs the Accessibility permission — done when: one turn prompt carries a "Screen:" line on this Mac and qa holds a dated manual receipt.
+- [ ] Fence the AX grounding block, or drop window titles from it — why it matters: `fence_ocr` covers the eyes/OCR lane only, so AX output reaches the model inside the unfenced `[ACTIVE SYSTEM GROUNDING]` block and a window title is text a third party can choose — done when: `qa/test_persona.py` proves an AX snapshot carrying "ignore your instructions" is fenced and disclaimed the way OCR text is.
+- [ ] Make the streaming-STT harness send `user.chunk` frames — why it matters: `PET_TALK_STT_STREAM` stays 0 because `qa/latency.py` and `qa/live_ws_turn.py` hand the whole utterance to one `user.stop`, so every measured turn takes the whole-utterance path (`"path": "worker"`) and the flag's turn-level benefit is NOT MEASURED — done when: a live run shows `"path": "stream"` in `server/turns.jsonl` and a `stall_ms` number for each flag setting.
 - [ ] Add PDF OCR test coverage — why it matters: `eyes.py`'s PDF path (`pdf_max_pages=5`) has zero fixture coverage — done when: `qa/test_eyes.py` includes a real PDF fixture exercising `task_for()` forcing `transcribe`.
 
 ## Next (this month)
 
-- [ ] Land `cli/hotkey/build.sh` on the air lane — why it matters: `make build-hotkey` fails today with no script — done when: `make build-hotkey` succeeds via `ssh air` and produces `bin/pet-talk-hotkey`.
 - [ ] WebRTC/Opus duplex audio streaming — why it matters: current PCM16-over-WS has packetization overhead against the 400ms first-audio target — done when: a streaming STT session receives phonemes continuously without waiting for endpointing, measured against the target in `docs/SPEC.md`.
 - [ ] Acoustic echo cancellation for built-in speaker + open mic — why it matters: Donna's own speech can falsely re-trigger STT or cancel playback — done when: `kAudioUnitSubType_VoiceProcessingIO` is wired and a bleed test shows no false re-trigger.
 - [ ] Measure Kokoro real per-word timing, or document the estimate gap loudly in the cockpit UI — why it matters: any word-highlight UI on Kokoro audio is highlighting a guess (`estimated: true`) — done when: either Kokoro reports real timestamps or the cockpit visibly marks estimated words.
@@ -39,6 +39,13 @@ horizon: 2026-Q4
 
 | Date | Item | Commit |
 | --- | --- | --- |
+| 2026-09-12 | 0.4.0 cut: `SERVICE_VERSION` 0.4.0, CHANGELOG, `docs/RELEASE-NOTES-0.4.0.md` | `release/0.4.0` |
+| 2026-09-12 | STT warm at startup — first-turn stall 1264ms -> 198-288ms, three boots, real providers (`server/warmup.py`) | `f968029` |
+| 2026-09-12 | `make build-cli` writes `bin/pet-talk-cli`; `--dump-state` reports `cli.resolved`. Option+Tab was a silent no-op without it | `bffd9c2` |
+| 2026-09-12 | Enter sends in the cockpit composer; Shift+Enter newlines (`web/src/components/composerKeys.ts`) | `5cdaecf` |
+| 2026-09-12 | `PET_TALK_AX=1` grounding exercised live — returned the focused app and window. Caveat: a `make build-hotkey` revokes the macOS Accessibility grant | `a26eef1` |
+| 2026-09-12 | `make build-hotkey` works locally, 8s, seven Swift files (the "land build.sh on air" item was mis-scoped — air is Intel and cannot build for this Mac) | `1d658cc` |
+| 2026-09-12 | Wave 2: inspector cockpit, read-ahead, latency bar, Developer toggle, Archie glyph (web + HUD), streaming STT behind a flag, eyes OCR in the prompt, six review blockers closed | `a26eef1` |
 | 2026-09-12 | Studio token wired through CLI client and web cockpit | `97cdd69` |
 | 2026-09-12 | Studio token sent on WS handshake, never printed in the URL log line | `9e79546` |
 | 2026-09-12 | Per-turn queue, cancellable synth, named route failure, safe delete | `962acda` |
@@ -87,3 +94,5 @@ horizon: 2026-Q4
 | 2026-09-12 | One SPEC.md is the contract; TECH-SPEC.md and TECH-DESIGN.md become pointer stubs | Keeping three overlapping docs in sync by hand | `docs/SPEC.md`, commit `5b71112` |
 | 2026-09-12 | `describe` OCR task ships disabled by default (`EYES_DESCRIBE_ENGINE` unset) | Defaulting to `apple-fm` and eating a 100+s hang per screenshot | `docs/SPEC.md` §8 |
 | 2026-09-12 | Egress allowlist on every `*_base_url` in `POST /settings` | Trusting any host a client sends | `docs/SPEC.md` §6.1, commit `b20133c` |
+| 2026-09-12 | `PET_TALK_STT_STREAM` ships at `0` because the harness cannot exercise it, not because streaming failed | Shipping it on with an unmeasured claim; deleting the code | `CHANGELOG.md` 0.4.0, `docs/SPEC.md` §9.2 |
+| 2026-09-12 | `make build-hotkey` runs locally at `nice -n 19`, the one standing fan-rule exception | Routing it to `ssh air` — Intel, would emit an x86_64 binary that cannot run on this Mac | `Makefile`, README |
