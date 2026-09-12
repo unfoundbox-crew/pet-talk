@@ -22,6 +22,10 @@ venv/
 # built binaries — never committed; build on ssh air (fan rule), see Makefile
 bin/*
 !bin/.gitkeep
+# ...except these two source scripts (not built artifacts) — the launchd
+# agent launcher and its install/uninstall/status control script.
+!bin/pet-talk-server
+!bin/agent-ctl.sh
 
 # QA scratch (receipts, fixtures written by tests) — never committed
 .qa-scratch/

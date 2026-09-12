@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Runs the pet-talk duplex server (server/app.py, uvicorn on 127.0.0.1:8089)
+  as a user LaunchAgent instead of a terminal process — pattern lifted from
+  ~/code/motionvector/inference-fleet/launchd/com.motionvector.inference-fleet-cli-backend.plist.
+
+  A user LaunchAgent, not a daemon, on purpose: it runs inside the logged-in
+  session, which is where Doppler and the Kokoro/mlx-audio Python env live.
+
+  This file is a TEMPLATE — __PET_TALK_LAUNCHER__ below is a placeholder, not
+  a real path. `bin/agent-ctl.sh install` (via `make install-agent`) renders
+  it with this checkout's absolute path to bin/pet-talk-server and writes the
+  result to ~/Library/LaunchAgents/com.unfoundbox.pet-talk-server.plist. Never
+  edit the rendered copy by hand — re-run `make install-agent` instead.
+
+  Install:  make install-agent
+  Status:   make agent-status
+  Remove:   make uninstall-agent
+
+  bin/pet-talk-server does its own logging + size-based rotation to
+  ~/Library/Application Support/pet-talk/server.log, so this plist only
+  captures whatever a crash prints before that redirect takes effect.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.unfoundbox.pet-talk-server</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PET_TALK_LAUNCHER__</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>__PET_TALK_BOOTSTRAP_LOG__</string>
+  <key>StandardErrorPath</key>
+  <string>__PET_TALK_BOOTSTRAP_LOG__</string>
+</dict>
+</plist>

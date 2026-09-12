@@ -254,6 +254,29 @@ class TestRegistrationVerifiesBothChords(unittest.TestCase):
         self.assertIn("handover", res.stdout.lower())
 
 
+class TestServerHealthProbe(unittest.TestCase):
+    """Wake-time health probe (main.swift `probeServerHealth`, called from
+    `startNewTurn()` before spawning pet-talk-cli): `--self-test` stubs an
+    unreachable port (127.0.0.1:1) and asserts the probe fails closed inside
+    its own 300ms budget — see qa/test_launchd.py for the server-as-agent
+    suite this pairs with."""
+
+    @classmethod
+    def setUpClass(cls):
+        _skip_if_no_bin()
+
+    def test_self_test_covers_the_health_probe(self):
+        res = subprocess.run([BIN_PATH, "--self-test"], capture_output=True,
+                             text=True, timeout=15, env=HEADLESS_ENV)
+        self.assertEqual(res.returncode, 0, f"--self-test failed:\n{res.stdout}\n{res.stderr}")
+        self.assertIn("health probe fails closed on an unreachable port", res.stdout)
+        self.assertIn("health probe stays within its timeout budget", res.stdout)
+        # Every "PASS:" line for these two checks, never "FAIL:".
+        for line in res.stdout.splitlines():
+            if "health probe" in line:
+                self.assertIn("PASS:", line, f"health probe check did not pass: {line}")
+
+
 class TestBargeInLatency(unittest.TestCase):
     """Disabled by design: a QA test must never start real afplay playback
     or SIGKILL it (night rule, COMMON.md). Verify manually with:

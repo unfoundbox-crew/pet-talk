@@ -433,6 +433,42 @@ class HotkeyListener {
         throw CliPathResolutionError.notFound(checked: checked)
     }
 
+    /// The duplex server's health URL — overridable so a test (or an unusual
+    /// setup) can point this at something other than the default install.
+    /// No hardcoded absolute path; matches the server's own default bind
+    /// (see server/app.py, README "Run it": 127.0.0.1:8089).
+    func serverHealthURL() -> String {
+        ProcessInfo.processInfo.environment["PET_TALK_SERVER_HEALTH_URL"] ?? "http://127.0.0.1:8089/health"
+    }
+
+    /// Probe the duplex server's `/health` route (open, no `X-Studio-Token`
+    /// needed — server/auth.py leaves reads open) with a short, bounded
+    /// timeout. Called on "wake" — right before a hotkey press would spawn
+    /// `pet-talk-cli once` — so a dead server fails closed with a named
+    /// reason (law #1) instead of the CLI spawning into a turn nothing is
+    /// listening on. `urlString` lets a test point this at an unreachable
+    /// port without touching the environment.
+    func probeServerHealth(urlString: String? = nil, timeoutMs: Double = 300) -> Bool {
+        guard let url = URL(string: urlString ?? serverHealthURL()) else { return false }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = timeoutMs / 1000.0
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var ok = false
+        let task = URLSession.shared.dataTask(with: request) { _, response, error in
+            if error == nil, let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) {
+                ok = true
+            }
+            semaphore.signal()
+        }
+        task.resume()
+        // Wait slightly longer than URLRequest's own timeoutInterval so that
+        // timeout — not this wait — is what bounds a truly hung connection.
+        _ = semaphore.wait(timeout: .now() + .milliseconds(Int(timeoutMs)) + .milliseconds(200))
+        return ok
+    }
+
     /// Extract transcribed speech sentence from pet-talk-cli stdout stream.
     static func extractTranscribedText(from output: String) -> String? {
         let patterns = [
@@ -769,6 +805,26 @@ class HotkeyListener {
     }
 
     private func startNewTurn() {
+        // Wake-time health probe: fail closed with a named reason (law #1)
+        // before ever spawning the CLI, rather than opening the mic into a
+        // turn nothing on :8089 can answer.
+        if !probeServerHealth() {
+            log("! [error] server_unreachable: \(serverHealthURL()) did not answer within 300ms")
+            EarconEngine.shared.playError()
+            HUDController.shared.triggerErrorShake()
+            HUDController.shared.showBreadcrumb(
+                badge: "Error",
+                detail: "server is not running",
+                state: .thinking
+            )
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+                if !self.isTurnActive() {
+                    HUDController.shared.dismiss()
+                }
+            }
+            return
+        }
+
         // Immediate mic open earcon (<1.2ms)
         EarconEngine.shared.playMicOpen()
         log("| [idle] Triggered -> starting one-shot recording turn...")
@@ -1730,6 +1786,20 @@ func doSelfTest() -> Int32 {
     // 3. The HUD never became visible during any of this.
     check("no window was shown", !HUDController.shared.panel.isVisible)
     check("lifecycle untouched", HUDController.shared.lifecycleName == "hidden")
+
+    // 4. Wake-time health probe (server_unreachable path): a stubbed
+    // unreachable port must fail closed, and do so within its own timeout
+    // budget rather than hanging — nothing here touches the real :8089
+    // server or any network beyond loopback.
+    let healthT0 = DispatchTime.now()
+    let unreachable = HotkeyListener.shared.probeServerHealth(
+        urlString: "http://127.0.0.1:1/health", timeoutMs: 300
+    )
+    let healthElapsedMs = Double(DispatchTime.now().uptimeNanoseconds - healthT0.uptimeNanoseconds) / 1_000_000.0
+    check("health probe fails closed on an unreachable port", unreachable == false,
+          "\(String(format: "%.1f", healthElapsedMs))ms")
+    check("health probe stays within its timeout budget", healthElapsedMs < 1500.0,
+          "\(String(format: "%.1f", healthElapsedMs))ms vs 300ms probe timeout")
 
     if failures.isEmpty {
         print("+-- PASS: self-test (spring integrator + geometry math), headless")
