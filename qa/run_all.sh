@@ -46,6 +46,7 @@ REAL_ENGINE="${PET_TALK_REAL_ENGINE:-0}"
 # ---------------------------------------------------------------------------
 SUITES=(
   "protocol frames|qa/test_protocol.py|unit|"
+  "design tokens (AgentWorth vendor + pet-talk layer)|qa/test_design_tokens.py|unit|"
   "personas + voices + i18n|qa/test_persona.py|unit|"
   "persona studio API & persistence|qa/test_persona_api.py|unit|"
   "runtime tire switching & settings API|qa/test_settings_api.py|unit|"
@@ -54,6 +55,7 @@ SUITES=(
   "hippocampus memory ledger|qa/test_memory.py|unit|"
   "humanizer backchannel contract|qa/test_humanizer_gates.py|unit|"
   "provider ABCs & factories|qa/test_providers.py|unit|"
+  "chunked TTS wire path & warm stall cache|qa/test_tts_chunking.py|unit|"
   "turn lifecycle|qa/test_turn_lifecycle.py|unit|OPTIONAL"
   "studio token + egress allowlist (exfiltration refused)|qa/test_security.py|unit|OPTIONAL"
   "zero-vision eyes lane (attach, OCR, named errors)|qa/test_eyes.py|unit|"

@@ -18,6 +18,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -101,7 +102,16 @@ class TestHUDWindowSpecifications(unittest.TestCase):
         self.assertEqual(notch_specs.get("listeningHeight"), 52.0, "Listening drip height is 52px")
         self.assertEqual(notch_specs.get("expandedHeight"), 60.0, "Expanded blossom height is 60px")
 
-        self.assertEqual(notch_specs.get("restingWidth"), 220.0, "Hardware notch resting width is 220px")
+        # Resting width is the MEASURED notch, never a 220 literal: on a notched
+        # screen it equals the measured notch width, on an external display it is
+        # the 180pt fallback pill.
+        if data.get("hasNotch"):
+            self.assertEqual(notch_specs.get("restingWidth"), data.get("notchWidth"),
+                             "Resting width must be the measured notch width")
+            self.assertGreater(data.get("notchWidth", 0), 0.0, "Measured notch width must be positive")
+        else:
+            self.assertEqual(notch_specs.get("restingWidth"), 180.0,
+                             "With no hardware notch the fallback pill is 180pt")
         self.assertEqual(notch_specs.get("expandedWidth"), 440.0, "Blossom expanded width is 440px")
 
         self.assertEqual(notch_specs.get("earFilletRadius"), 10.0, "Top concave ear fillets radius is 10px")
@@ -110,7 +120,6 @@ class TestHUDWindowSpecifications(unittest.TestCase):
         self.assertEqual(notch_specs.get("hoverPeekHeight"), 6.0, "Hover peek shelf height is 6px")
 
         self.assertIn("hasNotch", data, "Must detect whether active screen has hardware notch")
-        self.assertGreaterEqual(data.get("notchWidth", 0), 220.0, "Notch width must be >= 220px")
 
     def test_apple_motion_tokens(self):
         """Verify Apple fluid spring physics and timing tokens (SPEC-PET-TALK-004 Sec 3)."""
@@ -344,6 +353,257 @@ class TestDynamicMultiLineAndBreadcrumbs(unittest.TestCase):
         self.assertIn("[Donna heard]", res.stdout)
         self.assertIn("[Speaking]", res.stdout)
         self.assertIn("PASS: Semantic Action Breadcrumbs & Multi-line visual test completed.", res.stdout)
+
+
+class TestSpringMechanics(unittest.TestCase):
+    """The three declared spring tokens must drive real motion, not sit unused.
+
+    Pure static source-text checks — no build, no binary, no audio.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if not os.path.exists(HUD_SWIFT_SRC):
+            raise unittest.SkipTest(f"SKIP: {HUD_SWIFT_SRC} not present yet")
+        with open(HUD_SWIFT_SRC, "r", encoding="utf-8") as f:
+            cls.src = f.read()
+
+    def test_spring_animation_reads_the_declared_tokens(self):
+        """A CASpringAnimation is built, and its stiffness/damping/mass come from
+        the HUDTokens spring tokens — never from inline numeric literals."""
+        self.assertTrue("CASpringAnimation" in self.src,
+                        "A real CASpringAnimation must exist, not just declared tokens")
+        idx = self.src.find("CASpringAnimation(")
+        block = self.src[idx:idx + 900]
+        self.assertIn("HUDTokens.springStiffness", block,
+                      "stiffness must read HUDTokens.springStiffness")
+        self.assertIn("HUDTokens.springDamping", block,
+                      "damping must read HUDTokens.springDamping")
+        self.assertIn("HUDTokens.springMass", block,
+                      "mass must read HUDTokens.springMass")
+        self.assertIn("initialVelocity", block, "initialVelocity must be set explicitly")
+
+        import re
+        for prop in ("stiffness", "damping", "mass"):
+            self.assertIsNone(
+                re.search(r"\b%s\s*=\s*[0-9]" % prop, self.src),
+                f"{prop} must never be assigned a numeric literal — read the token",
+            )
+
+    def test_spring_driver_integrates_the_same_tokens(self):
+        """A damped-spring integrator drives capsule geometry (window frame),
+        seeded from the same three tokens."""
+        self.assertTrue("HUDSpringDriver" in self.src,
+                        "A spring driver type must exist")
+        idx = self.src.find("class HUDSpringDriver")
+        self.assertNotEqual(idx, -1, "HUDSpringDriver must be a declared type")
+        block = self.src[idx:idx + 2600]
+        self.assertIn("stiffness", block)
+        self.assertIn("damping", block)
+        self.assertIn("mass", block)
+        # Semi-implicit Euler on a damped spring: acceleration from -k*x - c*v, /m
+        self.assertIn("velocity", block, "The integrator must carry velocity state")
+
+    def test_no_literal_capsule_width_220(self):
+        """capsuleWidth is the measured notch, so no 220 literal survives."""
+        offenders = [
+            ln.strip() for ln in self.src.splitlines()
+            if "220" in ln and ("width" in ln.lower() or "capsule" in ln.lower())
+        ]
+        self.assertEqual(offenders, [],
+                         "no 220pt capsule-width literal may survive — measure the notch")
+        self.assertTrue("measuredNotchWidth" in self.src,
+                        "capsuleWidth must come from a measuredNotchWidth() reading")
+        self.assertTrue("auxiliaryTopLeftArea" in self.src, "missing: auxiliaryTopLeftArea")
+        self.assertTrue("auxiliaryTopRightArea" in self.src, "missing: auxiliaryTopRightArea")
+
+    def test_fallback_capsule_width_is_180_token(self):
+        """With no notch (external display) the fallback pill is 180pt, via a token."""
+        self.assertTrue("fallbackCapsuleWidth" in self.src, "missing: fallbackCapsuleWidth")
+        import re
+        self.assertIsNotNone(
+            re.search(r"fallbackCapsuleWidth[^\n]*=\s*180\.0", self.src),
+            "HUDTokens.fallbackCapsuleWidth must default to 180.0",
+        )
+        self.assertTrue("measuredNotchWidth() ?? HUDTokens.fallbackCapsuleWidth" in self.src,
+                        "capsuleWidth must fall back to the 180pt token when no notch is reported")
+
+    def test_ear_fillets_only_past_notch_width_plus_threshold(self):
+        self.assertTrue("earFilletThreshold" in self.src, "missing: earFilletThreshold")
+        import re
+        self.assertIsNotNone(
+            re.search(r"earFilletThreshold[^\n]*=\s*24\.0", self.src),
+            "ear fillet threshold token must default to 24.0pt",
+        )
+        self.assertTrue("notchInfo.notchWidth + HUDTokens.earFilletThreshold" in self.src,
+                        "ear fillets appear only when content exceeds notch width + threshold")
+
+    def test_reduce_motion_zeroes_travel_and_keeps_time(self):
+        self.assertTrue("accessibilityDisplayShouldReduceMotion" in self.src, "missing: accessibilityDisplayShouldReduceMotion")
+        self.assertTrue("reduceMotionDuration" in self.src,
+                        "Reduce Motion must keep a timed crossfade (80ms), not zero it")
+        # The Reduce Motion branch must snap the frame (zero travel) rather than
+        # hand the frame to the spring driver.
+        idx = self.src.find("func show(state: HUDState")
+        show_block = self.src[idx:idx + 3000]
+        rm = show_block.find("accessibilityDisplayShouldReduceMotion")
+        self.assertNotEqual(rm, -1, "show() must have a Reduce Motion branch")
+        rm_block = show_block[rm:rm + 900]
+        self.assertNotIn("HUDSpringDriver", rm_block,
+                         "the Reduce Motion branch must not run the spatial spring driver")
+
+    def test_barge_is_a_hard_cut_with_no_animation(self):
+        self.assertNotEqual(self.src.find("func dismiss("), -1)
+        self.assertTrue("hardCut" in self.src,
+                        "the barge path must be a named hard cut, not a short fade")
+        hc = self.src.find("// HARD CUT")
+        self.assertNotEqual(hc, -1, "the hard-cut path must be marked in the source")
+        hc_block = self.src[hc:hc + 600]
+        self.assertNotIn("NSAnimationContext", hc_block,
+                         "a barge hard cut must run zero animation")
+        self.assertNotIn("HUDSpringDriver", hc_block,
+                         "a barge hard cut must not spring")
+
+    def test_error_shake_amplitude_and_cycles_come_from_tokens(self):
+        idx = self.src.find("func triggerErrorShake")
+        block = self.src[idx:idx + 1600]
+        self.assertIn("errorShakeAmplitude", block, "±3pt amplitude must read the token")
+        self.assertIn("errorShakeCycles", block, "cycle count must read the token")
+        self.assertIn("errorShakeDuration", block, "120ms duration must read the token")
+
+    def test_tokens_are_overridable_from_config_yaml(self):
+        """A design-playground export lands in config.yaml and applies with no rebuild."""
+        self.assertTrue("struct HUDTokens" in self.src, "missing: struct HUDTokens")
+        self.assertTrue("static func apply(from config: PetTalkConfig)" in self.src,
+                        "HUDTokens must accept a config.yaml override")
+        cfg_src_path = os.path.join(ROOT, "cli", "hotkey", "config.swift")
+        with open(cfg_src_path, "r", encoding="utf-8") as f:
+            cfg = f.read()
+        for key in ("spring_stiffness", "spring_damping", "spring_mass",
+                    "notch_width_fallback", "ear_fillet_threshold", "double_tap_window_ms"):
+            self.assertIn(key, cfg, f"config.yaml must expose the {key} key")
+
+    def test_lane4_handover_comment_present(self):
+        """HUDTokens is a placeholder: lane 4's generated file replaces it."""
+        idx = self.src.find("struct HUDTokens")
+        header = self.src[max(0, idx - 900):idx]
+        self.assertIn("DesignTokens.swift", header,
+                      "HUDTokens must say lane 4's generated DesignTokens.swift replaces it")
+
+
+class TestDumpState(unittest.TestCase):
+    """`--dump-state` is the one machine-readable read of the live HUD: one JSON
+    line, no daemon, no audio, no window shown."""
+
+    @classmethod
+    def setUpClass(cls):
+        _skip_if_no_bin()
+        res = subprocess.run([BIN_PATH, "--dump-state"], capture_output=True, text=True, timeout=15)
+        # A present binary whose --dump-state fails is a real failure, never a skip.
+        if res.returncode != 0:
+            raise AssertionError(f"--dump-state failed (rc={res.returncode}):\n{res.stderr}\n{res.stdout}")
+        cls.raw = res.stdout
+        cls.state = json.loads(res.stdout)
+
+    def test_single_json_line(self):
+        lines = [ln for ln in self.raw.splitlines() if ln.strip()]
+        self.assertEqual(len(lines), 1, f"--dump-state must print exactly one line, got {len(lines)}")
+
+    def test_state_machine_block(self):
+        sm = self.state.get("state")
+        self.assertIsInstance(sm, dict, "must export a state machine block")
+        self.assertEqual(sm.get("lifecycle"), "hidden", "a fresh process is hidden")
+        self.assertIn("hudState", sm)
+        self.assertIn("paused", sm)
+        self.assertIn("hoverPeek", sm)
+        self.assertIn("reduceMotion", sm)
+
+    def test_capsule_geometry_block(self):
+        g = self.state.get("geometry")
+        self.assertIsInstance(g, dict, "must export a geometry block")
+        self.assertEqual(g.get("fallbackCapsuleWidth"), 180.0)
+        self.assertEqual(g.get("earFilletThreshold"), 24.0)
+        self.assertIn("hasNotch", g)
+        if g.get("hasNotch"):
+            self.assertEqual(g.get("capsuleWidth"), g.get("measuredNotchWidth"),
+                             "with a notch, the capsule is exactly the measured notch wide")
+        else:
+            self.assertEqual(g.get("capsuleWidth"), 180.0,
+                             "with no notch, the capsule is the 180pt fallback pill")
+
+    def test_spring_constants_block(self):
+        s = self.state.get("spring")
+        self.assertIsInstance(s, dict, "must export a spring block")
+        self.assertEqual(s.get("stiffness"), 220.0)
+        self.assertEqual(s.get("damping"), 21.0)
+        self.assertEqual(s.get("mass"), 1.0)
+        self.assertGreater(s.get("settlingDurationMs", 0), 0.0,
+                           "a real spring reports a settling duration")
+
+    def test_chord_block_matches_the_new_gestures(self):
+        c = self.state.get("chords")
+        self.assertIsInstance(c, dict, "must export the chord map")
+        self.assertEqual(c.get("optionTab"), "ask")
+        self.assertEqual(c.get("optionShiftTab"), "handover")
+        self.assertEqual(c.get("optionTabDoubleTap"), "pause")
+        self.assertEqual(c.get("doubleTapWindowMs"), 400.0)
+
+
+class TestSpringConstantsSourcedFromDesignTokens(unittest.TestCase):
+    """The Swift HUD's spring numbers should come from DesignTokens (design
+    lane's generated file), not from hud_window.swift's own literals.
+
+    DesignTokens.swift is generated by design/build.py from
+    design/tokens.pet-talk.json (see DESIGN.md) — that half of this
+    assertion is real and enforced unconditionally below. Wiring
+    hud_window.swift's `HUDMotionTokens` to actually read `DesignTokens.*`
+    instead of its own `220.0`/`21.0`/`1.0` literals is a concurrent lane's
+    (lane 3's) integration step, not this suite's edit — until that lands,
+    this test SKIPs with the exact reason rather than faking a pass.
+    """
+
+    DESIGN_TOKENS_SWIFT = os.path.join(ROOT, "cli", "hotkey", "DesignTokens.swift")
+
+    def test_design_tokens_swift_defines_matching_spring_constants(self):
+        if not os.path.exists(self.DESIGN_TOKENS_SWIFT):
+            self.fail(
+                "cli/hotkey/DesignTokens.swift is missing — run "
+                "`python3 design/build.py --write`"
+            )
+        with open(self.DESIGN_TOKENS_SWIFT, "r", encoding="utf-8") as f:
+            src = f.read()
+        for name, expected in (
+            ("springStiffness", "220"),
+            ("springDamping", "21"),
+            ("springMass", "1"),
+        ):
+            m = re.search(rf"static let {name}: Double = ([0-9.]+)", src)
+            self.assertIsNotNone(m, f"DesignTokens.swift has no {name}")
+            self.assertEqual(
+                float(m.group(1)), float(expected),
+                f"DesignTokens.{name} drifted from design/tokens.pet-talk.json",
+            )
+
+    def test_hud_window_reads_design_tokens_not_own_literals(self):
+        if not os.path.exists(HUD_SWIFT_SRC):
+            raise unittest.SkipTest("SKIP: cli/hotkey/hud_window.swift not present yet")
+        with open(HUD_SWIFT_SRC, "r", encoding="utf-8") as f:
+            src = f.read()
+        wired = "DesignTokens.springStiffness" in src or "DesignTokens.springDamping" in src
+        if not wired:
+            raise unittest.SkipTest(
+                "SKIP: cli/hotkey/hud_window.swift still defines its own "
+                "HUDMotionTokens literals (springStiffness = 220.0, "
+                "springDamping = 21.0, springMass = 1.0) instead of reading "
+                "DesignTokens.springStiffness/springDamping/springMass — "
+                "wiring that read-through is lane 3's integration step "
+                "(cli/hotkey/hud_window.swift, cli/hotkey/main.swift are its "
+                "owned paths, not this design lane's)."
+            )
+        self.assertNotIn(
+            "public static let springStiffness: Double = 220.0", src,
+            "hud_window.swift is wired to DesignTokens but still keeps its own literal",
+        )
 
 
 if __name__ == "__main__":

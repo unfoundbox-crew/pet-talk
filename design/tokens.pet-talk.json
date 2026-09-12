@@ -1,0 +1,69 @@
+{
+  "$meta": {
+    "product": "pet-talk",
+    "version": "1.0.0",
+    "extends": "tokens.css (AgentWorth, vendored at design/tokens.css)",
+    "source_preset": "oscilloscope",
+    "note": "Colour/neutral identity and font family live in tokens.css (AgentWorth) and are never redefined here. This file adds only what is genuinely pet-talk's own: notch/capsule geometry, spring motion, the listening-line, and the two receipt colours (signal, peg). Shape matches the pet-talk Playground's tokens.pet-talk.json export exactly, so a playground export can be dropped in unchanged."
+  },
+  "type": {
+    "scale.ratio": "1.200",
+    "size.label": "14.2px",
+    "size.body": "17px",
+    "size.sub": "20.4px",
+    "size.head": "24.5px",
+    "size.display": "29.4px",
+    "family.spoken": "IBM Plex Sans"
+  },
+  "geometry": {
+    "notch.width": "180pt",
+    "notch.height": "37pt",
+    "capsule.width.rest": "180pt",
+    "capsule.width.expanded": "440pt",
+    "capsule.height.listening": "52pt",
+    "capsule.height.expanded": "60pt",
+    "capsule.height.max": "110pt",
+    "radius.bottom": "20pt",
+    "radius.earFillet": "10pt",
+    "idle.line.thickness": "4pt",
+    "sleep.bead": "2pt",
+    "hoverPeek": "6pt"
+  },
+  "motion": {
+    "spring.stiffness": "220",
+    "spring.damping": "21",
+    "spring.mass": "1",
+    "duration.stallIn": "120ms",
+    "duration.sentenceArrive": "160ms",
+    "duration.bargeCut": "0ms",
+    "duration.sleepRetract": "180ms",
+    "duration.escapeDismiss": "40ms",
+    "error.shakeCycles": "3",
+    "error.shakeAmplitude": "3pt",
+    "error.shakeDuration": "120ms",
+    "reducedMotion.distance": "full",
+    "reducedMotion.crossfade": "80ms"
+  },
+  "listening_line": {
+    "signal": {
+      "light": "#B7621A",
+      "dark": "#F0A23C",
+      "role": "live acoustic data only. Never a button."
+    },
+    "peg": {
+      "light": "#A02C1B",
+      "dark": "#FF6A47",
+      "role": "one meaning only: a number outside its budget"
+    },
+    "attack": {
+      "light": "0.22",
+      "dark": "0.22",
+      "role": "listening-line RMS attack filter coefficient, measured from cli/hotkey/hud_window.swift"
+    },
+    "decay": {
+      "light": "0.78",
+      "dark": "0.78",
+      "role": "listening-line RMS decay filter coefficient, measured from cli/hotkey/hud_window.swift"
+    }
+  }
+}

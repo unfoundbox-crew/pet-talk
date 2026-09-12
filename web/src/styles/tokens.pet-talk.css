@@ -1,0 +1,60 @@
+/* GENERATED FILE — do not edit by hand.
+   Source: design/tokens.css + design/tokens.pet-talk.json
+   Regenerate with: python3 design/build.py --write
+   pet-talk's own layer only — colour/neutral identity comes from
+   tokens.css (AgentWorth) and is never redefined here. */
+
+:root {
+  --pt-type-scale-ratio: 1.200;
+  --pt-type-size-label: 14.2px;
+  --pt-type-size-body: 17px;
+  --pt-type-size-sub: 20.4px;
+  --pt-type-size-head: 24.5px;
+  --pt-type-size-display: 29.4px;
+  --pt-type-family-spoken: "IBM Plex Sans";
+  --pt-geo-notch-width: 180pt;
+  --pt-geo-notch-height: 37pt;
+  --pt-geo-capsule-width-rest: 180pt;
+  --pt-geo-capsule-width-expanded: 440pt;
+  --pt-geo-capsule-height-listening: 52pt;
+  --pt-geo-capsule-height-expanded: 60pt;
+  --pt-geo-capsule-height-max: 110pt;
+  --pt-geo-radius-bottom: 20pt;
+  --pt-geo-radius-earFillet: 10pt;
+  --pt-geo-idle-line-thickness: 4pt;
+  --pt-geo-sleep-bead: 2pt;
+  --pt-geo-hoverPeek: 6pt;
+  --pt-motion-spring-stiffness: 220;
+  --pt-motion-spring-damping: 21;
+  --pt-motion-spring-mass: 1;
+  --pt-motion-duration-stallIn: 120ms;
+  --pt-motion-duration-sentenceArrive: 160ms;
+  --pt-motion-duration-bargeCut: 0ms;
+  --pt-motion-duration-sleepRetract: 180ms;
+  --pt-motion-duration-escapeDismiss: 40ms;
+  --pt-motion-error-shakeCycles: 3;
+  --pt-motion-error-shakeAmplitude: 3pt;
+  --pt-motion-error-shakeDuration: 120ms;
+  --pt-motion-reducedMotion-distance: full;
+  --pt-motion-reducedMotion-crossfade: 80ms;
+  --pt-listening-signal: #B7621A;
+  --pt-listening-peg: #A02C1B;
+  --pt-listening-attack: 0.22;
+  --pt-listening-decay: 0.78;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --pt-listening-signal: #F0A23C;
+    --pt-listening-peg: #FF6A47;
+    --pt-listening-attack: 0.22;
+    --pt-listening-decay: 0.78;
+  }
+}
+:root[data-theme="dark"] {
+  --pt-listening-signal: #F0A23C;
+  --pt-listening-peg: #FF6A47;
+  --pt-listening-attack: 0.22;
+  --pt-listening-decay: 0.78;
+}
+
