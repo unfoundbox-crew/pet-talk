@@ -15,6 +15,7 @@ import array
 import asyncio
 import math
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -116,6 +117,8 @@ class TestAudioProcessing(unittest.TestCase):
         self.assertFalse(vad.speech_started, "Speech should not be marked started on silence timeout")
 
     def test_find_recorder_detection(self):
+        if not any(shutil.which(b) for b in ("sox", "rec", "ffmpeg")):
+            self.skipTest("SKIP: no sox/rec/ffmpeg on this host — find_recorder has nothing to find")
         cmd = find_recorder()
         self.assertIsInstance(cmd, list)
         self.assertGreater(len(cmd), 0)

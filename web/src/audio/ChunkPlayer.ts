@@ -124,6 +124,13 @@ export class ChunkPlayer {
       await ctx.resume().catch(() => undefined);
     }
 
+    if (!frame.audio_b64) {
+      // The server's end-of-stream marker for a backend that never flagged its
+      // own last chunk (SPEC 4.2.1): `final: true` with no audio. Nothing to
+      // decode, and not an error.
+      return;
+    }
+
     const raw = base64ToArrayBuffer(frame.audio_b64);
     if (raw.byteLength > MAX_CHUNK_BYTES) {
       console.warn(

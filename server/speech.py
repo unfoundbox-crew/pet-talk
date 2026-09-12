@@ -75,6 +75,33 @@ async def synth_off_thread(
     return wav, word_times
 
 
+#: One ``agent.chunk`` is base64'd whole into a WS frame, so its size is the
+#: client's memory and the socket's head-of-line delay. A clause of speech is a
+#: few tens of KiB; 512 KiB is generous. An untrusted backend handing back a
+#: 40 MB "clause" is refused, not forwarded.
+DEFAULT_CHUNK_MAX_BYTES = 512 * 1024
+
+
+def chunk_max_bytes() -> int:
+    """Per-chunk cap. ``PET_TALK_CHUNK_MAX_BYTES``, default 512 KiB.
+
+    An unparseable or non-positive value falls back to the default and says so
+    — a cap that config can silently switch off is not a cap.
+    """
+    raw = os.environ.get("PET_TALK_CHUNK_MAX_BYTES", "")
+    if not raw.strip():
+        return DEFAULT_CHUNK_MAX_BYTES
+    try:
+        value = int(raw)
+    except ValueError:
+        swallowed("bad_chunk_max_env", None, value=raw)
+        return DEFAULT_CHUNK_MAX_BYTES
+    if value <= 0:
+        swallowed("bad_chunk_max_env", None, value=raw)
+        return DEFAULT_CHUNK_MAX_BYTES
+    return value
+
+
 def chunk_streaming_enabled() -> bool:
     """``PET_TALK_TTS_CHUNKS=0`` forces the whole-sentence path.
 
@@ -106,16 +133,30 @@ async def stream_chunks(
     Raises ``ProviderError`` on a failed chunk (the caller names it) and
     ``ProviderError('ws_send_failed')`` when the socket dies mid-stream — a
     half-sent stream is never completed as if it arrived.
+
+    Exactly one chunk of a sentence carries ``final: true``, whatever the
+    backend's own flag says. ``final`` is the client's end-of-stream marker, so
+    a third-party ``synth_chunks`` that never sets it (the stream never ends)
+    or sets it on every chunk (it ends three times) would break the contract on
+    the wire. Both are corrected here and named in the log:
+    ``tts_extra_chunk_after_final`` for a chunk following one already marked
+    final, and ``tts_no_final_chunk`` for a stream that drained without one —
+    which earns a terminator frame with an empty ``audio_b64``. A one-chunk
+    lookahead would be the tidier fix and is refused on purpose: it would hold
+    chunk 0 until chunk 1 was synthesized, which is the entire latency win.
     """
     import base64
 
     cancel = TURN_CANCEL.get()
     kwargs = {"cancel": cancel} if cancel is not None else {}
+    cap = chunk_max_bytes()
     chunks: list[bytes] = []
     word_times: list = []
     offset_ms = 0
     chunk_no = 0
     first_url = ""
+    last_url = ""
+    final_sent = False
     async for wav_chunk, chunk_times, final in tts.synth_chunks(  # type: ignore[attr-defined]
         text, p.voice, p.speed, **kwargs
     ):
@@ -123,11 +164,27 @@ async def stream_chunks(
             raise ProviderError("turn_cancelled", "chunk discarded: turn barged")
         if not wav_chunk:
             raise ProviderError("tts_empty_audio", f"chunk {chunk_no} was empty")
+        if len(wav_chunk) > cap:
+            # Refused before it is stored or base64'd: an over-cap chunk must
+            # not reach the audio store, the socket, or the client's decoder.
+            raise ProviderError(
+                "tts_chunk_too_large",
+                f"chunk {chunk_no} of seq {seq} is {len(wav_chunk)} bytes, cap is {cap}",
+            )
         chunk_id = f"{turn_id}-s{seq}-c{chunk_no}"
         store_audio(chunk_id, wav_chunk)
         url = f"/audio/{chunk_id}"
         if chunk_no == 0:
             first_url = url
+        last_url = url
+        is_final = bool(final) and not final_sent
+        if final_sent:
+            # A chunk after the stream already ended. Its audio still plays;
+            # its flag does not get to end the stream a second time.
+            log.info(
+                "tts_extra_chunk_after_final turn_id=%s seq=%d chunk_no=%d backend=%s",
+                turn_id, seq, chunk_no, type(tts).__name__,
+            )
         sent = await safe_send_json(
             ws,
             frame(
@@ -137,19 +194,42 @@ async def stream_chunks(
                 chunk_no=chunk_no,
                 audio_b64=base64.b64encode(wav_chunk).decode("ascii"),
                 url=url,
-                final=bool(final),
+                final=is_final,
             ),
         )
         if not sent:
             raise ProviderError("ws_send_failed", f"chunk {chunk_no} of seq {seq}")
         if chunk_no == 0 and log_ is not None:
             log_.mark("first_chunk")
+        if is_final:
+            final_sent = True
         chunks.append(wav_chunk)
         word_times.extend(shift_word_times(chunk_times, offset_ms))
         offset_ms += pcm_duration_ms(wav_chunk)
         chunk_no += 1
     if not chunks:
         raise ProviderError("tts_empty_audio", "synth_chunks yielded nothing")
+    if not final_sent:
+        # The backend never terminated its own stream. The audio is all out and
+        # honest; what is missing is the marker, so send just the marker.
+        log.info(
+            "tts_no_final_chunk turn_id=%s seq=%d chunks=%d backend=%s",
+            turn_id, seq, chunk_no, type(tts).__name__,
+        )
+        sent = await safe_send_json(
+            ws,
+            frame(
+                "agent.chunk",
+                turn_id,
+                seq=seq,
+                chunk_no=chunk_no,
+                audio_b64="",
+                url=last_url,
+                final=True,
+            ),
+        )
+        if not sent:
+            raise ProviderError("ws_send_failed", f"final marker of seq {seq}")
     return concat_wavs(chunks), word_times, first_url
 
 

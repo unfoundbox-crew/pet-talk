@@ -114,6 +114,21 @@ describe("ChunkPlayer", () => {
     warn.mockRestore();
   });
 
+  it("treats the empty final marker as end-of-stream, not a decode failure", async () => {
+    // SPEC 4.2.1: a backend that never flags its own last chunk earns a
+    // terminator frame with `final: true` and no audio.
+    const errors: string[] = [];
+    const marked = new ChunkPlayer({
+      context: ctx as unknown as AudioContext,
+      onError: (reason) => errors.push(reason),
+    });
+    await marked.enqueue(chunkFrame("chunk-0", 0, false));
+    await marked.enqueue({ seq: 1, chunk_no: 1, audio_b64: "", final: true });
+
+    expect(errors).toEqual([]);
+    expect(ctx.decodedOrder).toEqual(["chunk-0"]);
+  });
+
   it("stop() clears the queue and stops every scheduled source", async () => {
     await player.enqueue(chunkFrame("chunk-0", 0, false));
     await player.enqueue(chunkFrame("chunk-1", 1, true));

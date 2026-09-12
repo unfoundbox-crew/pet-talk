@@ -128,7 +128,12 @@ Rules a client can rely on:
 
 - **Every `agent.chunk` for a sentence precedes that sentence's
   `agent.sentence`.** `chunk_no` counts from 0 with no gaps, and exactly one
-  chunk carries `final: true`.
+  chunk carries `final: true` — `stream_chunks` owns that flag, so a backend
+  that never sets it or sets it on every chunk cannot change the count. A
+  backend whose stream drained with no final flag earns a terminator frame:
+  `final: true` with an **empty `audio_b64`** and the previous chunk's `url`.
+  That is the only chunk frame with no audio; a client treats it as
+  end-of-stream, never as a decode failure.
 - **Each chunk is a complete RIFF/WAVE file**, not a PCM fragment, so it plays
   on arrival with no header to assemble. `audio_b64` is that file, base64'd;
   `url` serves the identical bytes for a client that would rather fetch than
@@ -154,6 +159,7 @@ Env:
 | `PET_TALK_TTS_CHUNKS` | `1` | `0` forces the whole-sentence path for every tyre |
 | `PET_TALK_TTS_FIRST_CHUNK_WORDS` | `4` | words in chunk 0 — the only chunk racing a budget |
 | `PET_TALK_TTS_CHUNK_WORDS` | `6` | words in every chunk after the first |
+| `PET_TALK_CHUNK_MAX_BYTES` | `524288` | per-chunk cap; over it the sentence fails closed with `tts_chunk_too_large`, before the chunk is stored or sent |
 | `PET_TALK_STALL_WARM` | `1` | `0` skips the startup stall pre-synth, and says so |
 
 ### 4.3 `agent.error` reason catalogue
@@ -169,7 +175,7 @@ Every reason a running server can actually emit today, grepped from `ProviderErr
 
 **STT (`providers/stt.py`, `turn.py`):** `stt_unknown_provider`, `stt_empty_audio`, `stt_empty_result`, `stt_bad_response`, `stt_request_failed`, `stt_no_key`, `stt_failed`, `stt_faster_whisper_not_installed`, `stt_whisper_not_installed`, `stt_whisperkit_failed`, `stt_mlx_failed`, `stt_mlx_not_installed`.
 
-**TTS (`providers/tts.py`, `speech.py`, `stall.py`):** `tts_unknown_provider`, `tts_empty_text`, `tts_empty_audio`, `tts_synth_failed`, `tts_request_failed`, `tts_no_key`, `tts_no_token`, `tts_no_job_id`, `tts_job_failed`, `tts_job_timeout`, `tts_download_failed`, `stall_synth_failed`, `tts_chunk_format_mismatch`, `tts_chunk_not_wav`, `tts_cancelled`. Two more are telemetry only — logged by `speak_sentence`, never sent as a frame, because they describe which synthesis path ran rather than a failure: `tts_no_chunk_support`, `tts_chunking_disabled`. `stall_warm_disabled` / `stall_warm_skipped` / `stall_warm_failed` are the same kind of record for the startup pre-synth.
+**TTS (`providers/tts.py`, `speech.py`, `stall.py`):** `tts_unknown_provider`, `tts_empty_text`, `tts_empty_audio`, `tts_synth_failed`, `tts_request_failed`, `tts_no_key`, `tts_no_token`, `tts_no_job_id`, `tts_job_failed`, `tts_job_timeout`, `tts_download_failed`, `stall_synth_failed`, `tts_chunk_format_mismatch`, `tts_chunk_not_wav`, `tts_chunk_too_large` (one `agent.chunk` over `PET_TALK_CHUNK_MAX_BYTES`, default 512 KiB — refused before it is stored or sent), `tts_cancelled`. Two more are telemetry only — logged by `speak_sentence`, never sent as a frame, because they describe which synthesis path ran rather than a failure: `tts_no_chunk_support`, `tts_chunking_disabled`. `stall_warm_disabled` / `stall_warm_skipped` / `stall_warm_failed` are the same kind of record for the startup pre-synth.
 
 **SpeakQueue (`speak_queue.py`):** `queue_closed`, `queue_no_spoken_sentence`, `queue_bad_word_idx`, `queue_close_failed`.
 

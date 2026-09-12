@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r server/requirements.txt
+          pip install httpx websockets
+      - name: qa/run_all.sh (hermetic gate)
+        env:
+          PET_TALK_SILENT: "1"
+          PET_TALK_HEADLESS: "1"
+          STT_PROVIDER: stub
+          TTS_PROVIDER: stub
+          LLM_PROVIDER: stub
+        timeout-minutes: 20
+        run: bash qa/run_all.sh
+      - name: Upload QA scratch logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-scratch
+          path: .qa-scratch/
+          if-no-files-found: ignore
+
+  web-build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm ci
+      - run: npm run build
+      - name: vitest
+        run: npm run test
+
+  design-tokens:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: design/build.py --check
+        run: python3 design/build.py --check
+      - name: design/sync-agentworth.sh --check
+        run: |
+          SRC="${AGENTWORTH_TOKENS_CSS:-/Users/saurabh/code/unfoundbox/agentworth/packages/ui/tokens.css}"
+          if [ ! -f "$SRC" ]; then
+            echo "::warning::SKIP sync-agentworth --check — sibling AgentWorth checkout not present on this runner ($SRC); vendored design/tokens.css is not verified against upstream in CI"
+          else
+            bash design/sync-agentworth.sh --check
+          fi

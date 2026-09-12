@@ -125,6 +125,44 @@ class TimedChunkedTTS(StubChunkedTTS):
             yield wav, wt, final
 
 
+class FatChunkTTS(TTSProvider):
+    """Chunked tyre whose chunks are deliberately huge — an untrusted backend."""
+
+    def __init__(self, sizes_bytes: list[int]) -> None:
+        self.sizes_bytes = sizes_bytes
+        self.base_url = "test://fat-chunks"
+
+    def synth(self, text: str, voice: str = "af_heart", speed: float = 1.0):
+        return tiny_wav(), []
+
+    async def synth_chunks(self, text, voice="af_heart", speed=1.0, cancel=None):
+        for i, want in enumerate(self.sizes_bytes):
+            # 8kHz 16-bit mono: 16000 bytes per second of audio.
+            wav = tiny_wav(max(0.01, want / 16000.0), 8000)
+            yield wav, [], i == len(self.sizes_bytes) - 1
+
+
+class LyingFinalTTS(TTSProvider):
+    """Chunked tyre that gets `final` wrong on purpose.
+
+    ``finals`` is the flag it puts on each chunk — all False (never terminates
+    the stream) or all True (terminates it three times over). Both are what a
+    third-party backend does, and neither may reach the client.
+    """
+
+    def __init__(self, chunks: int = 3, finals: Optional[list[bool]] = None) -> None:
+        self.chunks = chunks
+        self.finals = finals if finals is not None else [False] * chunks
+        self.base_url = "test://lying-final"
+
+    def synth(self, text: str, voice: str = "af_heart", speed: float = 1.0):
+        return tiny_wav(), []
+
+    async def synth_chunks(self, text, voice="af_heart", speed=1.0, cancel=None):
+        for i in range(self.chunks):
+            yield tiny_wav(0.02), [], self.finals[i]
+
+
 # ------------------------------------------------------------------ tests ---
 
 
@@ -524,6 +562,160 @@ class TestRealKokoroChunking(unittest.IsolatedAsyncioTestCase):
             budget,
             f"first-chunk p50 {p50_first:.1f}ms breaches the {budget}ms tts_ms budget",
         )
+
+
+class TestChunkPayloadCap(unittest.IsolatedAsyncioTestCase):
+    """A chunk is base64'd into a WS frame. An untrusted backend that hands
+    back a 40 MB "clause" would push it straight at the browser."""
+
+    def tearDown(self) -> None:
+        os.environ.pop("PET_TALK_CHUNK_MAX_BYTES", None)
+
+    async def test_the_default_cap_is_512_kib(self) -> None:
+        from server.speech import chunk_max_bytes
+
+        os.environ.pop("PET_TALK_CHUNK_MAX_BYTES", None)
+        self.assertEqual(chunk_max_bytes(), 512 * 1024)
+
+    async def test_a_garbage_cap_falls_back_loudly(self) -> None:
+        from server.speech import chunk_max_bytes
+
+        os.environ["PET_TALK_CHUNK_MAX_BYTES"] = "lots"
+        self.assertEqual(chunk_max_bytes(), 512 * 1024)
+        os.environ["PET_TALK_CHUNK_MAX_BYTES"] = "0"
+        self.assertEqual(chunk_max_bytes(), 512 * 1024)
+
+    async def test_an_over_cap_chunk_is_refused_by_name(self) -> None:
+        ws = fake_ws()
+        os.environ["PET_TALK_CHUNK_MAX_BYTES"] = "4096"
+        tts = FatChunkTTS([1024, 200_000])
+        spoken = await speak_sentence(ws, "t-cap", SENTENCE, 1, persona(), tts)
+        self.assertIsNone(spoken, "an over-cap chunk must not produce a sentence")
+        frames = sent_frames(ws)
+        errors = [f for f in frames if f["type"] == "agent.error"]
+        self.assertTrue(errors, f"no agent.error for the over-cap chunk: {frames}")
+        self.assertEqual(errors[0]["reason"], "tts_chunk_too_large")
+        sent_chunks = [f for f in frames if f["type"] == "agent.chunk"]
+        self.assertEqual(
+            len(sent_chunks), 1, "the over-cap chunk itself must never go on the wire"
+        )
+
+    async def test_an_under_cap_chunk_still_speaks(self) -> None:
+        ws = fake_ws()
+        os.environ["PET_TALK_CHUNK_MAX_BYTES"] = str(1024 * 1024)
+        tts = FatChunkTTS([1024, 2048])
+        spoken = await speak_sentence(ws, "t-cap-ok", SENTENCE, 1, persona(), tts)
+        self.assertIsNotNone(spoken)
+        self.assertEqual(
+            len([f for f in sent_frames(ws) if f["type"] == "agent.chunk"]), 2
+        )
+
+
+class TestExactlyOneFinalChunk(unittest.IsolatedAsyncioTestCase):
+    """`final` is the client's end-of-stream marker. `stream_chunks` owns it,
+    so no backend's flag can send zero or three of them."""
+
+    async def _chunks_for(self, tts, turn_id: str) -> list[dict]:
+        ws = fake_ws()
+        spoken = await speak_sentence(ws, turn_id, SENTENCE, 1, persona(), tts)
+        self.assertIsNotNone(spoken, "the sentence must still be delivered")
+        return [f for f in sent_frames(ws) if f["type"] == "agent.chunk"]
+
+    async def test_a_backend_that_never_marks_final_still_gets_exactly_one(self) -> None:
+        chunks = await self._chunks_for(LyingFinalTTS(3, [False, False, False]), "t-no-final")
+        finals = [c for c in chunks if c["final"]]
+        self.assertEqual(len(finals), 1, f"expected one final=true, got {chunks}")
+        self.assertIs(finals[0], chunks[-1], "final=true must be the last chunk sent")
+
+    async def test_a_backend_that_marks_every_chunk_final_gets_exactly_one(self) -> None:
+        chunks = await self._chunks_for(LyingFinalTTS(3, [True, True, True]), "t-all-final")
+        self.assertEqual(
+            len([c for c in chunks if c["final"]]), 1, f"expected one final=true, got {chunks}"
+        )
+
+    async def test_an_honest_backend_is_unchanged(self) -> None:
+        chunks = await self._chunks_for(StubChunkedTTS(per_chunk_s=0.0), "t-honest")
+        finals = [c for c in chunks if c["final"]]
+        self.assertEqual(len(finals), 1)
+        self.assertTrue(finals[0]["audio_b64"], "no empty terminator was needed")
+        self.assertIs(finals[0], chunks[-1])
+
+
+class TestChunkPayloadCap(unittest.IsolatedAsyncioTestCase):
+    """A chunk is base64'd into a WS frame. An untrusted backend that hands
+    back a 40 MB "clause" would push it straight at the browser."""
+
+    def tearDown(self) -> None:
+        os.environ.pop("PET_TALK_CHUNK_MAX_BYTES", None)
+
+    async def test_the_default_cap_is_512_kib(self) -> None:
+        from server.speech import chunk_max_bytes
+
+        os.environ.pop("PET_TALK_CHUNK_MAX_BYTES", None)
+        self.assertEqual(chunk_max_bytes(), 512 * 1024)
+
+    async def test_a_garbage_cap_falls_back_loudly(self) -> None:
+        from server.speech import chunk_max_bytes
+
+        os.environ["PET_TALK_CHUNK_MAX_BYTES"] = "lots"
+        self.assertEqual(chunk_max_bytes(), 512 * 1024)
+        os.environ["PET_TALK_CHUNK_MAX_BYTES"] = "0"
+        self.assertEqual(chunk_max_bytes(), 512 * 1024)
+
+    async def test_an_over_cap_chunk_is_refused_by_name(self) -> None:
+        ws = fake_ws()
+        os.environ["PET_TALK_CHUNK_MAX_BYTES"] = "4096"
+        tts = FatChunkTTS([1024, 200_000])
+        spoken = await speak_sentence(ws, "t-cap", SENTENCE, 1, persona(), tts)
+        self.assertIsNone(spoken, "an over-cap chunk must not produce a sentence")
+        frames = sent_frames(ws)
+        errors = [f for f in frames if f["type"] == "agent.error"]
+        self.assertTrue(errors, f"no agent.error for the over-cap chunk: {frames}")
+        self.assertEqual(errors[0]["reason"], "tts_chunk_too_large")
+        sent_chunks = [f for f in frames if f["type"] == "agent.chunk"]
+        self.assertEqual(
+            len(sent_chunks), 1, "the over-cap chunk itself must never go on the wire"
+        )
+
+    async def test_an_under_cap_chunk_still_speaks(self) -> None:
+        ws = fake_ws()
+        os.environ["PET_TALK_CHUNK_MAX_BYTES"] = str(1024 * 1024)
+        tts = FatChunkTTS([1024, 2048])
+        spoken = await speak_sentence(ws, "t-cap-ok", SENTENCE, 1, persona(), tts)
+        self.assertIsNotNone(spoken)
+        self.assertEqual(
+            len([f for f in sent_frames(ws) if f["type"] == "agent.chunk"]), 2
+        )
+
+
+class TestExactlyOneFinalChunk(unittest.IsolatedAsyncioTestCase):
+    """`final` is the client's end-of-stream marker. `stream_chunks` owns it,
+    so no backend's flag can send zero or three of them."""
+
+    async def _chunks_for(self, tts, turn_id: str) -> list[dict]:
+        ws = fake_ws()
+        spoken = await speak_sentence(ws, turn_id, SENTENCE, 1, persona(), tts)
+        self.assertIsNotNone(spoken, "the sentence must still be delivered")
+        return [f for f in sent_frames(ws) if f["type"] == "agent.chunk"]
+
+    async def test_a_backend_that_never_marks_final_still_gets_exactly_one(self) -> None:
+        chunks = await self._chunks_for(LyingFinalTTS(3, [False, False, False]), "t-no-final")
+        finals = [c for c in chunks if c["final"]]
+        self.assertEqual(len(finals), 1, f"expected one final=true, got {chunks}")
+        self.assertIs(finals[0], chunks[-1], "final=true must be the last chunk sent")
+
+    async def test_a_backend_that_marks_every_chunk_final_gets_exactly_one(self) -> None:
+        chunks = await self._chunks_for(LyingFinalTTS(3, [True, True, True]), "t-all-final")
+        self.assertEqual(
+            len([c for c in chunks if c["final"]]), 1, f"expected one final=true, got {chunks}"
+        )
+
+    async def test_an_honest_backend_is_unchanged(self) -> None:
+        chunks = await self._chunks_for(StubChunkedTTS(per_chunk_s=0.0), "t-honest")
+        finals = [c for c in chunks if c["final"]]
+        self.assertEqual(len(finals), 1)
+        self.assertTrue(finals[0]["audio_b64"], "no empty terminator was needed")
+        self.assertIs(finals[0], chunks[-1])
 
 
 if __name__ == "__main__":
