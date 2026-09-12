@@ -33,6 +33,7 @@ ceiling, no frame names and no engineering identifiers.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from dataclasses import dataclass
@@ -541,21 +542,64 @@ def enabled() -> bool:
 # ---------------------------------------------------------------------------
 
 
+DEFAULT_RECEIPT_TIMEOUT_S = 2.0
+
+
+def receipt_timeout_s() -> float:
+    """Wall clock one receipt may cost the turn. ``PET_TALK_RECEIPT_TIMEOUT_S``.
+
+    A receipt is evidence, not the answer: past this the turn finishes without
+    it. An unparseable or non-positive value falls back to the default and says
+    so, rather than disabling the bound.
+    """
+    raw = os.environ.get("PET_TALK_RECEIPT_TIMEOUT_S", "")
+    if not raw.strip():
+        return DEFAULT_RECEIPT_TIMEOUT_S
+    try:
+        value = float(raw)
+    except ValueError:
+        log.warning("bad_receipt_timeout_env value=%r", raw)
+        return DEFAULT_RECEIPT_TIMEOUT_S
+    if value <= 0:
+        log.warning("bad_receipt_timeout_env value=%r", raw)
+        return DEFAULT_RECEIPT_TIMEOUT_S
+    return value
+
+
 async def emit(ws: Any, turn_id: str, sentences: Any, persona: Optional[str] = None) -> int:
     """Prove every sentence a turn spoke. Returns how many frames went out.
 
     This exists so `turn.py` needs exactly one line and no try/except: a
     receipt never raises at the call site, never blocks the turn, and a
     sentence that claims nothing costs one regex pass.
+
+    ``attach`` is synchronous and shells out to the `archie` CLI
+    (``subprocess.run(timeout=8)``). Called directly it ran that subprocess on
+    the event loop, so one slow index froze every socket on the process — a
+    1.5 s archie meant 1.5 s of no heartbeat, no barge, no frame read. It runs
+    in a worker thread under :func:`receipt_timeout_s` instead; past the
+    timeout the receipt is named ``receipt_timeout`` and skipped, so
+    ``agent.done`` is never held up by more than that per sentence.
     """
     from .frames import safe_send_json
 
     if not enabled() or not turn_id:
         return 0
+    timeout = receipt_timeout_s()
     sent = 0
     for text in list(sentences or []):
         try:
-            payload = attach(turn_id, text, persona=persona)
+            payload = await asyncio.wait_for(
+                asyncio.to_thread(attach, turn_id, text, persona=persona),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            # The thread may still be blocked in archie; it is orphaned on
+            # purpose, and its result is discarded when it lands.
+            log.info(
+                "receipt_timeout turn_id=%s timeout_s=%.2f", turn_id, timeout
+            )
+            continue
         except ProviderError as e:  # a frame bug must not kill a finished turn
             log.info("receipt_emit_failed turn_id=%s reason=%s", turn_id, e.reason)
             continue

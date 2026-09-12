@@ -32,6 +32,7 @@ import json
 import os
 import re
 import sys
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 
@@ -169,10 +170,23 @@ SESSION_LIST_FIXTURE = [
 ]
 
 
-def fake_archie(scanned_at: datetime, *, session: bool = True, fail: bool = False):
-    """A runner standing in for the `archie` binary. Returns stdout JSON."""
+def fake_archie(
+    scanned_at: datetime,
+    *,
+    session: bool = True,
+    fail: bool = False,
+    delay_s: float = 0.0,
+):
+    """A runner standing in for the `archie` binary. Returns stdout JSON.
+
+    ``delay_s`` blocks the calling thread, which is how the "a slow receipt
+    must not stall the loop" test stands in for a real `archie` that takes a
+    second and a half to answer.
+    """
 
     def runner(args: list[str], cwd: str) -> str:
+        if delay_s:
+            time.sleep(delay_s)
         if fail:
             raise ProviderError("receipts_unavailable", "archie not on PATH (fixture)")
         joined = " ".join(args)
@@ -424,6 +438,81 @@ class TestTurnHook(ReceiptsTestCase):
         ws = MagicMock()
         ws.send_json = AsyncMock()
         self.assertEqual(asyncio.run(receipts.emit(ws, "", ["The tests are green."])), 0)
+
+    def test_a_slow_receipt_never_blocks_the_event_loop(self):
+        """The reviewer's probe: `attach` ran `subprocess.run(timeout=8)` on the
+        loop, so a 1.5 s archie froze everything — 0 heartbeat ticks during it.
+        Off-thread, the same 1.5 s must let the loop keep ticking."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        from starlette.websockets import WebSocketState
+
+        self.arrange(SCAN_FRESH, delay_s=1.5)
+        os.environ["PET_TALK_RECEIPT_TIMEOUT_S"] = "5.0"
+        ws = MagicMock()
+        ws.client_state = WebSocketState.CONNECTED
+        ws.send_json = AsyncMock()
+
+        ticks = 0
+
+        async def heartbeat() -> None:
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.1)
+                ticks += 1
+
+        async def run() -> int:
+            beat = asyncio.create_task(heartbeat())
+            try:
+                return await receipts.emit(ws, TURN, ["The tests are green."])
+            finally:
+                beat.cancel()
+
+        try:
+            sent = asyncio.run(run())
+        finally:
+            os.environ.pop("PET_TALK_RECEIPT_TIMEOUT_S", None)
+        self.assertEqual(sent, 1, "the slow receipt should still have landed")
+        self.assertGreaterEqual(
+            ticks, 10, f"loop was blocked: only {ticks} heartbeat ticks in ~1.5s"
+        )
+
+    def test_a_receipt_over_its_timeout_is_named_and_skipped(self):
+        """A receipt may never delay `agent.done` past the configured timeout."""
+        import asyncio
+        import time as _time
+        from unittest.mock import AsyncMock, MagicMock
+
+        from starlette.websockets import WebSocketState
+
+        self.arrange(SCAN_FRESH, delay_s=1.5)
+        os.environ["PET_TALK_RECEIPT_TIMEOUT_S"] = "0.2"
+        ws = MagicMock()
+        ws.client_state = WebSocketState.CONNECTED
+        ws.send_json = AsyncMock()
+        async def run() -> tuple[int, float]:
+            # Measured INSIDE the loop: what matters is when `emit` returns to
+            # the turn, not when asyncio.run finally reaps the orphaned thread.
+            started = _time.monotonic()
+            sent = await receipts.emit(ws, TURN, ["The tests are green."])
+            return sent, _time.monotonic() - started
+
+        try:
+            sent, elapsed = asyncio.run(run())
+        finally:
+            os.environ.pop("PET_TALK_RECEIPT_TIMEOUT_S", None)
+        self.assertEqual(sent, 0, "a timed-out receipt must send no frame")
+        self.assertLess(elapsed, 1.0, f"emit waited {elapsed:.2f}s past its 0.2s timeout")
+
+    def test_the_receipt_timeout_default_is_two_seconds(self):
+        os.environ.pop("PET_TALK_RECEIPT_TIMEOUT_S", None)
+        self.assertEqual(receipts.receipt_timeout_s(), 2.0)
+        os.environ["PET_TALK_RECEIPT_TIMEOUT_S"] = "not-a-number"
+        try:
+            self.assertEqual(receipts.receipt_timeout_s(), 2.0)
+        finally:
+            os.environ.pop("PET_TALK_RECEIPT_TIMEOUT_S", None)
 
     def test_emit_is_off_when_receipts_are_disabled(self):
         import asyncio
