@@ -54,6 +54,39 @@ cd web && npm install && npm run dev
 make build-hotkey && ./bin/pet-talk-hotkey run --daemon
 ```
 
+## Run it
+
+The command in step 3 above is how you run the duplex server **for
+development** — it stays exactly as written, in a terminal you can see and
+kill. **The recommended way to run it day to day is as a launchd user
+agent**, so it survives logout/reboot and doesn't need its own terminal tab:
+
+```bash
+make install-agent     # renders launchd/com.unfoundbox.pet-talk-server.plist.template
+                        # with this checkout's absolute paths, writes it to
+                        # ~/Library/LaunchAgents/, and loads it
+                        # (launchctl bootstrap gui/$(id -u) ...)
+make agent-status       # is it loaded? PID? last exit code? where's the log?
+make uninstall-agent    # unload it and remove the installed plist
+```
+
+`bin/pet-talk-server` (the agent's launcher) resolves its own interpreter
+(`PET_TALK_PYTHON`, default `~/miniconda3/envs/local-ml-py311/bin/python`),
+runs under `doppler run --project unfoundbox --config dev_personal --` when
+`doppler` is on `PATH`, binds `127.0.0.1:8089`, and logs to
+`~/Library/Application Support/pet-talk/server.log` (rotated by size —
+`PET_TALK_LOG_MAX_BYTES`, default 10MB, keeps one prior copy). Every one of
+`bin/pet-talk-server`, `bin/agent-ctl.sh install|uninstall|status`, and
+`make install-agent`/`make uninstall-agent` accepts `--dry-run` and prints
+exactly what it would do without touching `~/Library` or calling
+`launchctl` — see `qa/test_launchd.py`.
+
+The hotkey daemon (`bin/pet-talk-hotkey`) probes the server's `/health`
+route on wake (300ms timeout) before spawning a turn; if the server is
+down — whichever way you're running it — it shows the existing error
+capsule with "server is not running" and logs `server_unreachable`,
+instead of opening the mic into nothing.
+
 ### Building the binaries
 
 `bin/` is not tracked (see `.gitignore`; `bin/*` is ignored except

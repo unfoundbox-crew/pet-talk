@@ -64,6 +64,7 @@ SUITES=(
   "screen line fenced as untrusted (AX grounding)|qa/test_grounding_fence.py|unit|"
   "terminal CLI client|qa/test_cli_client.py|unit|"
   "native macOS global hotkey listener|qa/test_hotkey.py|unit|SILENT"
+  "server as a launchd user agent (install/uninstall/status, all --dry-run)|qa/test_launchd.py|unit|"
   "floating glass capsule HUD|qa/test_hud.py|unit|"
   "acoustic earcons & config engine|qa/test_earcons.py|unit|SILENT"
   "WebSocket resilience & bounded audio LRU|qa/test_socket_resilience.py|unit|"

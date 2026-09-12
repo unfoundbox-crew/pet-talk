@@ -1,4 +1,4 @@
-.PHONY: build-cli build-hotkey qa qa-silent qa-real
+.PHONY: build-cli build-hotkey qa qa-silent qa-real install-agent uninstall-agent agent-status
 
 # bin/pet-talk-cli — the launcher the hotkey daemon spawns on Option+Tab. It
 # used to be an untracked binary nothing built, so a fresh clone gave the
@@ -23,3 +23,18 @@ qa-silent:
 
 qa-real:
 	PET_TALK_REAL_ENGINE=1 bash qa/run_all.sh
+
+# Run the pet-talk duplex server as a launchd user agent instead of a
+# terminal process. Renders launchd/com.unfoundbox.pet-talk-server.plist.template
+# with this checkout's absolute paths and loads it (bin/agent-ctl.sh).
+#   make install-agent --dry-run   prints what would happen, touches nothing
+#                                   (make's own -n mode: no ~/Library write,
+#                                   no launchctl call)
+install-agent:
+	bash bin/agent-ctl.sh install
+
+uninstall-agent:
+	bash bin/agent-ctl.sh uninstall
+
+agent-status:
+	bash bin/agent-ctl.sh status

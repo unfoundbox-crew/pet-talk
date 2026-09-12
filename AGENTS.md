@@ -48,3 +48,9 @@ duplex `:8089` → web `:5173`. `make qa` (or `make qa-silent` overnight)
 before every merge. Latency gates: stall ≤400ms, barge ≤100ms, turn ≤1200ms
 worst — see `docs/SPEC.md` §9 for what's actually measured today vs.
 NOT MEASURED.
+
+**The duplex server (`:8089`) as a launchd user agent is the recommended
+way to run it** — `make install-agent` (see README "Run it"); the raw
+`uvicorn` command stays for development. The hotkey daemon probes `/health`
+on wake (300ms timeout) and shows the existing error path with "server is
+not running" rather than spawning `pet-talk-cli` into a dead server.
