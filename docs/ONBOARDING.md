@@ -9,51 +9,66 @@ Welcome to **Pet-Talk**. This document is the primary onboarding guide for human
 Pet-Talk is a local-first, low-latency, full-duplex conversational voice and sensory presence engine designed for ambient AI companions (e.g. Donna, your Chief of Staff).
 
 Key architectural tenets:
-1. **Dignity & Latency First**: Conversational voice is only viable when turn latency is <= 800ms, barge-in kill latency is <= 50ms, and audio earcons respond in < 2ms.
-2. **Apple-Grade Sensory Presence**: A physical MacBook notch Dynamic Island HUD (`cli/hotkey/hud_window.swift`) anchored flush to the screen that never steals keyboard focus (`.nonactivatingPanel`).
-3. **Zero Invasive Permissions**: The global hotkey uses macOS Carbon `RegisterEventHotKey`, working universally without requiring invasive Accessibility or TCC prompts in macOS System Settings.
-4. **Swappable Tyres**: STT, LLM, and TTS providers are swappable via environment variables and runtime settings with zero code changes.
-5. **No Hallucinations / Pure Math Gates**: Every feature must have a TDD test suite in `qa/` that runs hermetically without mandatory external network dependencies.
+1. **Latency first**: the budgets in `qa/budgets.json` are the target (stall
+   400ms, barge 100ms, turn 800ms p50 / 1200ms worst). What's actually
+   measured today is stub-provider only — see `docs/SPEC.md` §9.
+2. **Notch-anchored HUD**: `cli/hotkey/hud_window.swift` is a floating,
+   non-activating panel (`.nonactivatingPanel`) that must never steal
+   keyboard focus from an editor or terminal.
+3. **The hotkey itself needs no Accessibility permission** (Carbon
+   `RegisterEventHotKey`). `PET_TALK_AX=1` grounding is a separate, opt-in
+   feature that *does* need it — see `docs/SPEC.md` §7.
+4. **Swappable tyres**: STT, LLM, and TTS providers are swappable via
+   environment variables and `POST /settings`, zero code changes.
+5. **No fake greens**: every feature has a suite in `qa/` that runs
+   hermetically where possible, and SKIPs honestly (never silently passes)
+   when it needs a daemon or credential that isn't there.
 
 ---
 
-## 2. Quickstart (Under 2 Minutes)
+## 2. Quickstart
 
 ### Step 1: Dependencies & Doppler
 ```bash
-git checkout feat/google-grade-design-system
-
 # Python dependencies (virtualenv or conda)
-pip install -r requirements.txt
+pip install -r server/requirements.txt
 
-# Doppler secrets (provides GROQ_API_KEY, DEEPGRAM_API_KEY, GITHUB_TOKEN)
+# Doppler secrets (provider keys, per server/settings.py)
 doppler configure --project unfoundbox --config dev_personal
 ```
 
-### Step 2: Compile Native Swift Hotkey & HUD
-```bash
-# Compile native binary with Swift optimizer
-swiftc -O cli/hotkey/*.swift -o bin/pet-talk-hotkey
+### Step 2: Build the native Swift hotkey & HUD
 
-# Verify Carbon registration (keycode 48 = Tab, mod 0x800 = Option)
-./bin/pet-talk-hotkey --check-registration
+`bin/` is not tracked in git (`.gitignore`: `bin/*`, kept only via
+`bin/.gitkeep`). Build with:
+
+```bash
+make build-hotkey    # runs cli/hotkey/build.sh bin/
 ```
 
-### Step 3: Start the Servers
+The real `swiftc -O` build never runs on a laptop — the fan rule routes it
+to `ssh air`. `cli/hotkey/build.sh` is owned by another lane and, as of this
+branch, does not exist yet in this checkout; `make build-hotkey` will fail
+until it lands.
+
+### Step 3: Start the servers
 ```bash
-# 1. Start Kokoro TTS Local Daemon (:8088)
+# 1. Kokoro TTS local daemon (:8088)
 ./serve.sh
 
-# 2. Start Pet-Talk FastAPI Duplex Server (:8089)
+# 2. pet-talk FastAPI duplex server (:8089)
 doppler run --project unfoundbox --config dev_personal -- \
   python3 -m uvicorn server.app:app --host 127.0.0.1 --port 8089
 
-# 3. Start Native Hotkey & Dynamic Island Daemon
+# 3. Native hotkey & HUD daemon (once built)
 ./bin/pet-talk-hotkey start
 
-# 4. Optional: Start Web Cockpit (:5173)
+# 4. Optional: web cockpit (:5173)
 cd web && npm install && npm run dev
 ```
+
+See `README.md` for the full environment-variable table (provider selection,
+`PET_TALK_SILENT`, `PET_TALK_AX`, `PET_TALK_GROUNDING_REPOS`, `EYES_ENGINE`).
 
 ---
 
@@ -61,8 +76,8 @@ cd web && npm install && npm run dev
 
 | Trigger | Context | Action |
 | :--- | :--- | :--- |
-| **`Option + Tab`** (Single-tap) | Idle | Wakes Donna immediately (<1.2ms mic open chime), displays notch capsule, opens mic. |
-| **`Option + Tab`** (Single-tap) | Active (Speaking / Thinking / Listening) | **Instant Kill Switch**: Cuts audio in <2ms, terminates process, dismisses HUD. Does NOT restart! |
+| **`Option + Tab`** (Single-tap) | Idle | Wakes Donna, displays notch capsule, opens mic. |
+| **`Option + Tab`** (Single-tap) | Active (Speaking / Thinking / Listening) | **Instant Kill Switch**: cuts audio, terminates process, dismisses HUD. Does NOT restart! |
 | **`Option + Tab`** (Double-tap $\le$ 350ms) | Any | Toggles persistent **Pause / Sleep Mode**. |
 | **`Option + Shift + Tab`** | Any | Dedicated instant **Pause / Sleep Mode** toggle. |
 | **`Escape`** | HUD hover / active turn | Instant barge-in kill. |
@@ -70,11 +85,11 @@ cd web && npm install && npm run dev
 ### CLI Management Commands
 ```bash
 ./bin/pet-talk-hotkey status       # Shows running PID & status: [ACTIVE] vs [PAUSED / SLEEP MODE]
-./bin/pet-talk-hotkey kill         # Sub-10ms emergency kill switch
+./bin/pet-talk-hotkey kill         # Emergency kill switch
 ./bin/pet-talk-hotkey pause        # Put Donna to sleep (voice triggers muted)
 ./bin/pet-talk-hotkey resume       # Wake Donna back to active mode
 ./bin/pet-talk-hotkey toggle       # Toggle active <-> paused
-./bin/pet-talk-hotkey test-audio   # Benchmark all acoustic earcons (<2ms SLA)
+./bin/pet-talk-hotkey test-audio   # Benchmark acoustic earcons
 ./bin/pet-talk-hotkey test-hud     # Interactive visual test of Dynamic Island HUD states
 ```
 
@@ -88,125 +103,98 @@ cd web && npm install && npm run dev
       v
 [ Mic Stream / Energy VAD ] (cli/audio.py or web AudioWorklet)
       |
-      +---> Live RMS / Peak Telemetry ---> Dynamic Island Audio Waveform
+      v
+[ user.stop over /ws ] ---> STT off-loop (server/turn.py:transcribe_off_loop)
       |
       v
-[ Speech-to-Text (STT) ] (Deepgram Nova-3 / Groq Whisper / WhisperKit / MLX)
+[ Deterministic control? ] (server/control.py: stop / status / who-are-you)
+      | no
+      v
+[ Router ] (providers.llm.route(text) -> "stall" | "answer", server/turn.py)
       |
-      +---> Transcribed Text ---> HUD Dictation Preview & Wispr Flow Cmd+V
+      +--- stall path: agent.stall (cached phrase, server/stall.py) then
+      |                run_speech streams the worker's answer behind it
+      |
+      `--- direct path: run_speech streams one answer, no stall
       |
       v
-[ Router & Intent Filter ] (server/app.py)
+[ run_speech ] (server/speech.py): LLM producer -> SpeakQueue -> TTS consumer
       |
-      +---> Deterministic Fast Path ("status", "stop", "who are you") [<50ms]
-      |
-      v
-[ Spoken Brain (LLM) ] (Groq LPU compound-mini / LiteLLM proxy)
-      |
-      +---> VoiceProseFormatter (clamps to <=20 words, strips markdown/backticks)
+      +---> agent.sentence per sentence (audio_url, word_times, estimated)
       |
       v
-[ Speech Synthesis (TTS) ] (Kokoro-82M :8088 / Deepgram Aura)
+[ Client playback ]
       |
-      +---> Pre-cached RAM Stalls ("let me look into that") [0ms overhead]
-      |
-      v
-[ Native afplay / Web Audio ]
-      |
-      `---> [User Interrupts / Option+Tab] ---> Barge Kill in <2ms
+      `---> [barge frame] ---> Session.barge() cancels the turn task,
+             flushes SpeakQueue, reports the true dropped count
 ```
 
 ---
 
 ## 5. Model Configuration & Provider Tyres
 
-All model choices are runtime configurable via environment variables or `POST /settings`.
+All model choices are runtime configurable via environment variables or
+`POST /settings` (`server/settings.py`, `server/provider_factory.py`). No
+latency numbers are quoted here — real-engine latency is NOT MEASURED as of
+this writing (see `docs/SPEC.md` §9). The identifiers below are exactly the
+strings `make_stt`/`make_llm`/`make_tts` accept.
 
-### 1. Speech-to-Text (STT)
-| Provider | Identifier | Speed | Notes |
-| :--- | :--- | :--- | :--- |
-| **Deepgram** (Default Cloud) | `deepgram` (`nova-3`) | ~120ms | Premium cloud flagship, Doppler `DEEPGRAM_API_KEY`. |
-| **Groq LPU Whisper** | `groq` (`whisper-large-v3-turbo`) | ~110ms | Ultra-fast Groq LPU transcription. |
-| **WhisperKit** (Apple Silicon) | `whisperkit` | ~90ms | Local CoreML on Apple Neural Engine (zero cloud dependency). |
-| **MLX Whisper** (Apple Silicon) | `mlx` | ~140ms | Local Metal GPU acceleration via Apple MLX. |
-| **SenseVoice** (Sovereign Fleet) | `sensevoice` | ~70ms | Hosted on sovereign fleet (`100.99.50.84:8086`). |
-| **Stub** | `stub` | <1ms | Deterministic test stub for offline QA. |
+### 1. Speech-to-Text (`STT_PROVIDER`)
+| Identifier(s) | Backend | Needs |
+| :--- | :--- | :--- |
+| `deepgram` | Deepgram Nova-3 | `DEEPGRAM_API_KEY` |
+| `groq` | Groq Whisper (`whisper-large-v3-turbo`) | `GROQ_API_KEY` |
+| `openai` / `openai-whisper` / `whisper-openai` | OpenAI Whisper (`whisper-1`) | `OPENAI_API_KEY` |
+| `whisperkit` / `whisper-kit` / `coreml` / `ane` | WhisperKit CoreML, local | `whisperkit-cli` on PATH |
+| `faster-whisper` / `faster_whisper` / `whisper` / `local` / `whisper-local` | faster-whisper, local | nothing |
+| `mlx` / `mlx-whisper` | MLX Whisper, local | nothing |
+| `sensevoice` / `fleet` / `sovereign` | SenseVoice daemon | `SENSEVOICE_BASE_URL` (default `127.0.0.1:8086`) |
+| `stub` | Deterministic canned text | nothing |
 
-### 2. Large Language Model (LLM)
-| Provider | Identifier | Model | Latency (TTFT) | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| **Groq LPU** (Default) | `groq` | `groq/compound-mini` | ~210ms | Ultra-fast spoken responses. |
-| **OpenAI Reasoning** | `openai` | `gpt-5-nano` | ~380ms | Indian AI Grants key, automated `max_completion_tokens: 300` & reasoning handling. |
-| **SpacePilot / LiteLLM Proxy** | `litellm` | `claude-sonnet-4-6` | ~450ms | Heavy reasoning via LiteLLM fleet proxy (`:8000`). |
-| **Local Fleet** | `fleet` | `llama-3.3-70b` | ~290ms | Local sovereign fleet inference. |
+### 2. Large Language Model (`LLM_PROVIDER`)
+| Identifier(s) | Backend | Needs |
+| :--- | :--- | :--- |
+| `haiku` / `claude-haiku` / `claude` | Anthropic (default model `claude-3-5-haiku-20241022`) | `ANTHROPIC_API_KEY` |
+| `opencode` / `zen` / `opencode-zen` | OpenCode Zen proxy (default model `flash-3.8`) | `OPENCODE_API_KEY` (or `OPENCODE_GO_KEY`/`OPENCODE_LENOVO_KEY`) |
+| `gemini` / `google` / `flash` | Gemini via OpenAI-compatible endpoint (default `gemini-2.5-flash`) | `GEMINI_PRIMARY_API_KEY` (or `GOOGLE_API_KEY`) |
+| `groq` | Groq (default `groq/compound-mini`) | `GROQ_API_KEY` |
+| `openai` / `gpt` | OpenAI (default `gpt-5-nano`) | `OPENAI_API_KEY` |
+| `litellm` / `fleet` / `local` | Self-hosted LiteLLM proxy (default `claude-sonnet-4-6`) | `LITELLM_BASE_URL`/`LLM_BASE_URL`, a key |
+| `stub` | Deterministic 3-sentence canned stream | nothing |
 
-### 3. Text-to-Speech (TTS)
-| Provider | Identifier | Model / Endpoint | Quality |
-| :--- | :--- | :--- | :--- |
-| **Smallest.ai Waves** (Lightning) | `smallest` | `lightning_v3.1_pro` (voice `meher`) | Ultra-low latency natural Indian English & Hindi voice, 24kHz. |
-| **Kokoro Local** (Default) | `kokoro` | Kokoro-v0.19 82M (`:8088`) | Warm, natural American female voice (`af_heart`), 24kHz. |
-| **Deepgram Aura** | `deepgram` | `aura-asteria-en` | Fast cloud fallback. |
-| **Stub** | `stub` | Synthetic sine WAV | <1ms offline test stub. |
+### 3. Text-to-Speech (`TTS_PROVIDER`)
+| Identifier(s) | Backend | Needs |
+| :--- | :--- | :--- |
+| `smallest` / `smallest-ai` / `smallest_ai` / `waves` | Smallest.ai (voice `meher` default) | `SMALLEST_API_KEY` |
+| `kokoro` (default) | Kokoro daemon | `KOKORO_BASE_URL` (default `127.0.0.1:8088`) |
+| `elevenlabs` | ElevenLabs | key per `server/providers/tts.py` |
+| `deepgram` | Deepgram Aura | key per `server/providers/tts.py` |
+| `stub` | Synthetic sine WAV | nothing |
+
+Kokoro's `word_times` are always `estimated: true` — see `docs/SPEC.md` §5.2.
 
 ---
 
 ## 6. Codebase Directory Structure
 
-```
-pet-talk/
-+-- bin/                         # Compiled executables (pet-talk-cli, pet-talk-hotkey)
-+-- cli/
-|   +-- audio.py                 # macOS CoreAudio / sox / ffmpeg capture & energy VAD
-|   +-- client.py                # Terminal interactive TUI & one-shot CLI client
-|   `-- hotkey/                  # Native Swift macOS subsystem
-|       +-- main.swift           # Carbon event listener, PID manager, kill switch & CLI
-|       +-- hud_window.swift     # Floating Glass Capsule HUD & Hardware Notch Island
-|       +-- earcons.swift        # Sub-2ms RAM-cached NSSound acoustic engine
-|       +-- paste_injector.swift # Wispr Flow style cursor clipboard & keystroke paste
-|       `-- config.swift         # YAML configuration loader & persistence
-+-- docs/                        # Architecture specs & roadmaps
-|   +-- ONBOARDING.md            # You are here
-|   +-- ROADMAP.md               # Shipped milestones and future wave roadmap
-|   +-- DYNAMIC-NOTCH-ISLAND-SPEC.md # Hardware notch geometry & spring physics
-|   +-- SENSORY-FEEDBACK-SPEC.md # Earcons and audio design language
-|   `-- DICTATION-SPEC.md        # Universal STT router and clean prose engine
-+-- personas/                    # Persona prompt specifications (donna.md, zuck.md)
-+-- qa/                          # TDD test suites & benchmarks
-|   +-- run_all.sh               # Master verification gate (runs all 13 test suites)
-|   +-- test_hotkey.py           # Carbon hotkey, kill switch & lifecycle tests
-|   +-- test_hud.py              # HUD nonactivating window & geometry tests
-|   +-- test_earcons.py          # Acoustic earcon latency assertions
-|   +-- test_dictation_matrix.py # Universal STT router & CleanProse tests
-|   +-- test_new_tyres.py        # Smallest.ai TTS & OpenAI gpt-5-nano reasoning tests
-|   `-- benchmarks/              # Voice forensics & wire latency probes
-+-- server/                      # FastAPI WebSocket duplex server
-|   +-- app.py                   # Duplex connection loop, router, stall cache
-|   +-- providers.py             # STT/LLM/TTS swappable tyre implementations
-|   `-- dictation.py             # CleanProseFormatter & VoiceProseFormatter
-`-- web/                         # React 18 + Vite Cockpit UI
-```
+See `README.md`'s "Repository layout" for the tree kept in sync with `ls` —
+this doc doesn't duplicate it. Read `docs/SPEC.md` §3 for the module map
+(file → job, one line each), which is more precise than a tree.
 
 ---
 
 ## 7. Quality Assurance & Pre-Flight Gate
 
-Before submitting any Pull Request or pushing commits, you **must** run the master test suite:
+Before submitting any Pull Request or pushing commits, run the QA gate:
 
 ```bash
-bash qa/run_all.sh
+make qa           # bash qa/run_all.sh
+make qa-silent    # PET_TALK_SILENT=1 — no audio, no daemons, safe overnight
+make qa-real      # PET_TALK_REAL_ENGINE=1 — also runs real-engine suites
 ```
 
-Ensure all 13 test suites pass with `RESULT: OK`:
-1. Protocol schema compliance (`qa/test_protocol.py`)
-2. Persona instruction spec validity (`qa/test_persona.py`)
-3. Humanizer filler & pace determinism (`qa/test_humanize.py`)
-4. Latency SLA budget assertions (`qa/test_latency.py`)
-5. Universal Dictation Matrix (`qa/test_dictation_matrix.py`)
-6. REST API & Audio store endpoints (`qa/test_api.py`)
-7. Realtime live duplex WebSocket loop (`qa/test_live_duplex.py`)
-8. Terminal CLI client & energy VAD (`qa/test_cli_client.py`)
-9. Native macOS Carbon hotkey & kill switch (`qa/test_hotkey.py`)
-10. Hardware Notch Dynamic Island HUD (`qa/test_hud.py`)
-11. Acoustic earcons sub-2ms engine (`qa/test_earcons.py`)
-12. WebSocket resilience & dead socket safety (`qa/test_ws_resilience.py`)
-13. Smallest.ai Lightning TTS & OpenAI reasoning tyres (`qa/test_new_tyres.py`)
+`qa/run_all.sh --list` prints the exact, current suite table (label, kind,
+path) with no side effects — that list is the authority on suite count and
+names, not a hand-copied list in this doc. As of this branch it's 22 entries;
+trust the `--list` output over any number written down here, since a suite
+gets added or removed without every doc getting a matching edit.

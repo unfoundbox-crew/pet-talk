@@ -10,7 +10,7 @@ This roadmap tracks the completed milestones and forward-looking evolution of **
 | :--- | :--- | :--- | :--- |
 | **Wave 1** | The Foundation | Full-duplex WebSocket loop, personas (Donna, Zuck), deterministic humanizer, QA test harness. | **SHIPPED** |
 | **Wave 2** | Ambient Presence | Native Carbon hotkey (`Option + Tab`), MacBook Notch Dynamic Island HUD, sub-2ms earcons, universal dictation matrix, sub-second latency, kill switch & pause mode. | **SHIPPED** |
-| **Wave 3** | Audio Streaming & Sovereign Edge | WebRTC / Opus duplex streaming, local on-device small LLMs (MLX/Ollama), acoustic echo cancellation (AEC), voice activity classification. | **UP NEXT** |
+| **Wave 3** | Audio Streaming & Sovereign Edge | WebRTC / Opus duplex streaming, local on-device small LLMs (MLX/Ollama), acoustic echo cancellation (AEC), voice activity classification. | **PARTIALLY SHIPPED** — eyes lane (`server/eyes.py`) and AX opt-in grounding (`PET_TALK_AX`) shipped; WebRTC/Opus streaming and on-device SLMs still open |
 | **Wave 4** | Autonomous Brain & Multimodal Context | Long-term episodic memory (`agentworth` indexing), OS-level screen grounding via Accessibility AXTree, multi-agent pet delegation, proactive ambient nudges. | **PLANNED** |
 
 ---
@@ -18,8 +18,9 @@ This roadmap tracks the completed milestones and forward-looking evolution of **
 ## 2. Shipped Milestones (Waves 1 & 2 Receipts)
 
 ### Wave 1: Core Voice Loop & Persona Architecture
-- **Full-Duplex WebSocket Server** (`server/app.py`):
-  - Async WebSocket protocol (`/ws`) supporting bidirectional audio frame streaming (`user.audio_chunk`, `agent.sentence`, `barge`).
+- **Full-Duplex WebSocket Server** (`server/ws.py`, `server/turn.py` today —
+  split out of the original single `server/app.py` since Wave 1 shipped):
+  - Async WebSocket protocol (`/ws`) with `user.start`/`user.chunk`/`user.stop`/`user.text`, `agent.sentence`, `barge`.
   - Two-tier worker lanes: FAST lane (instant stall audio playback) and WORKER lane (streaming sentence generation).
 - **Persona Instruction Specifications** (`personas/`):
   - 12-field deterministic persona schemas (`donna.md`, `zuck.md`, `jarvis.md`).
@@ -29,37 +30,50 @@ This roadmap tracks the completed milestones and forward-looking evolution of **
   - Hermetic test suites guaranteeing SLA budgets (turn <= 800ms, stall <= 400ms, barge <= 100ms).
 
 ### Wave 2: Sensory Ambient Presence & High-Performance Hotkey
-- **Hardware Notch Dynamic Island HUD** (`cli/hotkey/hud_window.swift`):
-  - Physical camera notch envelope (`auxiliaryTopLeftArea` / `auxiliaryTopRightArea`), squircle curvature (r=20px), concave ear fillets (r=10px).
-  - Apple fluid spring physics ("The Drip" entrance, "Suction" retraction, 3-cycle error shake).
-  - Non-activating panel (`.nonactivatingPanel`, zero keyboard focus stealing from IDE or terminal).
-  - Live Acoustic Visualizer: Real-time RMS and Peak amplitude rendered dynamically without fake looping animations.
-  - Multi-line dynamic height expansion (60px -> 76px -> 96px -> 110px clamp) with semantic breadcrumb sanitization.
-- **Native macOS Global Hotkey** (`cli/hotkey/main.swift`):
-  - Carbon `RegisterEventHotKey` on keycode 48 (`kVK_Tab`) with modifier `0x0800` (`optionKey`).
-  - Zero Accessibility/TCC permission prompts required.
-  - Sub-2ms instant barge-in kill via Darwin `libproc` process scanning and `SIGKILL`.
-- **Smart Kill Switch & Pause/Sleep Mode**:
-  - Single-tap `Option + Tab` when active: cuts audio in <2ms, terminates `pet-talk-cli`, dismisses HUD capsule without restarting turn.
-  - Double-tap `Option + Tab` ($\le$ 350ms): toggles persistent Pause / Sleep Mode.
-  - Dedicated shortcut: `Option + Shift + Tab` for instant Pause / Resume toggle.
-  - CLI subcommands: `pet-talk-hotkey kill`, `pause`, `resume`, `toggle`, `status`.
-- **Sub-Second Voice Latency & Conversational Conciseness**:
-  - LLM default switched to Groq LPU (`groq/compound-mini`, TTFT ~210ms).
-  - Prompt verbosity clamped to <= 20 spoken words, 1–2 punchy sentences.
-  - `VoiceProseFormatter`: strips markdown asterisks, backticks, code fences, and bullet points.
-  - Pre-cached stall audio in RAM at startup (`_STALL_AUDIO_CACHE`) for 0ms synthesis overhead.
-  - Deterministic control fast-path (<50ms for "status", "stop", "who are you").
-- **Universal Dictation Matrix & Clean Prose**:
-  - Swappable STT providers: Deepgram Nova-3, Groq Whisper LPU, OpenAI Whisper, WhisperKit CoreML, MLX Whisper, SenseVoice fleet.
-  - `CleanProseFormatter`: strips fillers ("uh", "um"), cleans repeated stutters, formats code tokens (`app.py`, `git commit`).
-  - Wispr Flow style cursor paste injection (`Cmd+V` via `CGEvent`).
-- **Acoustic Earcon Engine** (`cli/hotkey/earcons.swift`):
-  - Pre-cached NSSound in RAM (<2ms latency): `Tink.aiff`, `Pop.aiff`, `Bottle.aiff`, `Basso.aiff`.
+
+`cli/hotkey/*.swift` may be under concurrent edit by another lane as of this
+branch — the bullets below describe what the module map says these files are
+for (`docs/SPEC.md` §3), not a freshly re-verified line-by-line read. Specific
+sub-millisecond latency numbers (kill-switch timing, earcon latency, wake
+latency) from the earlier version of this section could not be reverified
+against the current Swift source in this pass and were dropped rather than
+repeated on faith. Verify against `qa/test_hotkey.py` / `qa/test_earcons.py`
+and the live binary before quoting a number here again.
+
+- **Notch Dynamic Island HUD** (`cli/hotkey/hud_window.swift`): floating,
+  non-activating panel anchored to the camera notch area; does not steal
+  keyboard focus from an editor or terminal.
+- **Native macOS global hotkey** (`cli/hotkey/main.swift`): Carbon
+  `RegisterEventHotKey` (keycode 48 / Tab, modifier Option) — no
+  Accessibility/TCC permission needed for the hotkey itself. (Separately,
+  `PET_TALK_AX=1` grounding *does* need the Accessibility permission — see
+  `docs/SPEC.md` §7. Those are two different things; don't conflate them.)
+  Kill switch, pause/resume, and status subcommands: `pet-talk-hotkey kill
+  | pause | resume | toggle | status`.
+- **Conversational conciseness**: `VoiceProseFormatter` strips markdown
+  (asterisks, backticks, code fences, bullets) and clamps spoken sentences
+  to `MAX_SENTENCE_WORDS = 20` (`server/speech.py`). Deterministic control
+  fast-path answers `status`/`stop`/`who are you` with no LLM round trip
+  (`server/control.py`).
+- **Universal dictation matrix**: swappable STT providers — Deepgram,
+  Groq Whisper, OpenAI Whisper, WhisperKit (CoreML), MLX Whisper,
+  faster-whisper, SenseVoice (see `server/providers/stt.py`).
+  `CleanProseFormatter` (`server/dictation.py`) strips fillers and repeated
+  stutters from transcripts.
+- **Acoustic earcon engine** (`cli/hotkey/earcons.swift`): RAM-cached
+  `NSSound` playback for mic-open / cutoff / barge-kill / error events.
 
 ---
 
-## 3. Wave 3: Audio Streaming & Sovereign Edge (Next Up)
+## 3. Wave 3: Audio Streaming & Sovereign Edge (partially shipped)
+
+**Shipped**: the eyes lane (`server/eyes.py` — `user.attach`, local OCR via
+`zrv`, `eyes.received`/`eyes.text` frames) and AX opt-in screen grounding
+(`PET_TALK_AX=1`, `server/grounding.py:ax_snapshot`). See `docs/SPEC.md` §7-8
+for the actual contract, including the describe-mode latency finding
+(`apple-fm` measured at ~102s per screenshot, so `describe` ships disabled).
+
+**Still open**: WebRTC/Opus audio streaming and on-device small LLMs, below.
 
 ### 3.1 WebRTC / Opus Audio Streaming Loop
 - **Problem**: Current audio capture buffers PCM16 in small chunks and sends WAV over WebSocket, creating slight turn-taking packetization overhead.
@@ -91,11 +105,27 @@ This roadmap tracks the completed milestones and forward-looking evolution of **
   - Local SQLite vector and session store indexing past turns, preferences, projects, and commits.
   - Post-compaction grounding protocol integration: inject active project context (`git status`, active tasks, Doppler config) on cold wake.
 
-### 4.2 Zero-Vision OS Screen Grounding (Accessibility AXTree)
-- **Problem**: Donna cannot currently see what code or application Saurabh is looking at without burning heavy multimodal vision tokens.
-- **Architecture**:
-  - Query macOS Accessibility API (`AXUIElementCopyAttributeValue`) to extract focused window title, active file path, selected text, or Cursor terminal buffer in pure text (<5ms, 0 visual tokens).
-  - Ambient prompt context: *"Saurabh is currently editing `server/app.py:120` in Cursor and inspecting terminal pane 2"*.
+### 4.2 Screen grounding: AX is the default, OCR is only for images/PDF
+
+This shipped, partially, in Wave 3 — this section is no longer a future
+design, it is what's actually there plus what's still missing:
+
+- **The AX route is the default answer to "what is Saurabh looking at."**
+  `PET_TALK_AX=1` turns on `server/grounding.py:ax_snapshot()`, which shells
+  out to `pet-talk-hotkey ax` and gets back one JSON line
+  (`{"ok","app","window","selection","path"}`) describing the frontmost
+  app/window/selection. This needs the macOS Accessibility permission
+  granted to the hotkey binary — see `docs/SPEC.md` §7 for why that's a real
+  trade against "zero permissions," not a rounding error.
+- **OCR (`server/eyes.py`, the zero-vision lane) is for images and PDFs
+  only** — screenshots, receipts, documents the user explicitly attaches
+  over `user.attach`. It is not how the agent finds out what's on screen
+  ambiently; that's AX's job. Don't route a screenshot through the AX path
+  or a "what am I looking at" question through OCR — they answer different
+  questions.
+- **Still missing**: extracting selected text or a terminal pane's buffer
+  via AX beyond what `pet-talk-hotkey ax` already returns, and folding that
+  into the ambient prompt context automatically rather than only on request.
 
 ### 4.3 Multi-Agent Pet Fleet & Autonomous Delegation
 - **Problem**: Donna is currently a single conversational agent. Complex tasks (running long test suites, git refactoring) block the voice loop.
@@ -115,4 +145,4 @@ Across all future milestones, the following rules remain invariant:
 1. **Never steal focus**: The HUD window must remain `.nonactivatingPanel` and never disrupt active typing in editors or terminals.
 2. **Deterministic TDD verification**: No feature merges into `main` without automated tests in `qa/run_all.sh`.
 3. **Monochromatic terminal discipline**: No raw Mermaid blocks or heavy ornate Unicode box art that corrupts terminal rendering.
-4. **Sub-50ms barge-in guarantee**: The user must always be able to cut Donna off cleanly without latency.
+4. **Barge-in guarantee**: the user must always be able to cut Donna off cleanly, within the `barge_ms` budget in `qa/budgets.json` (100ms).

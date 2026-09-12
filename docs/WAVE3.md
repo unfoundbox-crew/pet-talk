@@ -1,11 +1,24 @@
-# pet-talk Wave 3 — Eyes, Heartbeat, Real STT/LLM (design only, no code)
+# pet-talk Wave 3 — Eyes, Heartbeat, Real STT/LLM
 
-Refs: `docs/SPEC.md` (tyres, waves), `TECH-SPEC.md` §2–§4 (loop, ABCs, WS frames),
-`server/app.py` (`frame()`, `handle_turn`, `SpeakQueue`), `server/providers.py`
-(`STTProvider`, `LLMProvider`, `ProviderError`, `make_tts`), `server/persona.py`
-(frontmatter), `server/telemetry.py` (`TurnLog`), `personas/*.md`, `humanizer/humanize.py`.
+**Status (2026-09-12): section 1 (Eyes) is implemented**, in
+`server/eyes.py`, wired into `server/ws.py:_on_user_attach`. The real engine
+ids are `zrv` (default, shells out to the `zrv` CLI; its own `--engine`
+choices are `apple-vision`, `apple-fm`, `local-vlm`, `cloud-vlm`,
+`tesseract`) and `stub` (deterministic, test-only). See `docs/SPEC.md` §8 for
+the current contract, including the `describe` task shipping disabled by
+default (measured `apple-fm` latency ~102s per screenshot). Sections 2
+(Heartbeat) and 3 (real STT/LLM wiring beyond what §5 of `docs/SPEC.md`
+already documents) below are design-only, not yet built — read them as
+proposals, not as a description of shipped code.
 
-## 1. Eyes provider (NEW `server/eyes.py`, caller: `server/app.py`)
+Refs: `docs/SPEC.md` (the current contract — read this first, not the
+`TECH-SPEC.md §2-4` references below, which point at a superseded doc),
+`server/ws.py` (`frame()`, `handle_turn_task`, `SpeakQueue`),
+`server/providers/` (`STTProvider`, `LLMProvider`, `ProviderError`,
+`make_tts`), `server/persona.py` (frontmatter), `server/telemetry.py`
+(`TurnLog`), `personas/*.md`, `humanizer/humanize.py`.
+
+## 1. Eyes provider (SHIPPED: `server/eyes.py`, caller: `server/ws.py`)
 
 Goal: attach image/PDF/screenshot over existing WS `/ws`; server OCRs via `zrv ocr`
 subprocess; text lands in turn context tagged by source. No new transport.
