@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -48,6 +49,72 @@ def load_pet_talk_tokens() -> dict:
 def load_agentworth_css() -> str:
     with open(TOKENS_CSS, "r", encoding="utf-8") as f:
         return f.read()
+
+
+# ---------------------------------------------------------------------------
+# AgentWorth palette, PARSED from design/tokens.css — never redefined in
+# tokens.pet-talk.json (qa/test_design_tokens.py forbids it). The notch HUD is
+# AppKit, not CSS, so it cannot read a custom property: these values are lifted
+# out of the vendored stylesheet at generate time so the Swift side has exactly
+# one source and drift is impossible. Hex only — the rgba() soft/border ramps
+# have no AppKit consumer.
+# ---------------------------------------------------------------------------
+PALETTE_ROLES = (
+    "ground",
+    "surface",
+    "surface-2",
+    "surface-3",
+    "border",
+    "border-soft",
+    "ink",
+    "text",
+    "muted",
+    "faint",
+    "accent",
+    "success",
+    "warn",
+    "danger",
+)
+
+_HEX_DECL_RE = re.compile(r"--mv-([a-z0-9-]+)\s*:\s*(#[0-9a-fA-F]{3,8})\s*;")
+
+
+def _block_after(css: str, selector: str) -> str:
+    """The text of the first `{...}` block whose opening line contains `selector`."""
+    i = css.find(selector)
+    if i < 0:
+        raise ValueError(f"tokens.css has no {selector!r} block")
+    start = css.find("{", i)
+    if start < 0:
+        raise ValueError(f"tokens.css {selector!r} has no opening brace")
+    depth = 0
+    for j in range(start, len(css)):
+        if css[j] == "{":
+            depth += 1
+        elif css[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return css[start + 1 : j]
+    raise ValueError(f"tokens.css {selector!r} block is unterminated")
+
+
+def parse_agentworth_palette(css: str) -> dict:
+    """{role: {"light": "#rrggbb", "dark": "#rrggbb"}} for PALETTE_ROLES.
+
+    Light comes from the bare `:root` block (the default theme since
+    2026-08-31), dark from the explicit `[data-theme="dark"]` block — the same
+    two blocks a browser would resolve. A role missing from either block is
+    omitted entirely rather than guessed.
+    """
+    light_block = _block_after(css, ":root {")
+    dark_block = _block_after(css, ':root[data-theme="dark"]')
+    light = dict(_HEX_DECL_RE.findall(light_block))
+    dark = dict(_HEX_DECL_RE.findall(dark_block))
+    out = {}
+    for role in PALETTE_ROLES:
+        if role in light and role in dark:
+            out[role] = {"light": light[role], "dark": dark[role]}
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +227,7 @@ def _swift_numeric_literal(value: str):
         return None, False
 
 
-def render_swift(tokens: dict) -> str:
+def render_swift(tokens: dict, palette: dict) -> str:
     type_scale = tokens.get("type", {})
     geometry = tokens.get("geometry", {})
     motion = tokens.get("motion", {})
@@ -172,9 +239,11 @@ def render_swift(tokens: dict) -> str:
         "// Regenerate with: python3 design/build.py --write",
         "//",
         "// pet-talk's own token layer (type scale, geometry, motion,",
-        "// listening-line). Colour/neutral identity lives in AgentWorth's",
-        "// tokens.css and has no Swift consumer today — this file carries",
-        "// only what's genuinely pet-talk's own. Must compile standalone:",
+        "// listening-line) PLUS the AgentWorth palette lifted out of",
+        "// design/tokens.css — AppKit cannot read a CSS custom property, so the",
+        "// notch HUD reads the same values from here. Colour identity is still",
+        "// AgentWorth's and is never redefined in tokens.pet-talk.json.",
+        "// Must compile standalone:",
         "//   swiftc -typecheck cli/hotkey/DesignTokens.swift",
         "",
         "import Foundation",
@@ -222,6 +291,16 @@ def render_swift(tokens: dict) -> str:
         lines.append(f'    public static let {base}Light: String = "{light}"')
         lines.append(f'    public static let {base}Dark: String = "{dark}"')
 
+    lines.append("")
+    lines.append("    // MARK: - AgentWorth palette (parsed from design/tokens.css)")
+    lines.append("    //")
+    lines.append("    // Role names and values are AgentWorth's. `--mv-accent` is the ONE")
+    lines.append("    // accent in the system: selection, focus, links, and the receipt total")
+    lines.append("    // — nothing else. success/warn/danger are the reserved state colours.")
+    for role, entry in palette.items():
+        name = _swift_ident("palette." + role.replace("-", "."))
+        lines.append(f'    public static let {name}Light: String = "{entry["light"]}"')
+        lines.append(f'    public static let {name}Dark: String = "{entry["dark"]}"')
     lines.append("}")
     lines.append("")
     return "\n".join(lines)
@@ -233,7 +312,7 @@ def build_outputs():
     return {
         OUT_WEB_CSS: render_web_css(agentworth_css),
         OUT_WEB_PET_TALK_CSS: render_web_pet_talk_css(tokens),
-        OUT_SWIFT: render_swift(tokens),
+        OUT_SWIFT: render_swift(tokens, parse_agentworth_palette(agentworth_css)),
     }
 
 

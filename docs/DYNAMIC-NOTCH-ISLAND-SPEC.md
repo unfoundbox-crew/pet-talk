@@ -3,8 +3,8 @@
 **Document ID**: `SPEC-PET-TALK-004`  
 **Status**: `APPROVED / IMPLEMENTATION-ACTIVE`  
 **Date**: September 11, 2026  
-**Revised**: September 12, 2026 — measured notch width, a real spring, hand-over chord  
-**Verified against code**: September 12, 2026 (`cli/hotkey/hud_window.swift`, `cli/hotkey/main.swift`)  
+**Revised**: September 12, 2026 — Receipts Over Prose on the AgentWorth palette; measured notch width, a real spring, hand-over chord  
+**Verified against code**: September 12, 2026 (`cli/hotkey/HUDTheme.swift`, `cli/hotkey/hud_window.swift`, `cli/hotkey/main.swift`)  
 **Target Repository**: `unfoundbox-crew/pet-talk`  
 
 ---
@@ -15,9 +15,9 @@ Traditional desktop voice assistants render arbitrary floating windows that figh
 
 Following the foundational rule of native macOS island engineering—**"Reflect, Don't Host"**—Donna turns the hardware notch from an obstruction into a **living physical anchor**:
 
-1. **Hardware-Software Fusion**: The top edge is flush with `screen.frame.maxY`, enveloping the camera lens module in pitch black (`#000000`), erasing the boundary between glass and display pixels.
+1. **Hardware-Software Fusion**: The top edge is flush with `screen.frame.maxY`, enveloping the camera lens module in `--mv-ground` (dark), which is the same black the notch glass already is — the boundary between glass and display pixels disappears.
 2. **Real spring motion**: `stiffness: 220`, `damping: 21`, `mass: 1` — declared once in `DesignTokens.swift`, read by `HUDTokens`, and actually integrated. Interruptible, skippable, snappy. Measured 2026-09-12: 225 ms to 99 % of travel (the 220 ms drip budget), 3.1 % overshoot, fully settled at 527 ms.
-3. **Acoustic Truth**: Replace fake CSS/CoreAnimation loops with **live acoustic energy levels (RMS / FFT)** driven by the physical microphone.
+3. **Acoustic Truth**: One 2 pt line, and its vertical displacement *is* the microphone level. No bars, no spinner, no loop. Silence is a flat line — still listening, nothing to say.
 4. **Zero Mock Code**: Native Swift, compiled via `swiftc -O` into `bin/pet-talk-hotkey`. Zero third-party baggage, zero Electron bloat, sub-50ms latency.
 
 ---
@@ -31,29 +31,140 @@ Following the foundational rule of native macOS island engineering—**"Reflect,
 
    [ 1. IDLE / NOTCH TUCKED ]   <--- (Escape = hard cut, or Turn Done)
          |
-         +--- [Mouse Hover] --------> [ 2. HOVER PEEK ] (6px subtle gold shelf)
+         +--- [Mouse Hover] --------> [ 2. HOVER PEEK ]  (hoverPeek shelf + sleep bead)
          |                                  |
          | (Option+Tab)                     | (Click / Option+Tab)
          v                                  v
-   [ 3. LISTENING ("The Drip") ] <----------+
-         | (Height 38px -> 52px, Emerald Waveform, Live RMS bars)
+   [ 3. LISTENING ]  envelope: compact  <---+
+         | (37pt -> 52pt "the drip"; glyph + the live 2pt line, no label)
          v
-   [ 4. THINKING ("The Pulse") ]
-         | (measured notch width, SpacePilot Gold spinning orbit)
+   [ 4. THINKING ]  envelope: compact
+         | (glyph light steady + the stall text. No spinner: a spinner
+         |  would claim progress nothing is measuring.)
          v
-   [ 5. SPEAKING / DICTATION ("The Blossom") ]
-         | (Expands to 440px x 60px, concave top ear fillets r=10px,
-         |  Donna persona tag, transcribed zinc typography, interruptible)
+   [ 5. SPEAKING ]  envelope: expanded -> tall
+         | (measured notch -> 440pt, ear fillets r=10 once content spills;
+         |  sentence in --mv-ink, dimmed next-sentence preview in --mv-faint,
+         |  right-aligned mono receipt; 110pt ceiling)
          +-----------------------------+
          |                             |
-         | (Turn Complete)             | (Network / STT Error)
+         | (Turn Complete)             | (Network / STT / provider error)
          v                             v
-   [ 6. SUCTION RETRACTION ]     [ ERROR SHAKE ]
-     (Springs up into the notch)   (±3pt horizontal shake, Basso chime)
+   [ 6. SUCTION RETRACTION ]     [ ERROR ]  envelope: error
+     (springs up into the notch;   (reason + fix, --mv-danger peg; the ONLY
+      leaves the sleep bead)        envelope that waits to be dismissed)
 
-   Chords: Option+Tab = ask/kill · Option+Tab twice (<=400ms) = pause
+   Chords: Option+Tab = ask/kill · Option+Tab twice (<=400ms) = pause (envelope: sleep)
            Option+Shift+Tab = hand over · Escape = barge (hard cut)
 ```
+
+### State -> visual, asserted not described
+
+`HUDTheme.visual(for:hasNotch:tall:)` is the table. `--dump-state` exports it as
+`stateVisuals`, and `qa/test_hud.py::TestStateToVisualMapping` asserts every row —
+so this table cannot drift from the binary.
+
+| state | envelope | Archie glyph | listening line |
+| --- | --- | --- | --- |
+| listening | `compact` | `listening` | **live** |
+| thinking | `compact` | `idle` (steady light) | off |
+| speaking | `expanded`, `tall` past 60pt | `speaking` (one beat per sentence) | off |
+| error | `error` | `error` (lamp off) | off |
+| sleep (paused) | `sleep` | `error` (lamp off) | off |
+
+`hasNotch == false` rewrites every row's envelope to `pill`. The fallback display
+has one shape; it gains nothing from having six.
+
+---
+
+## 2a. Visual specification — the token behind every element
+
+Every colour in the capsule resolves through `cli/hotkey/HUDTheme.swift`, which
+reads `cli/hotkey/DesignTokens.swift`, which `design/build.py` generates from
+`design/tokens.css` (AgentWorth's, vendored verbatim) plus
+`design/tokens.pet-talk.json`. There is **no hex literal** in `hud_window.swift`
+or `HUDTheme.swift`; `qa/test_hud.py::TestNoHexInHUDPaintFiles` fails the suite if
+one appears, in either the `#rrggbb` or the `0xNN / 255` form.
+
+**The capsule is always the dark palette.** It is not a window that happens to be
+dark — it is the physical notch, which is black glass at every hour of the day. A
+light variant would be a light rectangle glued under a black notch. The
+three-state theming contract still binds every surface where the theme is a
+*choice*; the cockpit honours it, and the capsule has no choice to make.
+
+### Colour
+
+| element | token | note |
+| --- | --- | --- |
+| capsule ground | `--mv-ground` (dark) | opaque, not 95 % — a translucent ground lets the desktop through and the capsule stops being the notch |
+| 1 pt outline | `--mv-border` (dark) | an edge, never window chrome |
+| spoken sentence | `--mv-ink` (dark) | the highest-contrast step, used for exactly one thing |
+| the one compact line | `--mv-text` (dark) | |
+| mono eyebrow (`heard`, `paused`, an error code), receipt label, **body of the listening line** | `--mv-muted` (dark) | the line is chrome that reports; it is not a highlight |
+| next-sentence preview, sleep bead | `--mv-faint` (dark) | present enough to say "there is more", quiet enough not to be read first |
+| **listening-line peak** | `--mv-accent` | one of two violets |
+| **receipt total** | `--mv-accent` | the other one |
+| state pegs | `--mv-success` / `--mv-warn` / `--mv-danger` | reserved. Only a real out-of-budget number earns one |
+
+**One violet rule.** `--mv-accent` carries the listening-line peak and the receipt
+total. Nothing else. Selection, focus and links — its other jobs in AgentWorth —
+do not exist in a click-through HUD. State never gets the accent: the glyph and
+the reserved pegs carry that. `HUDTheme.accentRoles` exports the pair and
+`qa/test_hud.py` asserts it is exactly those two.
+
+### Type
+
+Geist and Geist Mono are AgentWorth's faces and neither is installed system-wide
+on macOS. **SF Pro and SF Mono are the native stand-ins**, via
+`NSFont.systemFont` / `NSFont.monospacedSystemFont`: the same role split — mono
+for anything a machine produced, sans for anything a person reads as language —
+at the same token sizes. **Follow-up: bundle the Geist OFL files into
+`bin/pet-talk-hotkey` and switch the two `HUDTheme.font` families over.** Until
+then the spec is honest that these are stand-ins, not Geist.
+
+| role | face | size token | colour |
+| --- | --- | --- | --- |
+| `receipt` | SF Mono, medium | `type.size.micro` (9.9) | `--mv-muted` |
+| `receiptTotal` | SF Mono, medium | `type.size.micro` | `--mv-accent` |
+| `eyebrow` | SF Mono, semibold, kern 0.4 | `type.size.micro` | `--mv-muted` |
+| `line` | SF Pro, medium | `type.size.caption` (11.8) | `--mv-text` |
+| `sentence` | SF Pro, medium | `type.size.caption` | `--mv-ink` |
+| `preview` | SF Pro, regular | `type.size.caption` | `--mv-faint` |
+
+`type.size.micro` and `type.size.caption` are the 1.200 scale continued *down*
+from `type.size.label` (14.2): 14.2 / 1.2 = 11.8, / 1.2 again = 9.9. Not new
+numbers — the same scale, two steps further.
+
+### Envelopes
+
+The design boards were drawn at a 180 pt notch. The notch on this machine
+measures **220 pt** (`--dump-state`, 2026-09-12). So the boards' horizontal
+numbers are proportions, never pixels: every horizontal metric in
+`layoutSubviews(forWidth:height:)` is a fraction of the *actual* width, and
+`HUDCapsuleView.capsuleWidth` is the measured notch. Heights are unchanged from
+the existing tokens, ceiling included.
+
+| envelope | size | contents |
+| --- | --- | --- |
+| `compact` | measured notch x `capsule.height.listening` (52) | glyph + one line. Listening shows no word at all — the moving line *is* the label |
+| `expanded` | `capsule.width.expanded` (440) x `capsule.height.expanded` (60) | glyph, the current sentence, a dimmed next-sentence preview, right-aligned mono receipt |
+| `tall` | 440 x up to `capsule.height.max` (**110**) | multi-line sentence. Past the ceiling the answer belongs in the cockpit, not under the notch |
+| `error` | 440 x 60 | the reason and its fix. The only envelope that does not retract on its own |
+| `sleep` | collapsed to the notch + the `sleep.bead` (2 pt) | she stops taking up room rather than disappearing |
+| `pill` | fallback width x `capsule.height` (44), radius `pillCornerRadius` (22) | no hardware notch. Same content, rounder corners, nothing added |
+
+`--dump-state` reports `theme: agentworth`, the `envelope` in force, and the fixed
+`envelopes` set. The set is pinned by the suite: a seventh envelope is a design
+decision, not a code change.
+
+### Copy
+
+No persona name, no millisecond readings, no frame names. The capsule says what is
+happening in a plain lowercase word — `working`, `speaking`, `heard` — and
+developer detail lives in the cockpit. `qa/test_hud.py::TestCapsuleCopyIsClean`
+greps every string literal in `hud_window.swift` for the persona name and for
+digits in `HUDState.labelText`. The engine's own log lines still name her; that is
+a log, not a capsule.
 
 ---
 
@@ -185,6 +296,26 @@ he arrives bare" (`agentworth/docs/DESIGN.md`, "Archie").
   badge) shifts right by the glyph's own footprint only while it's shown.
 * **`--dump-state`** carries the live read under `glyph`: `{state, colourway,
   visible}` — no window shown, same headless contract as the rest of the dump.
+
+---
+
+## 4d. Motion, per the AppleMotion table
+
+| moment | duration | curve | what moves | reduced motion |
+| --- | --- | --- | --- | --- |
+| the quiet line | continuous | none — direct write per frame | the line's displacement is the live level | stays live, smoothed. Suppressing it would hide whether she can hear |
+| wake (drip) | `duration` = spring settle | spring 220 / 21 / 1 | 37pt -> 52pt, one material | crossfade at final height, zero travel |
+| size change (blossom) | spring settle | same spring | width and height together | snap to the new pose |
+| sentence arrives | `duration.sentenceArrive` (160 ms) | ease-out | the sentence crossfades in | same, stagger zeroed |
+| receipt follows | +`duration.receiptStagger` (60 ms) | ease-out | the eye lands on words first, evidence second | arrives with the sentence |
+| barge / Escape | **0 ms** | **none at any duration** | audio, line and queue die on the same frame | identical — there was never anything to soften |
+| error | `error.shakeDuration` (120 ms) | ease-in-out | `error.shakeCycles` x +/-`error.shakeAmplitude`, decaying | skipped entirely; the glyph still goes dark and Basso still plays |
+| sleep retract | `duration.sleepRetract` (180 ms) | ease-in | the capsule collapses around the bead | fade at full height, zero travel |
+
+Reduced motion, stated once: **distance goes to zero, durations stay, and live
+microphone data is smoothed rather than suppressed.** `--dump-state` exports this
+as `reducedMotion`, and the suite asserts it. **Nothing loops while idle** —
+`repeatCount = .infinity` and `autoreverses` are both absent from the HUD, by test.
 
 ---
 

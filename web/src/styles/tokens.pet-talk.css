@@ -6,12 +6,16 @@
 
 :root {
   --pt-type-scale-ratio: 1.200;
+  --pt-type-size-micro: 9.9px;
+  --pt-type-size-caption: 11.8px;
   --pt-type-size-label: 14.2px;
   --pt-type-size-body: 17px;
   --pt-type-size-sub: 20.4px;
   --pt-type-size-head: 24.5px;
   --pt-type-size-display: 29.4px;
   --pt-type-family-spoken: "IBM Plex Sans";
+  --pt-type-family-ui: "SF Pro";
+  --pt-type-family-mono: "SF Mono";
   --pt-geo-notch-width: 180pt;
   --pt-geo-notch-height: 37pt;
   --pt-geo-capsule-width-rest: 180pt;
@@ -22,6 +26,9 @@
   --pt-geo-radius-bottom: 20pt;
   --pt-geo-radius-earFillet: 10pt;
   --pt-geo-idle-line-thickness: 4pt;
+  --pt-geo-listening-line-thickness: 2pt;
+  --pt-geo-listening-line-samples: 56;
+  --pt-geo-capsule-height-error: 60pt;
   --pt-geo-sleep-bead: 2pt;
   --pt-geo-hoverPeek: 6pt;
   --pt-motion-spring-stiffness: 220;
@@ -29,6 +36,7 @@
   --pt-motion-spring-mass: 1;
   --pt-motion-duration-stallIn: 120ms;
   --pt-motion-duration-sentenceArrive: 160ms;
+  --pt-motion-duration-receiptStagger: 60ms;
   --pt-motion-duration-bargeCut: 0ms;
   --pt-motion-duration-sleepRetract: 180ms;
   --pt-motion-duration-escapeDismiss: 40ms;

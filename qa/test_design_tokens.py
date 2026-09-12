@@ -50,10 +50,12 @@ HEX_RE = re.compile(r"#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?(?:[0-9a-fA-F]{2})?\b")
 # DesignTokens/tokens.pet-talk.css is that later work's job, not this one's.
 # Listed by exact path so a NEW offender (one not on this list) still fails
 # the suite instead of hiding behind it.
-KNOWN_UNMIGRATED_HEX_SWIFT = {
-    os.path.join(ROOT, "cli", "hotkey", "hud_window.swift"),
-    os.path.join(ROOT, "cli", "hotkey", "main.swift"),
-}
+# Emptied 2026-09-12 by the notch reskin: hud_window.swift and main.swift now
+# take every colour from HUDTheme, which reads the generated DesignTokens. The
+# set stays as an empty set rather than being deleted, so re-listing a file is a
+# visible, deliberate act. qa/test_hud.py adds the stricter check the old list
+# was hiding: `0xNN / 255` components, which HEX_RE below never matched.
+KNOWN_UNMIGRATED_HEX_SWIFT: set = set()
 # Emptied 2026-09-12 by the UI rebuild (item 5): every web/src/**/*.tsx file
 # listed here now takes its colour from tokens.css / tokens.pet-talk.css through
 # web/src/styles/app.css. The set stays as an empty set rather than being
