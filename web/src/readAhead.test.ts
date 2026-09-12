@@ -98,3 +98,28 @@ describe("arrow-skip moves the play head, never the queue", () => {
     expect(s.sentences).toHaveLength(3);
   });
 });
+
+describe("the buffer keys on seq, so the server must not reuse one", () => {
+  it("keeps a stall and an answer that arrive on different seqs", () => {
+    let s = EMPTY_READ_AHEAD;
+    s = insertSentence(s, { seq: 0, text: "Let me look.", audioUrl: "/a/stall" });
+    s = insertSentence(s, { seq: 1, text: "Twelve tests pass.", audioUrl: "/a/0" });
+    expect(s.sentences).toHaveLength(2);
+    expect(s.sentences.map((x) => x.text)).toEqual([
+      "Let me look.",
+      "Twelve tests pass.",
+    ]);
+  });
+
+  it("shows why a reused seq is a server bug: the answer overwrites the stall", () => {
+    // Not a wish — a demonstration. insertSentence MERGES onto a matching seq,
+    // so two frames sharing one leave a single sentence where two were spoken.
+    // server/turn.py's direct path used to start at seq 0, which is the
+    // stall's; qa/test_stt_streaming.py TestSentenceSeqNeverCollides guards it.
+    let s = EMPTY_READ_AHEAD;
+    s = insertSentence(s, { seq: 0, text: "Let me look.", audioUrl: "/a/stall" });
+    s = insertSentence(s, { seq: 0, text: "Twelve tests pass.", audioUrl: "/a/0" });
+    expect(s.sentences).toHaveLength(1);
+    expect(s.sentences[0].text).toBe("Twelve tests pass.");
+  });
+});

@@ -308,6 +308,86 @@ async def _with_early_stall(coro, forced: bool = True):
         stt_stream.turn_accepts_stall_sent = real
 
 
+# --------------------------------------------------------------- numbering ---
+
+
+class DivergingRouterLLM(LLMProvider):
+    """Routes the PARTIAL to the stall and the FINAL transcript direct.
+
+    Not contrived: the early stall is decided on a partial and the turn is
+    routed on the full transcript, so the two verdicts can disagree on any
+    real router. That disagreement is what put two frames on ``seq=0``.
+    """
+
+    def __init__(self) -> None:
+        self.routed: list[str] = []
+
+    def route(self, text: str) -> str:
+        self.routed.append(text)
+        return "stall" if len(self.routed) == 1 else "direct"
+
+    async def stream(self, messages: list[dict]) -> AsyncIterator[str]:
+        yield "Twelve tests pass."
+
+
+class TestSentenceSeqNeverCollides(unittest.TestCase):
+    """``seq=0`` belongs to the stall. Every answer path starts at 1.
+
+    The early stall sends ``agent.sentence seq=0`` and ``turn.py``'s direct
+    path also started its answer at ``first_seq=0``. Two frames on one seq is
+    not cosmetic: web/src/readAhead.ts ``insertSentence`` keys the read-ahead
+    buffer BY SEQ, so the answer overwrote the stall in place and the buffer
+    held one sentence where two were spoken.
+    """
+
+    def test_early_stall_then_direct_answer_yields_distinct_seqs(self) -> None:
+        async def go():
+            from server.speak_queue import SpeakQueue
+            from server.turn import handle_turn
+
+            llm = DivergingRouterLLM()
+            pset = ProviderSet(stt=SegmentSTT(), llm=llm, tts=StubTTS())
+            runtime.install(pset)
+            w = fake_ws()
+
+            sent = await stt_stream.emit_early_stall(
+                w, "t-seq", "did the provider tests pass", TEST_PERSONA, pset
+            )
+            self.assertTrue(sent, "fixture failed: no early stall to collide with")
+
+            await handle_turn(
+                w, "t-seq", "did the provider tests pass?", SpeakQueue(),
+                active_persona=TEST_PERSONA, providers=pset, stall_sent=True,
+            )
+            self.assertEqual(len(llm.routed), 2,
+                             "fixture failed: the two routes did not diverge")
+
+            seqs = [
+                f.get("seq") for f in frames(w) if f.get("type") == "agent.sentence"
+            ]
+            self.assertGreaterEqual(len(seqs), 2, f"expected a stall and an answer: {seqs}")
+            self.assertEqual(seqs[0], 0, "the stall does not own seq 0")
+            self.assertEqual(
+                len(seqs), len(set(seqs)),
+                f"two agent.sentence frames share a seq: {seqs} — the client keys on it",
+            )
+            self.assertNotIn(0, seqs[1:], "an answer sentence reused the stall's seq")
+
+        asyncio.run(go())
+
+    def test_both_answer_paths_start_after_the_stall(self) -> None:
+        """Read the source, not a comment: neither path may pass first_seq=0."""
+        import inspect
+
+        from server import turn as turn_mod
+
+        src = inspect.getsource(turn_mod)
+        self.assertEqual(src.count("first_seq=0"), 0,
+                         "an answer path still starts at seq 0, which is the stall's")
+        self.assertEqual(src.count("first_seq=1"), 2,
+                         "expected exactly two answer paths, both at first_seq=1")
+
+
 # ------------------------------------------------------------------ barge ---
 
 

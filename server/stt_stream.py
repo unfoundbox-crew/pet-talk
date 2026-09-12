@@ -439,8 +439,10 @@ async def emit_early_stall(
 
     This is the whole point of the lane: the frames below are the same ones
     ``turn.py``'s worker path sends, sent from end-of-speech instead of from
-    end-of-transcription. ``seq=0`` matches ``turn.py``'s ``first_seq=1``, so
-    the answer's sentences continue the stall's numbering.
+    end-of-transcription. ``seq=0`` is the stall's, always: BOTH of
+    ``turn.py``'s answer paths start at ``first_seq=1``, so the answer's
+    sentences continue the stall's numbering instead of overwriting it in the
+    client's read-ahead buffer, which keys on seq.
     """
     from .stall import get_or_synth_stall
 

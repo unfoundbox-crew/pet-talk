@@ -24,6 +24,15 @@ class TurnLog:
         self._stages[stage] = ms
         return ms
 
+    def marked(self, stage: str) -> bool:
+        """Has this stage already been recorded?
+
+        ``mark`` overwrites, so a caller that only wants to stamp the FIRST
+        thing to happen has to ask. The stall and the answer's first sentence
+        both want ``first_sentence`` and only the earlier one is the truth.
+        """
+        return stage in self._stages
+
     def end(self, **extra: Any) -> dict[str, Any]:
         total = round((time.time() - (self._t0 or time.time())) * 1000, 1)
         row = {**self._turn, "stages_ms": self._stages, "total_ms": total, **extra}

@@ -261,7 +261,12 @@ async def handle_turn(
         queue,
         p,
         providers,
-        first_seq=0,
+        # seq 0 belongs to the stall, on every path. The streaming-STT lane
+        # sends `agent.sentence seq=0` for its early filler and the direct
+        # route can follow one (the partial routes to stall, the full
+        # transcript routes direct) — so an answer starting at 0 collided with
+        # it, and web/src/readAhead.ts keys the read-ahead buffer BY SEQ.
+        first_seq=1,
         result=result,
         log_=log_,
         max_sentences=1,  # direct path answers once, no worker fan-out
