@@ -53,6 +53,7 @@ class Session:
     turn_tasks: dict[str, asyncio.Task] = field(default_factory=dict)
     active_tasks: set[asyncio.Task] = field(default_factory=set)
     turn_persona: dict[str, Persona] = field(default_factory=dict)
+    pending_handover: bool = False  # set by user.handover, consumed by the next turn
     #: Turn ids a barge has killed. A barge can arrive before the turn task
     #: exists; the turn checks this set before its first await and gives up.
     barged: set[str] = field(default_factory=set)
@@ -330,12 +331,24 @@ async def _on_user_attach(session: Session, msg: dict[str, Any]) -> None:
     await eyes.handle_attach(session.ws, msg, persona)
 
 
+async def _on_user_handover(session: Session, msg: dict[str, Any]) -> None:
+    """Hand-over chord (Option+Shift+Tab). v1: acknowledge, mark the session so
+    the next turn is treated as delegated work, and open the mic. The tray that
+    gathers screen context, selection and clipboard is lane 10's; this frame is
+    the contract it will fill."""
+    turn_id = msg.get("turn_id") or new_turn_id()
+    session.pending_handover = True
+    await safe_send_json(session.ws, frame("handover.received", turn_id, source=str(msg.get("source") or "unknown")))
+    await safe_send_json(session.ws, frame("state.listening", turn_id))
+
+
 HANDLERS = {
     "user.start": _on_user_start,
     "user.chunk": _on_user_chunk,
     "user.stop": _on_user_stop,
     "user.text": _on_user_text,
     "user.attach": _on_user_attach,
+    "user.handover": _on_user_handover,
     "barge": _on_barge,
 }
 

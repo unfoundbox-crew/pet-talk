@@ -194,6 +194,9 @@ Latency budgets (`qa/budgets.json`), each mapped to its gate per `docs/SPEC.md` 
 
 ## Known gaps
 
+- 2026-09-12: the plan and the design canvas said the notch is about 180 pt and the HUD's 220 constant was a bug. Lane 3 measured it at runtime: 220 pt on this 14-inch MacBook Pro. The constant was right by accident; the fix that stands is measuring `auxiliaryTopLeftArea`/`auxiliaryTopRightArea` at runtime with 180 pt as the no-notch fallback pill. Design boards drawn at 180 are 40 pt narrow.
+
+
 From `docs/SPEC.md` §10, plus what this pass found:
 
 - 2026-09-12b: **real-engine turn latency is measured, and the turn-level budgets hold.** Live WS through the real loop with real speech: `stall_ms` 245.5ms p50 (budget 400, PASS), `first_sentence_ms` 245.5ms p50 (budget 800, PASS), `barge_ms` 0.9ms p50 (budget 100, PASS). Full table and method in `docs/SPEC.md` §9.1.

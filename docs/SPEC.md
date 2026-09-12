@@ -90,6 +90,8 @@ Every frame carries `turn_id`. `Frame.__post_init__` raises `frame_no_turn_id` i
 | `user.stop` | `turn_id?`, `pcm_b64?`, `sample_rate?` | `_on_user_stop` — runs STT in the turn task, fires `handle_turn_task` |
 | `user.text` | `text`, `turn_id?`, persona overrides | `_on_user_text` — skips STT, fires `handle_turn_task` directly |
 | `user.attach` | `ref?`, `kind`, `mime?`, `b64`/`bytes_b64`, `filename?`, `task?` | `_on_user_attach` — delegates to `server.eyes.handle_attach` if importable, else `agent.error` reason `eyes_disabled` |
+| `user.handover` | client → server | `{turn_id, source}` | Hand-over chord (Option+Shift+Tab). Marks the next turn as delegated work and opens the mic. |
+| `handover.received` | server → client | `{turn_id, source}` | Acknowledges `user.handover`; followed by `state.listening`. |
 | `barge` | `turn_id?` | `_on_barge` — cancels the live turn(s), flushes the queue, returns the true dropped count |
 
 An unrecognized frame type gets `agent.error` reason `unknown_frame` (detail: the type string, or `<missing type>`). Undecodable JSON gets reason `bad_frame`.
@@ -101,12 +103,58 @@ An unrecognized frame type gets `agent.error` reason `unknown_frame` (detail: th
 | `state.idle` / `state.listening` / `state.thinking` / `state.speaking` | — | `ws.py`, `turn.py` |
 | `transcript.user` | `text` | after STT, or immediately for `user.text` |
 | `agent.stall` | `phrase_id`, `text` | `turn.py` worker path, before the LLM answer starts |
-| `agent.sentence` | `seq`, `text`, `audio_url`, `word_times`, `estimated` | `speech.py:speak_sentence` — one per spoken sentence |
+| `agent.sentence` | `seq`, `text`, `audio_url`, `word_times`, `estimated`, `stream_url`, `chunked` | `speech.py:speak_sentence` — one per spoken sentence |
+| `agent.chunk` | `seq`, `chunk_no`, `audio_b64`, `url`, `final` | `speech.py:stream_chunks` — one per synthesis chunk, only on a chunk-capable tyre |
 | `agent.done` | `path`, `sentences`, `dropped?` | end of every turn; `path` is one of `empty`, `control`, `control_cancel`, `worker`, `direct`, `interrupted`, `error` |
 | `agent.error` | `reason`, `detail?`, plus per-call fields (`seq`, `ref`, ...) | any failure, see catalogue in §4.3 |
 | `eyes.received` | `ref`, `kind`, `task`, `bytes` | `eyes.py:handle_attach` as soon as the payload is accepted |
 | `eyes.text` | `ref`, `source`, `kind`, `task`, `engine`, `text`, `truncated` | `eyes.py:handle_attach` after OCR resolves |
 | `agent.receipt` | `claim`, `source{kind,id,repo,path}`, `tokens`, `cost_usd`, `index_age_s`, `fresh` | `receipts.py:attach` — one per spoken claim about work done |
+
+### 4.2.1 Chunked audio (`agent.chunk`)
+
+A sentence's audio arrives before the sentence is finished being synthesized.
+This is what puts the first audible audio inside the 200ms `tts_ms` budget: what
+has to fit is one clause, not one sentence.
+
+```
+agent.sentence { seq, text, audio_url, word_times, estimated,
+                 stream_url: str | null,   # /audio/<id> of chunk 0, null when not chunked
+                 chunked: bool }           # true when agent.chunk frames preceded this
+agent.chunk    { seq, chunk_no, audio_b64, url, final: bool }
+```
+
+Rules a client can rely on:
+
+- **Every `agent.chunk` for a sentence precedes that sentence's
+  `agent.sentence`.** `chunk_no` counts from 0 with no gaps, and exactly one
+  chunk carries `final: true`.
+- **Each chunk is a complete RIFF/WAVE file**, not a PCM fragment, so it plays
+  on arrival with no header to assemble. `audio_b64` is that file, base64'd;
+  `url` serves the identical bytes for a client that would rather fetch than
+  decode.
+- **`audio_url` still carries the whole sentence, on both paths.** A client
+  written against the old contract ignores `agent.chunk` and keeps working —
+  backward compatible for one release. `_shared.concat_wavs` re-muxes the chunks
+  by PCM to build it (gluing WAV byte strings would produce a header that lies
+  about its length).
+- **`word_times` on the sentence frame spans the whole sentence**; each chunk's
+  own `word_times` are chunk-local, from zero. `_shared.shift_word_times` lays
+  them onto the sentence timeline.
+- **`chunked: false` is not a degraded frame, and never silent.** A tyre without
+  `synth_chunks` — every cloud backend, which returns one finished file — takes
+  the whole-sentence path, and the reason is logged by name:
+  `tts_no_chunk_support`, or `tts_chunking_disabled` when
+  `PET_TALK_TTS_CHUNKS=0` turned it off.
+
+Env:
+
+| var | default | what |
+|---|---|---|
+| `PET_TALK_TTS_CHUNKS` | `1` | `0` forces the whole-sentence path for every tyre |
+| `PET_TALK_TTS_FIRST_CHUNK_WORDS` | `4` | words in chunk 0 — the only chunk racing a budget |
+| `PET_TALK_TTS_CHUNK_WORDS` | `6` | words in every chunk after the first |
+| `PET_TALK_STALL_WARM` | `1` | `0` skips the startup stall pre-synth, and says so |
 
 ### 4.3 `agent.error` reason catalogue
 
@@ -121,7 +169,7 @@ Every reason a running server can actually emit today, grepped from `ProviderErr
 
 **STT (`providers/stt.py`, `turn.py`):** `stt_unknown_provider`, `stt_empty_audio`, `stt_empty_result`, `stt_bad_response`, `stt_request_failed`, `stt_no_key`, `stt_failed`, `stt_faster_whisper_not_installed`, `stt_whisper_not_installed`, `stt_whisperkit_failed`, `stt_mlx_failed`, `stt_mlx_not_installed`.
 
-**TTS (`providers/tts.py`, `speech.py`, `stall.py`):** `tts_unknown_provider`, `tts_empty_text`, `tts_empty_audio`, `tts_synth_failed`, `tts_request_failed`, `tts_no_key`, `tts_no_token`, `tts_no_job_id`, `tts_job_failed`, `tts_job_timeout`, `tts_download_failed`, `stall_synth_failed`.
+**TTS (`providers/tts.py`, `speech.py`, `stall.py`):** `tts_unknown_provider`, `tts_empty_text`, `tts_empty_audio`, `tts_synth_failed`, `tts_request_failed`, `tts_no_key`, `tts_no_token`, `tts_no_job_id`, `tts_job_failed`, `tts_job_timeout`, `tts_download_failed`, `stall_synth_failed`, `tts_chunk_format_mismatch`, `tts_chunk_not_wav`, `tts_cancelled`. Two more are telemetry only — logged by `speak_sentence`, never sent as a frame, because they describe which synthesis path ran rather than a failure: `tts_no_chunk_support`, `tts_chunking_disabled`. `stall_warm_disabled` / `stall_warm_skipped` / `stall_warm_failed` are the same kind of record for the startup pre-synth.
 
 **SpeakQueue (`speak_queue.py`):** `queue_closed`, `queue_no_spoken_sentence`, `queue_bad_word_idx`, `queue_close_failed`.
 
@@ -151,6 +199,23 @@ LLMProvider.route(text: str) -> "stall" | "answer"     # deterministic keyword r
 LLMProvider.stream(messages: list[dict]) -> AsyncIterator[str]   # yields whole sentences
 TTSProvider.synth(text: str, voice: str, speed: float) -> tuple[bytes, list[dict]]   # (wav_bytes, word_times)
 ```
+
+One optional async method, on tyres that can stream. It is deliberately NOT on
+the ABC: a backend that can only return a finished file stays legal rather than
+carrying a fake implementation, and a fake stream is worse than an honest whole
+WAV. `speak_sentence` probes for it with `getattr` and names the reason when it
+is absent.
+
+```
+TTSProvider.synth_chunks(text: str, voice: str, speed: float,
+                         cancel: threading.Event | None = None)
+    -> AsyncIterator[tuple[bytes, list[dict], bool]]   # (standalone_wav, word_times, final)
+```
+
+Today `kokoro-local` is the only tyre that implements it (`stub-chunked` exists
+so the wire path is provable hermetically). It works because `mlx_audio`'s
+`model.generate` is already a generator that phonemizes per segment, so
+synthesizing a four-word clause costs four words of work.
 
 ### 5.2 `word_times` shape
 

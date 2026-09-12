@@ -329,6 +329,14 @@ class PetTalkClient:
             if not first or first.get("type") != "state.idle":
                 self._log(f"Warning: unexpected initial frame: {first}")
 
+            if getattr(self, "handover", False):
+                # Hand-over chord: tell the server the next turn is delegated work.
+                await self.send_frame({
+                    "type": "user.handover",
+                    "turn_id": uuid.uuid4().hex,
+                    "source": "hotkey",
+                })
+
             # Start recording
             await self.start_recording_turn()
 
@@ -548,7 +556,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "mode",
         nargs="?",
         default="interactive",
-        choices=["interactive", "once", "tui"],
+        choices=["interactive", "once", "tui", "handover"],
         help="Execution mode: 'interactive' (default TUI) or 'once' (hotkey one-shot)",
     )
     parser.add_argument(
@@ -602,7 +610,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         quiet=args.quiet,
     )
 
-    is_once = args.mode == "once" or args.hotkey_flag
+    is_once = args.mode in ("once", "handover") or args.hotkey_flag
+    client.handover = args.mode == "handover"
 
     def _sig_handler(sig, frame):
         client.player.kill_playback()

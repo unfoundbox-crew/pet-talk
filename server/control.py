@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from .persona import Persona
+from . import receipts
 
 
 @dataclass(frozen=True)
@@ -42,5 +43,10 @@ def check_deterministic_control(text: str, p: Optional[Persona] = None) -> Contr
         name = (getattr(p, "name", "") or "").strip() if p is not None else ""
         who = name.capitalize() if name else "your assistant"
         return Control(matched=True, reply=f"I'm {who}. What do you need?")
+    # Archie-backed voice routes ("who broke X", "where was I with Y"); they
+    # answer with a receipt or refuse on a stale index. Never raise.
+    _ans = receipts.answer_voice_route(t)
+    if _ans is not None:
+        return Control(matched=True, reply=_ans.spoken)
     return Control()
 
