@@ -36,30 +36,72 @@ pip install mlx-audio 'misaki[en]'     # ~330MB of Kokoro weights on first use
 #    daemon below instead (5x slower, measured), and ./serve.sh starts it:
 # ./serve.sh
 
-# 3. pet-talk FastAPI duplex server (:8089). LITELLM_BASE_URL names the proxy —
-#    no host is baked into the tree.
-LITELLM_BASE_URL=http://127.0.0.1:8000/v1 \
-  doppler run --project unfoundbox --config dev_personal -- \
+# 3. pet-talk FastAPI duplex server (:8089). LITELLM_BASE_URL lives in Doppler
+#    now, with every other credential — no host is baked into the tree, and
+#    nothing needs to be set on the command line. Export it yourself only if
+#    you are pointing at a different proxy than the one in Doppler.
+doppler run --project unfoundbox --config dev_personal -- \
   ~/miniconda3/envs/local-ml-py311/bin/python -m uvicorn server.app:app \
     --host 127.0.0.1 --port 8089
 
 # 4. Optional: web cockpit (:5173)
 cd web && npm install && npm run dev
+
+# 5. Optional: the Option+Tab hotkey. `make build-hotkey` writes BOTH binaries
+#    — bin/pet-talk-cli (the launcher the daemon spawns) and
+#    bin/pet-talk-hotkey (the daemon itself). Build the launcher on its own
+#    with `make build-cli` if you only want the terminal client.
+make build-hotkey && ./bin/pet-talk-hotkey run --daemon
 ```
 
-### Building the hotkey daemon
+### Building the binaries
 
-`bin/` is not tracked (see `.gitignore`; `bin/*` is ignored except `.gitkeep`).
-Build it with:
+`bin/` is not tracked (see `.gitignore`; `bin/*` is ignored except
+`.gitkeep`), so both binaries are built, never cloned:
 
 ```bash
-make build-hotkey
+make build-cli      # bin/pet-talk-cli — the launcher, no compiler, instant
+make build-hotkey   # build-cli, then bin/pet-talk-hotkey via swiftc -O
 ```
 
-This runs `cli/hotkey/build.sh bin/` — the real `swiftc -O` build never runs
-on a laptop (the fan rule), it runs on `ssh air`. As of this branch,
-`cli/hotkey/build.sh` does not exist in this checkout yet; `make build-hotkey`
-will fail until another lane lands it.
+`bin/pet-talk-cli` is a shell launcher around `python3 -m cli.client`. It is
+what the hotkey daemon spawns on Option+Tab, and it is also the terminal
+client you can run yourself. Build it: without it the daemon starts fine,
+logs `Target CLI: (unresolved)`, and the chord does nothing.
+`pet-talk-hotkey --dump-state` reports `cli.resolved` so you can check.
+
+`make build-hotkey` runs `cli/hotkey/build.sh bin/` — `swiftc -O` over seven
+Swift files, measured 8s on Apple Silicon. That is the one standing exception
+to the fan rule (Saurabh, 2026-09-12): it runs locally at `nice -n 19`. Do
+**not** route it to `ssh air` — air is Intel and would produce an x86_64
+binary that cannot run on an M-series Mac.
+
+### Screen grounding (opt-in)
+
+pet-talk can tell the model what you are looking at: the frontmost app, the
+window title, and the current selection, as one JSON line from
+`pet-talk-hotkey ax`. It is off by default and needs two things:
+
+```bash
+./bin/pet-talk-hotkey ax --request-permission   # once: pops the macOS prompt
+PET_TALK_AX=1 ...                               # then run the server with it on
+```
+
+A bare `ax` call never pops a dialog — it answers
+`{"ok":false,"reason":"ax_permission_denied"}` — so the prompt is an explicit
+request you make once. Verified working on 2026-09-12: with the permission
+granted it returned the focused app and window. One thing that will catch you
+out: macOS ties Accessibility trust to the binary, so **rebuilding
+`bin/pet-talk-hotkey` revokes the grant** and `ax` goes back to
+`ax_permission_denied` until you re-run `--request-permission`.
+
+Nothing about this sends pixels anywhere. It reads text from the
+Accessibility API locally; the OCR lane (`server/eyes.py`) is separate and
+also local. What it returns joins the system prompt in the
+`[ACTIVE SYSTEM GROUNDING]` block — note that this block is **not** fenced
+the way OCR text is (`fence_ocr` in `server/persona_runtime.py` covers the
+eyes lane only), so a window title you do not control reaches the model as
+plain prompt text. That is why this is opt-in.
 
 ### Studio token
 
@@ -98,6 +140,7 @@ tree — every credential comes from the environment or a `POST /settings` call.
 | `SENSEVOICE_BASE_URL` | SenseVoice STT base URL. Default `http://127.0.0.1:8086`. |
 | `VAD_SILENCE_MS` | Silence duration that ends a turn. Default `600`. |
 | `PET_TALK_SILENT` | `1` = nothing plays audio, nothing starts an audio daemon. Required for any overnight/CI run. |
+| `PET_TALK_STT_WARM` | `0` = skip the startup STT warm (and say so in the log). Default on: one throwaway transcription of 0.5s of silence at startup loads the model, so the first real turn does not. Measured 2026-09-12: first-turn stall 1264ms without it, 198-288ms with it. |
 | `PET_TALK_REAL_ENGINE` | `1` = also run the real-engine QA suites (`qa/test_real_engine_e2e.py`, `qa/test_voice_analyzer.py`), otherwise SKIP. |
 | `PET_TALK_AX` | `1` = enable AX screen grounding via `pet-talk-hotkey ax`. Needs the macOS Accessibility permission for that binary — see `docs/SPEC.md` §7. |
 | `PET_TALK_GROUNDING_REPOS` | Colon-separated extra repo paths to report git-head lines for in the system prompt. Empty by default. |
@@ -115,7 +158,8 @@ pet-talk/
 +-- bin/                    # built binaries, not tracked (bin/.gitkeep only)
 +-- cli/
 |   +-- audio.py            # mic capture, energy VAD
-|   +-- client.py            # terminal CLI client
+|   +-- client.py            # terminal CLI client (run as `-m cli.client`)
+|   +-- build-cli.sh         # writes bin/pet-talk-cli, the launcher
 |   `-- hotkey/              # native Swift macOS hotkey/HUD daemon
 |       +-- main.swift
 |       +-- hud_window.swift
@@ -141,7 +185,7 @@ pet-talk/
 |   +-- frames.py, speak_queue.py, speech.py, turn.py, stall.py, control.py
 |   +-- grounding.py, ws.py, routes_http.py, eyes.py
 |   +-- persona.py, persona_runtime.py, memory.py, voices.py
-|   +-- dictation.py, audio_store.py, logs.py, telemetry.py
+|   +-- dictation.py, audio_store.py, logs.py, telemetry.py, warmup.py
 |   `-- providers/             # _shared.py, llm.py, stt.py, tts.py, vad.py
 `-- web/src/                   # React + Vite cockpit
 ```
