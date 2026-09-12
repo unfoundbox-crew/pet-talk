@@ -117,9 +117,14 @@ async def run_speech(
     The producer pushes every sentence the LLM streams; the consumer
     synthesizes and sends them in order. When the LLM is faster than TTS the
     queue buffers ahead — ``queue.high_water`` is the receipt.
+
+    Fails closed: zero sentences with no other named reason sends
+    ``agent.error reason=llm_no_sentences`` before the caller's
+    ``agent.done``, so an empty stream is never reported as a good turn.
     """
     await queue.reopen()
     producer_error: Optional[ProviderError] = None
+    consumer_error = False
 
     async def _produce() -> None:
         nonlocal producer_error
@@ -148,6 +153,7 @@ async def run_speech(
                 swallowed("queue_close_failed", e)
 
     async def _consume() -> None:
+        nonlocal consumer_error
         seq = first_seq
         while True:
             sentence = await queue.get()
@@ -157,6 +163,7 @@ async def run_speech(
                 ws, turn_id, sentence, seq, p, providers.tts, queue=queue
             )
             if spoken is None:
+                consumer_error = True  # speak_sentence already named the reason
                 await queue.done_with_inflight()
                 return
             result.sentences += 1
@@ -180,6 +187,16 @@ async def run_speech(
 
     if producer_error is not None:
         await send_error(ws, turn_id, producer_error.reason, producer_error.detail)
+    elif result.sentences == 0 and not consumer_error:
+        # Law 1: a stream that yielded nothing is a failure, not a quiet
+        # success. Without this the client saw agent.done sentences=0 and no
+        # reason — silence reported as a good turn.
+        await send_error(
+            ws,
+            turn_id,
+            "llm_no_sentences",
+            "the LLM stream produced no sentences",
+        )
 
     stats = await queue.stats()
     log.debug(

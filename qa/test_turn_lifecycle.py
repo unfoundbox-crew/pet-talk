@@ -104,6 +104,20 @@ class FastLLM(LLMProvider):
             yield sentence
 
 
+class EmptyLLM(LLMProvider):
+    """Streams nothing at all — the fail-closed case for llm_no_sentences."""
+
+    def __init__(self, path: str = "direct") -> None:
+        self.path = path
+
+    def route(self, text: str) -> str:
+        return self.path
+
+    async def stream(self, messages: list[dict]) -> AsyncIterator[str]:
+        if False:  # pragma: no cover - an async generator that yields nothing
+            yield ""
+
+
 def fake_ws() -> MagicMock:
     ws = MagicMock()
     ws.client_state = WebSocketState.CONNECTED
@@ -240,6 +254,45 @@ class TestBargeCancelsInFlightTurn(unittest.IsolatedAsyncioTestCase):
             self.assertIn("word_times", f, "agent.sentence carries no word timings")
             self.assertIn("estimated", f, "agent.sentence does not flag estimated timings")
         print(f"    buffer ahead: high_water={queue.high_water}, spoken={len(spoken)}")
+
+
+class TestEmptyLlmStreamFailsClosed(unittest.IsolatedAsyncioTestCase):
+    """Zero sentences is a failure with a name, never a quiet agent.done."""
+
+    async def _run(self, path: str):
+        ws = fake_ws()
+        providers = ProviderSet(
+            stt=StubSTT(), llm=EmptyLLM(path=path), tts=SlowTTS(delay_s=0.01)
+        )
+        await handle_turn_task(
+            ws,
+            f"t-empty-{path}",
+            "what is the weather",
+            SpeakQueue(),
+            {},
+            active_persona=TEST_PERSONA,
+            providers=providers,
+        )
+        return sent_frames(ws)
+
+    async def test_direct_path_reports_llm_no_sentences(self):
+        frames = await self._run("direct")
+        errors = [f for f in frames if f.get("type") == "agent.error"]
+        self.assertTrue(errors, [f.get("type") for f in frames])
+        self.assertEqual(errors[-1].get("reason"), "llm_no_sentences")
+        types = [f.get("type") for f in frames]
+        self.assertLess(
+            types.index("agent.error"),
+            types.index("agent.done"),
+            "the reason must arrive before agent.done",
+        )
+
+    async def test_worker_path_reports_llm_no_sentences(self):
+        frames = await self._run("stall")
+        reasons = [f.get("reason") for f in frames if f.get("type") == "agent.error"]
+        self.assertIn("llm_no_sentences", reasons, reasons)
+        done = [f for f in frames if f.get("type") == "agent.done"]
+        self.assertEqual(done[-1].get("sentences"), 0)
 
 
 class TestBargeBeforeTheTurnRegisters(unittest.IsolatedAsyncioTestCase):
