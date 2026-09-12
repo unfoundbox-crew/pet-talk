@@ -21,6 +21,50 @@ logger = logging.getLogger("pet_talk.providers")
 # sends this instead of relying on the library default.
 DEFAULT_USER_AGENT = "pet-talk/0.2 (+https://github.com/unfoundbox-crew/pet-talk)"
 
+# The LiteLLM proxy is the house default LLM route (Saurabh, 2026-09-12). Its
+# address is NEVER baked into the tree: `LITELLM_BASE_URL` (or the generic
+# `LLM_BASE_URL`) names it, and this loopback literal is only the last-resort
+# fallback for a machine running the proxy on its own default port. Defined
+# once, here, so `providers/llm.py` and `server/settings.py` cannot drift.
+LITELLM_DEFAULT_BASE_URL = "http://127.0.0.1:8000/v1"
+
+#: Models whose SSE stream spends its token budget on `reasoning` deltas
+#: before it emits a single `content` delta. Measured 2026-09-12: with the
+#: ordinary 120-token ceiling, `openai/gpt-oss-20b`, `qwen/qwen3.6-27b` and
+#: `groq/compound-mini` all finish with `finish_reason: "length"` having
+#: streamed reasoning only — the turn then speaks nothing. These get a raised
+#: ceiling (REASONING_TOKEN_FLOOR) so content is actually reached.
+REASONING_MODEL_HINTS = (
+    "gpt-5",
+    "o1",
+    "o3",
+    "gpt-oss",
+    "qwen3",
+    "compound",
+    "deepseek-r",
+    "reasoner",
+    "thinking",
+)
+
+#: Models that accept OpenAI's `reasoning_effort` knob. Sending it to a model
+#: that does not is a 400, so this list stays narrow and measured.
+REASONING_EFFORT_HINTS = ("gpt-oss", "gpt-5")
+
+#: Floor on the token ceiling for a reasoning model — enough that reasoning
+#: cannot starve content. Measured: gpt-oss-20b reaches content at ~15
+#: reasoning deltas with reasoning_effort=low, ~80 without.
+REASONING_TOKEN_FLOOR = 400
+
+
+def is_reasoning_model(model: str) -> bool:
+    m = (model or "").lower()
+    return any(hint in m for hint in REASONING_MODEL_HINTS)
+
+
+def accepts_reasoning_effort(model: str) -> bool:
+    m = (model or "").lower()
+    return any(hint in m for hint in REASONING_EFFORT_HINTS)
+
 
 class ProviderError(RuntimeError):
     """Fail-closed error with a machine-readable, snake_case reason.

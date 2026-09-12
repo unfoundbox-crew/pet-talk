@@ -19,10 +19,14 @@ import X` keep working exactly as they did when this was a single module.
 from __future__ import annotations
 
 from ._shared import (
+    LITELLM_DEFAULT_BASE_URL,
+    REASONING_TOKEN_FLOOR,
     ProviderError,
+    accepts_reasoning_effort,
     encode_multipart_formdata,
     estimate_word_times,
     finalize_think,
+    is_reasoning_model,
     json_dumps,
     logger,
     pcm16_to_wav_bytes,
@@ -32,6 +36,9 @@ from ._shared import (
     strip_closed_think_tags,
 )
 from .llm import (
+    DEFAULT_GROQ_MODEL,
+    DEFAULT_LITELLM_BASE_URL,
+    DEFAULT_LITELLM_MODEL,
     RESEARCH_TRIGGERS,
     LLMProvider,
     OpenAICompatibleLLM,
@@ -55,6 +62,7 @@ from .stt import (
 from .tts import (
     DeepgramTTS,
     ElevenLabsTTS,
+    KokoroLocalTTS,
     KokoroSpacePilotTTS,
     SmallestAITTS,
     StubTTS,
@@ -64,7 +72,11 @@ from .tts import (
 from .vad import VAD, EnergyGateVAD
 
 __all__ = [
+    "LITELLM_DEFAULT_BASE_URL",
+    "REASONING_TOKEN_FLOOR",
     "ProviderError",
+    "accepts_reasoning_effort",
+    "is_reasoning_model",
     "encode_multipart_formdata",
     "estimate_word_times",
     "finalize_think",
@@ -75,6 +87,9 @@ __all__ = [
     "redacted_repr",
     "split_sentences",
     "strip_closed_think_tags",
+    "DEFAULT_GROQ_MODEL",
+    "DEFAULT_LITELLM_BASE_URL",
+    "DEFAULT_LITELLM_MODEL",
     "RESEARCH_TRIGGERS",
     "LLMProvider",
     "OpenAICompatibleLLM",
@@ -94,6 +109,7 @@ __all__ = [
     "make_stt",
     "DeepgramTTS",
     "ElevenLabsTTS",
+    "KokoroLocalTTS",
     "KokoroSpacePilotTTS",
     "SmallestAITTS",
     "StubTTS",

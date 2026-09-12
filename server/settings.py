@@ -13,6 +13,11 @@ from dataclasses import asdict, dataclass, fields, replace
 from typing import Any, Optional
 
 from .logs import swallowed
+from .providers import (
+    DEFAULT_GROQ_MODEL,
+    DEFAULT_LITELLM_MODEL,
+    LITELLM_DEFAULT_BASE_URL,
+)
 
 # --------------------------------------------------------------- paths ---
 
@@ -63,8 +68,10 @@ LLM_REQUIRED_KEY: dict[str, str] = {
 
 #: Where a self-hosted LiteLLM proxy lives when nothing says otherwise.
 #: Localhost, never a tailnet address — a hardcoded 100.x default sent every
-#: fresh checkout at one particular machine.
-LITELLM_DEFAULT_BASE_URL = "http://127.0.0.1:8000/v1"
+#: fresh checkout at one particular machine. Defined in
+#: ``server/providers/_shared.py`` and imported here so this module and
+#: ``providers/llm.py`` cannot drift (they disagreed — :8000 vs :4000 — until
+#: 2026-09-12).
 GEMINI_DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
 LITELLM_BASE_URL_VARS = ("LITELLM_BASE_URL", "LLM_BASE_URL")
 
@@ -98,12 +105,12 @@ LLM_MODEL_DEFAULTS: dict[str, tuple[tuple[str, ...], str]] = {
     "gemini": (("GEMINI_MODEL",), "gemini-2.5-flash"),
     "google": (("GEMINI_MODEL",), "gemini-2.5-flash"),
     "flash": (("GEMINI_MODEL",), "gemini-2.5-flash"),
-    "groq": (("GROQ_MODEL",), "groq/compound-mini"),
+    "groq": (("GROQ_MODEL",), DEFAULT_GROQ_MODEL),
     "openai": (("OPENAI_MODEL",), "gpt-5-nano"),
     "gpt": (("OPENAI_MODEL",), "gpt-5-nano"),
-    "litellm": (("LITELLM_MODEL", "LLM_MODEL"), "claude-sonnet-4-6"),
-    "fleet": (("LITELLM_MODEL", "LLM_MODEL"), "claude-sonnet-4-6"),
-    "local": (("LITELLM_MODEL", "LLM_MODEL"), "claude-sonnet-4-6"),
+    "litellm": (("LITELLM_MODEL", "LLM_MODEL"), DEFAULT_LITELLM_MODEL),
+    "fleet": (("LITELLM_MODEL", "LLM_MODEL"), DEFAULT_LITELLM_MODEL),
+    "local": (("LITELLM_MODEL", "LLM_MODEL"), DEFAULT_LITELLM_MODEL),
 }
 # Settings field holding the key for each LLM provider family.
 LLM_KEY_FIELD: dict[str, str] = {
@@ -136,7 +143,7 @@ def _env_chain(variables: tuple[str, ...], literal: str = "") -> str:
 
 
 DEFAULT_LLM_BASE = (LITELLM_BASE_URL_VARS, LITELLM_DEFAULT_BASE_URL)
-DEFAULT_LLM_MODEL = (("LITELLM_MODEL", "LLM_MODEL"), "claude-sonnet-4-6")
+DEFAULT_LLM_MODEL = (("LITELLM_MODEL", "LLM_MODEL"), DEFAULT_LITELLM_MODEL)
 
 
 def _resolve_chain(variables: tuple[str, ...], literal: str, generic: str) -> str:
@@ -192,9 +199,19 @@ class RuntimeSettings:
     def from_env(cls) -> "RuntimeSettings":
         groq = os.environ.get("GROQ_API_KEY", "")
         anthropic = os.environ.get("ANTHROPIC_API_KEY", "")
-        stt_default = "deepgram" if os.environ.get("DEEPGRAM_API_KEY") else "faster-whisper"
-        llm_default = "groq" if groq else ("haiku" if anthropic else "litellm")
-        tts_default = "smallest" if os.environ.get("SMALLEST_API_KEY") else "kokoro"
+        # Defaults are measured, not guessed, and they do not change shape
+        # because a key happens to be in the environment — a provider that
+        # appears only on machines holding one key is a provider nobody
+        # measures. All three are overridable by their own env var.
+        #   STT: faster-whisper, the only tyre inside the 150ms budget here
+        #        (143ms p50 vs Groq 306ms vs Deepgram 1432ms).
+        #   LLM: the LiteLLM proxy — the house route (Saurabh, 2026-09-12).
+        #        This replaces "groq when GROQ_API_KEY is present".
+        #   TTS: kokoro-local, in-process Kokoro-82M, 5x the daemon's speed
+        #        (255ms p50 vs 1235ms).
+        stt_default = "faster-whisper"
+        llm_default = "litellm"
+        tts_default = "kokoro-local"
         llm_provider = os.environ.get("LLM_PROVIDER", llm_default).lower()
         base_vars, base_literal = LLM_BASE_URL_DEFAULTS.get(llm_provider, DEFAULT_LLM_BASE)
         model_vars, model_literal = LLM_MODEL_DEFAULTS.get(llm_provider, DEFAULT_LLM_MODEL)

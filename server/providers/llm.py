@@ -10,20 +10,46 @@ from __future__ import annotations
 import abc
 import asyncio
 import os
-
-# LiteLLM proxy default. Point at your own proxy via LITELLM_BASE_URL; no fleet
-# host is baked into the tree.
-DEFAULT_LITELLM_BASE_URL = os.environ.get("LITELLM_BASE_URL", "http://127.0.0.1:4000/v1")
 from typing import Any, AsyncIterator, Optional
 
 from ._shared import (
+    LITELLM_DEFAULT_BASE_URL,
+    REASONING_TOKEN_FLOOR,
     ProviderError,
+    accepts_reasoning_effort,
     finalize_think,
+    is_reasoning_model,
     logger,
     redacted_repr,
     split_sentences,
     strip_closed_think_tags,
 )
+
+# The LiteLLM proxy is the house default LLM route. Its address comes from
+# LITELLM_BASE_URL (or the generic LLM_BASE_URL); the literal fallback lives in
+# `_shared.py` so this module and `server/settings.py` share one definition and
+# no fleet host is baked into the tree.
+DEFAULT_LITELLM_BASE_URL = (
+    os.environ.get("LITELLM_BASE_URL")
+    or os.environ.get("LLM_BASE_URL")
+    or LITELLM_DEFAULT_BASE_URL
+)
+
+#: The house default model on the proxy. Measured 2026-09-12 (N=3, serial,
+#: this machine): first-content-delta p50 617ms / p95 649ms — inside the 800ms
+#: `llm_ms` budget. `gemini-3.7-flash` was the intended default and is
+#: rejected on evidence: the proxy's Gemini key answers HTTP 429 "exceeded
+#: your current quota" on every call. `claude-sonnet-5`/`claude-fable-5` are
+#: HTTP 500 (Bedrock: model not enabled for the account), and
+#: `claude-sonnet-4-6` streams but at 1673ms p50 — over budget.
+DEFAULT_LITELLM_MODEL = "gpt-oss-120b-groq"
+
+#: Groq's own fastest verified plain-chat model (2026-09-12, N=3: 450ms p50 /
+#: 532ms p95 first content delta with reasoning_effort=low). Groq no longer
+#: serves a llama chat model; `qwen/qwen3.6-27b` streams reasoning only at any
+#: sane token ceiling, and `groq/compound-mini` — the previous default — is
+#: agentic and cannot be relied on to emit `content` at all.
+DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b"
 
 
 class LLMProvider(abc.ABC):
@@ -90,7 +116,9 @@ class StubLLM(LLMProvider):
 DEFAULT_MAX_TOKENS = 120
 
 
-async def _sentence_stream(deltas: AsyncIterator[str]) -> AsyncIterator[str]:
+async def _sentence_stream(
+    deltas: AsyncIterator[str], stats: Optional[dict] = None
+) -> AsyncIterator[str]:
     """Buffer raw text deltas, strip `<think>` reasoning spans, and yield
     complete sentence-sized chunks via `split_sentences()`.
 
@@ -98,8 +126,16 @@ async def _sentence_stream(deltas: AsyncIterator[str]) -> AsyncIterator[str]:
     `OpenAICompatibleLLM.stream()` — previously each branch duplicated its
     own ~70-line copy of this loop (and the no-httpx copy referenced an
     undefined `is_reasoning` name, raising NameError on every call).
+
+    Fail-closed (law 1): a stream that completes having produced no spoken
+    text raises ``llm_no_content`` instead of returning quietly. A silent
+    empty generator is how a reasoning-only model looked like a working
+    provider for a whole day — the worker path emitted zero sentences and
+    nothing in the stack said why. ``stats`` (filled by the caller's delta
+    pump) carries the reasoning-delta count into that error message.
     """
     buf = ""
+    spoke = False
     async for delta in deltas:
         if not delta:
             continue
@@ -110,10 +146,25 @@ async def _sentence_stream(deltas: AsyncIterator[str]) -> AsyncIterator[str]:
         buf = stripped
         sentences, buf = split_sentences(buf)
         for sentence in sentences:
+            spoke = True
             yield sentence
     tail = finalize_think(buf)
     if tail:
+        spoke = True
         yield tail
+    if not spoke:
+        reasoning = (stats or {}).get("reasoning_deltas", 0)
+        model = (stats or {}).get("model", "?")
+        raise ProviderError(
+            "llm_no_content",
+            f"model {model} streamed no content deltas"
+            + (
+                f" ({reasoning} reasoning deltas — raise the token ceiling or "
+                "pick a plain chat model)"
+                if reasoning
+                else " (empty completion)"
+            ),
+        )
 
 
 class OpenAICompatibleLLM(LLMProvider):
@@ -128,7 +179,7 @@ class OpenAICompatibleLLM(LLMProvider):
     def __init__(
         self,
         base_url: str = DEFAULT_LITELLM_BASE_URL,
-        model: str = "claude-sonnet-4-6",
+        model: str = DEFAULT_LITELLM_MODEL,
         api_key: str = "",
         max_tokens: Optional[int] = None,
         timeout_s: float = 45.0,
@@ -170,14 +221,28 @@ class OpenAICompatibleLLM(LLMProvider):
         elif isinstance(messages, str):
             formatted_messages.append({"role": "user", "content": messages})
 
-        is_reasoning = any(x in self.model for x in ("gpt-5", "o1", "o3"))
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": formatted_messages,
             "stream": True,
         }
-        if is_reasoning:
-            payload["max_completion_tokens"] = max(self.max_tokens, 300)
+        if is_reasoning_model(self.model):
+            # A reasoning model spends the ceiling on `reasoning` deltas
+            # before it writes a word of `content`. At the ordinary 120-token
+            # ceiling that means `finish_reason: "length"` with nothing
+            # spoken (measured 2026-09-12 on gpt-oss-20b, qwen3.6-27b and
+            # compound-mini), so the ceiling is floored well above it.
+            ceiling = max(self.max_tokens, REASONING_TOKEN_FLOOR)
+            if any(x in self.model for x in ("gpt-5", "o1", "o3")):
+                payload["max_completion_tokens"] = ceiling
+            else:
+                payload["max_tokens"] = ceiling
+                payload["temperature"] = 0.7
+            if accepts_reasoning_effort(self.model):
+                # Shortest path to content on the gpt-oss family: ~15
+                # reasoning deltas instead of ~80, 450ms vs 617ms to first
+                # content delta (measured, Groq, N=3).
+                payload["reasoning_effort"] = "low"
         else:
             payload["max_tokens"] = self.max_tokens
             payload["temperature"] = 0.7
@@ -197,6 +262,9 @@ class OpenAICompatibleLLM(LLMProvider):
             "Authorization": f"Bearer {self.api_key}",
         }
         payload = self._build_payload(messages)
+        # Filled by whichever delta pump runs; read by _sentence_stream when a
+        # stream ends having spoken nothing, so the named error says why.
+        stats: dict[str, Any] = {"model": self.model, "reasoning_deltas": 0}
 
         if httpx is not None:
 
@@ -219,7 +287,12 @@ class OpenAICompatibleLLM(LLMProvider):
                                     break
                                 try:
                                     chunk = _json.loads(data_str)
-                                    yield chunk["choices"][0]["delta"].get("content") or ""
+                                    delta = chunk["choices"][0]["delta"]
+                                    if delta.get("reasoning") or delta.get(
+                                        "reasoning_content"
+                                    ):
+                                        stats["reasoning_deltas"] += 1
+                                    yield delta.get("content") or ""
                                 except Exception:
                                     continue
                 except ProviderError:
@@ -229,7 +302,7 @@ class OpenAICompatibleLLM(LLMProvider):
                 except Exception as e:
                     raise ProviderError("llm_stream_failed", str(e))
 
-            async for sentence in _sentence_stream(_deltas()):
+            async for sentence in _sentence_stream(_deltas(), stats):
                 yield sentence
         else:
             logger.debug("OpenAICompatibleLLM.stream: httpx unavailable, using openai SDK")
@@ -244,8 +317,14 @@ class OpenAICompatibleLLM(LLMProvider):
                     client = AsyncOpenAI(base_url=self.base_url, api_key=self.api_key or "x")
                     resp = await client.chat.completions.create(**payload)
                     async for chunk in resp:
-                        delta = chunk.choices[0].delta.content if chunk.choices else None
-                        yield delta or ""
+                        choice = chunk.choices[0] if chunk.choices else None
+                        delta = getattr(choice, "delta", None)
+                        if delta is not None and (
+                            getattr(delta, "reasoning", None)
+                            or getattr(delta, "reasoning_content", None)
+                        ):
+                            stats["reasoning_deltas"] += 1
+                        yield (getattr(delta, "content", None) or "") if delta else ""
                 except ProviderError:
                     raise
                 except (ConnectionError, OSError) as e:
@@ -253,7 +332,7 @@ class OpenAICompatibleLLM(LLMProvider):
                 except Exception as e:
                     raise ProviderError("llm_stream_failed", str(e))
 
-            async for sentence in _sentence_stream(_deltas()):
+            async for sentence in _sentence_stream(_deltas(), stats):
                 yield sentence
 
 
@@ -269,13 +348,16 @@ def make_llm(
     model: Optional[str] = None,
     api_key: Optional[str] = None,
 ) -> LLMProvider:
-    """Tyre switch: LLM_PROVIDER=haiku|opencode|zen|gemini|groq|openai|litellm|fleet|stub.
+    """Tyre switch: LLM_PROVIDER=litellm|haiku|opencode|zen|gemini|groq|openai|fleet|stub.
+
+    Default is ``litellm`` — the LiteLLM proxy is the house LLM route
+    (Saurabh, 2026-09-12), and its address comes from ``LITELLM_BASE_URL``.
 
     Fail-closed: unknown provider names and missing required keys raise
     ProviderError instead of silently defaulting. Construction is cheap and
     does no network I/O.
     """
-    which = (provider or os.environ.get("LLM_PROVIDER", "haiku")).lower()
+    which = (provider or os.environ.get("LLM_PROVIDER", "litellm")).lower()
     logger.debug("make_llm: selecting provider=%s", which)
 
     if which in ("haiku", "claude-haiku", "claude"):
@@ -310,7 +392,7 @@ def make_llm(
 
     if which == "groq":
         b_url = base_url or "https://api.groq.com/openai/v1"
-        m = model or "groq/compound-mini"
+        m = model or os.environ.get("GROQ_MODEL", DEFAULT_GROQ_MODEL)
         key = _require_key(api_key or os.environ.get("GROQ_API_KEY"), "GROQ_API_KEY")
         return OpenAICompatibleLLM(base_url=b_url, model=m, api_key=key)
 
@@ -322,7 +404,9 @@ def make_llm(
 
     if which in ("litellm", "fleet", "local"):
         b_url = base_url or os.environ.get("LLM_BASE_URL", DEFAULT_LITELLM_BASE_URL)
-        m = model or os.environ.get("LLM_MODEL", "claude-sonnet-4-6")
+        m = model or os.environ.get("LITELLM_MODEL") or os.environ.get(
+            "LLM_MODEL", DEFAULT_LITELLM_MODEL
+        )
         key = _require_key(
             api_key or os.environ.get("LLM_API_KEY") or os.environ.get("LITELLM_MASTER_KEY"),
             "LITELLM_MASTER_KEY",
