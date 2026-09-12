@@ -106,6 +106,12 @@ public struct PetTalkConfig {
     /// walk) — see HotkeyListener.resolveCliPath(). Never a hardcoded default here;
     /// an absent/invalid value just falls through to the next resolution step.
     public var cliPath: String? = nil
+    /// `native` (default) runs the voice turn inside this daemon — mic, socket
+    /// and playback in one process, see TurnController.swift. `cli` is the
+    /// original path that spawns `pet-talk-cli once`, kept working as the
+    /// fallback. Resolution order: --turn-engine, PET_TALK_TURN_ENGINE, this
+    /// key, then native (TurnEngine.resolve).
+    public var turnEngine: String? = nil
 
     public init(
         version: String = "1.0",
@@ -114,7 +120,8 @@ public struct PetTalkConfig {
         motion: MotionConfig = MotionConfig(),
         geometry: GeometryConfig = GeometryConfig(),
         hotkey: ChordConfig = ChordConfig(),
-        cliPath: String? = nil
+        cliPath: String? = nil,
+        turnEngine: String? = nil
     ) {
         self.version = version
         self.audio = audio
@@ -123,6 +130,7 @@ public struct PetTalkConfig {
         self.geometry = geometry
         self.hotkey = hotkey
         self.cliPath = cliPath
+        self.turnEngine = turnEngine
     }
 
     public static var defaultConfigPath: String {
@@ -179,6 +187,11 @@ public struct PetTalkConfig {
             }
         case "audio.sound_pack", "audio.soundpack":
             audio.soundPack = cleanVal
+            return true
+        case "turn_engine", "turnengine":
+            let normalised = cleanVal.lowercased()
+            guard normalised == "native" || normalised == "cli" else { return false }
+            turnEngine = normalised
             return true
         case "paste.enabled":
             if let b = PetTalkConfig.parseBool(cleanVal) {
@@ -247,6 +260,8 @@ public struct PetTalkConfig {
         if let cliPath = cliPath, !cliPath.isEmpty {
             lines.append("cli_path: \"\(cliPath)\"")
         }
+        lines.append("# Voice turn engine: native (in this daemon) or cli (spawn pet-talk-cli).")
+        lines.append("turn_engine: \"\(turnEngine ?? "native")\"")
         lines.append("")
         lines.append("# Auditory Feedback (Earcons)")
         lines.append("audio:")
@@ -376,6 +391,9 @@ public struct PetTalkConfig {
                         config.version = val
                     } else if key == "cli_path" {
                         config.cliPath = val.isEmpty ? nil : val
+                    } else if key == "turn_engine" {
+                        let normalised = val.lowercased()
+                        config.turnEngine = (normalised == "native" || normalised == "cli") ? normalised : nil
                     }
                 }
             } else if leadingSpaces >= 2 && leadingSpaces < 4 {
