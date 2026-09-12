@@ -59,6 +59,8 @@ import tempfile
 import uuid
 from dataclasses import dataclass, field
 
+from .logs import swallowed
+
 # ---------------------------------------------------------------- errors ---
 
 # The only reasons this module ever emits (cross-lane contract).
@@ -293,7 +295,8 @@ def _persona_frontmatter_task(persona) -> str | None:
         return None
     try:
         from server.persona import PERSONAS_DIR, _parse_frontmatter
-    except Exception:
+    except Exception as e:
+        swallowed("eyes_persona_module_unavailable", e)
         return None
     path = os.path.join(PERSONAS_DIR, f"{name}.md")
     if not os.path.isfile(path):
@@ -301,7 +304,8 @@ def _persona_frontmatter_task(persona) -> str | None:
     try:
         with open(path, encoding="utf-8") as f:
             meta, _body = _parse_frontmatter(f.read())
-    except Exception:
+    except Exception as e:
+        swallowed("eyes_persona_frontmatter_unreadable", e, persona=name)
         return None
     for key in ("eyes_task", "eyes_default"):
         value = meta.get(key)

@@ -7,18 +7,19 @@ exist — a 404 mid-stall is worse than a named error.
 """
 from __future__ import annotations
 
-import asyncio
 import collections
 import os
 import uuid
 
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from .audio_store import has_audio, store_audio
 from .dictation import VoiceProseFormatter
 from .logs import swallowed
 from .persona import Persona
 from .providers import ProviderError
+from .speak_queue import SpokenSentence
+from .speech import synth_off_thread
 
 MAX_STALL_WORDS = 15
 
@@ -38,12 +39,19 @@ def stall_cache_max() -> int:
         return DEFAULT_STALL_CACHE_MAX
 
 
-_STALL_AUDIO_CACHE: "collections.OrderedDict[str, tuple[str, bytes]]" = (
-    collections.OrderedDict()
-)
+class StallAudio(NamedTuple):
+    """Cached stall audio. ``word_times`` rides along so the stall's
+    ``agent.sentence`` carries timings like every other sentence frame."""
+
+    audio_id: str
+    wav: bytes
+    word_times: list
 
 
-def _cache_get(key: str) -> Optional[tuple[str, bytes]]:
+_STALL_AUDIO_CACHE: "collections.OrderedDict[str, StallAudio]" = collections.OrderedDict()
+
+
+def _cache_get(key: str) -> Optional[StallAudio]:
     """Read and mark as most-recently-used."""
     if key in _STALL_AUDIO_CACHE:
         _STALL_AUDIO_CACHE.move_to_end(key)
@@ -51,7 +59,7 @@ def _cache_get(key: str) -> Optional[tuple[str, bytes]]:
     return None
 
 
-def _cache_put(key: str, value: tuple[str, bytes]) -> None:
+def _cache_put(key: str, value: StallAudio) -> None:
     _STALL_AUDIO_CACHE[key] = value
     _STALL_AUDIO_CACHE.move_to_end(key)
     cap = stall_cache_max()
@@ -78,24 +86,22 @@ def stall_cache_key(text: str, p: Persona, tts: object) -> str:
     return f"{p.name}:{p.voice}:{p.speed}:{_tts_identity(tts)}:{text}"
 
 
-async def get_or_synth_stall(stall_text: str, p: Persona, tts: object) -> tuple[str, bytes]:
+async def get_or_synth_stall(stall_text: str, p: Persona, tts: object) -> StallAudio:
     """Cached stall audio, synthesized off the loop on a miss.
 
     Raises ``ProviderError('stall_synth_failed')`` rather than returning an
     audio id whose bytes do not exist — a 404 mid-stall is worse than a
-    named error.
+    named error. Returns a :class:`StallAudio` (audio_id, wav, word_times).
     """
     clean_text = VoiceProseFormatter.sanitize(stall_text, max_words=MAX_STALL_WORDS) or stall_text
     key = stall_cache_key(clean_text, p, tts)
     cached = _cache_get(key)
-    if cached is not None and has_audio(cached[0]):
+    if cached is not None and has_audio(cached.audio_id):
         return cached
     _STALL_AUDIO_CACHE.pop(key, None)
 
     try:
-        wav, _word_times = await asyncio.to_thread(
-            tts.synth, clean_text, voice=p.voice, speed=p.speed
-        )
+        wav, word_times = await synth_off_thread(tts, clean_text, p.voice, p.speed)
     except ProviderError as e:
         raise ProviderError("stall_synth_failed", f"{e.reason}: {e.detail}") from e
     except Exception as e:
@@ -105,6 +111,11 @@ async def get_or_synth_stall(stall_text: str, p: Persona, tts: object) -> tuple[
 
     audio_id = f"stall-{uuid.uuid4().hex[:8]}"
     store_audio(audio_id, wav)
-    _cache_put(key, (audio_id, wav))
-    return audio_id, wav
+    entry = StallAudio(
+        audio_id=audio_id,
+        wav=wav,
+        word_times=SpokenSentence.from_synth(0, clean_text, word_times).word_times,
+    )
+    _cache_put(key, entry)
+    return entry
 

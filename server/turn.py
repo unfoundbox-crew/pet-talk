@@ -9,6 +9,7 @@ mid-transcribe.
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import Awaitable, Callable, Optional
 
 from fastapi import WebSocket
@@ -23,7 +24,14 @@ from .provider_factory import ProviderSet
 from .providers import ProviderError, route_text
 from .settings import TURNS_PATH
 from .speak_queue import SpeakQueue
-from .speech import MAX_SENTENCE_WORDS, TurnResult, run_speech, speak_sentence, turn_delay_s
+from .speech import (
+    MAX_SENTENCE_WORDS,
+    TurnResult,
+    run_speech,
+    set_turn_cancel_event,
+    speak_sentence,
+    turn_delay_s,
+)
 from .stall import get_or_synth_stall
 from . import runtime
 from .telemetry import TurnLog
@@ -98,7 +106,10 @@ async def handle_turn(
     try:
         path = providers.llm.route(text)
     except Exception as e:
-        swallowed("llm_route_failed", e, turn_id=turn_id)
+        # Named, not silent: the heuristic fallback still runs, but the client
+        # is told the LLM's own router failed (law 1).
+        reason = swallowed("llm_route_failed", e, turn_id=turn_id)
+        await send_error(ws, turn_id, reason, str(e))
         path = route_text(text)
 
     history = runtime.memory.get_history_messages(pname, limit=6)
@@ -117,11 +128,11 @@ async def handle_turn(
             await send_error(ws, turn_id, "persona_no_stalls", str(e))
             stall_text = ""
         if stall_text:
+            stall_audio = None
             try:
-                audio_id, _wav = await get_or_synth_stall(stall_text, p, providers.tts)
+                stall_audio = await get_or_synth_stall(stall_text, p, providers.tts)
             except ProviderError as e:
                 await send_error(ws, turn_id, e.reason, e.detail)
-                audio_id = ""
             if not await safe_send_json(
                 ws, frame("agent.stall", turn_id, phrase_id="stall-0", text=stall_text)
             ):
@@ -130,7 +141,12 @@ async def handle_turn(
                 log_.mark("stall")
             if not await safe_send_json(ws, frame("state.thinking", turn_id)):
                 return result
-            if audio_id:
+            if stall_audio is not None:
+                # state.speaking precedes the audio it describes, and the
+                # stall's sentence frame carries word_times like every other
+                # agent.sentence — a client should not need a special case.
+                if not await safe_send_json(ws, frame("state.speaking", turn_id)):
+                    return result
                 if not await safe_send_json(
                     ws,
                     frame(
@@ -138,7 +154,8 @@ async def handle_turn(
                         turn_id,
                         seq=0,
                         text=stall_text,
-                        audio_url=f"/audio/{audio_id}",
+                        audio_url=f"/audio/{stall_audio.audio_id}",
+                        word_times=stall_audio.word_times,
                         estimated=True,
                     ),
                 ):
@@ -272,6 +289,12 @@ async def handle_turn_task(
     providers = providers or await runtime.snapshot_under_lock()
     log_ = TurnLog(path=TURNS_PATH)
     log_.start(turn_id, providers.class_names())
+    # One cancellation token for the whole turn. Set before the pipeline task
+    # is created so the pipeline, the LLM producer and the TTS consumer all
+    # inherit it; fired below when this turn is cancelled, so a synth already
+    # running in a worker thread stops polling and its result is discarded.
+    cancel_token = threading.Event()
+    set_turn_cancel_event(cancel_token)
     if barged is not None and turn_id in barged:
         # A barge landed while we were waiting on the swap lock.
         log_.end(path="interrupted", chars=0, sentences=0)
@@ -295,6 +318,7 @@ async def handle_turn_task(
     try:
         await task
     except asyncio.CancelledError:
+        cancel_token.set()
         log_.end(path="interrupted", chars=0, sentences=0)
         await safe_send_json(ws, frame("agent.done", turn_id, path="interrupted"))
     except ProviderError as e:
@@ -305,6 +329,7 @@ async def handle_turn_task(
         reason = swallowed("turn_task_exception", e, turn_id=turn_id)
         await send_error(ws, turn_id, reason, str(e))
     finally:
+        cancel_token.set()  # nothing from this turn may speak after it ends
         turn_tasks.pop(turn_id, None)
         if barged is not None:
             barged.discard(turn_id)

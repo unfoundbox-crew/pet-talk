@@ -10,7 +10,9 @@ cancel mid-synthesis.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import os
+import threading
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -27,6 +29,50 @@ from .speak_queue import SpeakQueue, SpokenSentence
 from .telemetry import TurnLog
 
 MAX_SENTENCE_WORDS = 20
+
+#: Set for the whole turn (see :func:`server.turn.handle_turn_task`) and
+#: fired when that turn is cancelled or barged. A provider call already
+#: running in a worker thread cannot be cancelled by asyncio, so the thread
+#: reads this event to stop polling early and the wrapper discards whatever
+#: a doomed call still returns. Tasks created inside the turn inherit it.
+TURN_CANCEL: contextvars.ContextVar[Optional[threading.Event]] = contextvars.ContextVar(
+    "pet_talk_turn_cancel", default=None
+)
+
+
+def turn_cancel_event() -> Optional[threading.Event]:
+    return TURN_CANCEL.get()
+
+
+def set_turn_cancel_event(event: Optional[threading.Event]) -> None:
+    TURN_CANCEL.set(event)
+
+
+async def synth_off_thread(
+    tts: object, text: str, voice: str, speed: float
+) -> tuple[bytes, list]:
+    """``tts.synth`` in a worker thread, with the turn's cancellation token.
+
+    Raises ``ProviderError('turn_cancelled')`` when the turn died before the
+    call started or while it was running — the audio of a barged turn is
+    never stored and never sent. Backends that advertise ``supports_cancel``
+    also get the event, so their poll/sleep loops exit early instead of
+    holding a thread for the full timeout.
+    """
+    cancel = TURN_CANCEL.get()
+    if cancel is not None and cancel.is_set():
+        raise ProviderError("turn_cancelled", "synth skipped: turn already barged")
+    if cancel is not None and getattr(tts, "supports_cancel", False):
+        wav, word_times = await asyncio.to_thread(
+            tts.synth, text, voice=voice, speed=speed, cancel=cancel
+        )
+    else:
+        wav, word_times = await asyncio.to_thread(
+            tts.synth, text, voice=voice, speed=speed
+        )
+    if cancel is not None and cancel.is_set():
+        raise ProviderError("turn_cancelled", "synth result discarded: turn barged")
+    return wav, word_times
 
 
 def turn_delay_s() -> float:
@@ -68,10 +114,13 @@ async def speak_sentence(
         await send_error(ws, turn_id, "tts_empty_text", f"seq={seq}", seq=seq)
         return None
     try:
-        wav, word_times = await asyncio.to_thread(
-            tts.synth, clean_text, voice=p.voice, speed=p.speed
-        )
+        wav, word_times = await synth_off_thread(tts, clean_text, p.voice, p.speed)
     except ProviderError as e:
+        if e.reason in ("turn_cancelled", "tts_cancelled"):
+            # Expected on a barge: the client already has the ack. Do not add
+            # an error frame for audio nobody is waiting for.
+            log.debug("synth_discarded turn_id=%s seq=%d reason=%s", turn_id, seq, e.reason)
+            return None
         await send_error(ws, turn_id, e.reason, e.detail, seq=seq)
         return None
     except Exception as e:

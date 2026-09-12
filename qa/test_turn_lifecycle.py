@@ -47,7 +47,7 @@ from server.persona import Persona
 from server.provider_factory import ProviderSet
 # Public provider surface only — server/providers is becoming a package, so
 # nothing here may reach for an underscore-prefixed internal.
-from server.providers import LLMProvider, ProviderError, StubSTT, TTSProvider
+from server.providers import LLMProvider, ProviderError, StubSTT, StubTTS, TTSProvider
 from server.persona_runtime import build_system_prompt, resolve_persona
 from server.speak_queue import SpeakQueue
 from server.turn import handle_turn_task
@@ -549,6 +549,125 @@ class TestBoundedPerTurnState(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(
             len(distinct), 15, f"speed key space is not finite: {sorted(distinct)}"
         )
+
+
+class TestRouteFailureIsNamed(unittest.IsolatedAsyncioTestCase):
+    async def test_llm_route_failure_names_itself_and_the_turn_continues(self):
+        class BrokenRouter(FastLLM):
+            def route(self, text: str) -> str:
+                raise RuntimeError("router exploded")
+
+        ws = fake_ws()
+        providers = ProviderSet(
+            stt=StubSTT(),
+            llm=BrokenRouter(["The answer still arrives."]),
+            tts=StubTTS(),
+        )
+        await handle_turn_task(
+            ws,
+            "t-route-fail",
+            "what is the weather",
+            SpeakQueue(),
+            {},
+            active_persona=TEST_PERSONA,
+            providers=providers,
+        )
+        frames = sent_frames(ws)
+        reasons = [f.get("reason") for f in frames if f.get("type") == "agent.error"]
+        self.assertIn("llm_route_failed", reasons, reasons)
+        # Fallback routing still answered — named, not fatal.
+        self.assertTrue([f for f in frames if f.get("type") == "agent.sentence"])
+        self.assertTrue([f for f in frames if f.get("type") == "agent.done"])
+
+
+class TestStallFrameShape(unittest.IsolatedAsyncioTestCase):
+    """The stall sentence is a sentence frame like any other."""
+
+    async def test_stall_sentence_carries_word_times_after_state_speaking(self):
+        ws = fake_ws()
+        providers = ProviderSet(
+            stt=StubSTT(),
+            llm=FastLLM(["The answer follows the stall."], path="stall"),
+            tts=StubTTS(),
+        )
+        await handle_turn_task(
+            ws,
+            "t-stall-shape",
+            "research the weather",
+            SpeakQueue(),
+            {},
+            active_persona=TEST_PERSONA,
+            providers=providers,
+        )
+        frames = sent_frames(ws)
+        types = [f.get("type") for f in frames]
+        stall_sentences = [
+            f for f in frames if f.get("type") == "agent.sentence" and f.get("seq") == 0
+        ]
+        self.assertTrue(stall_sentences, types)
+        stall_frame = stall_sentences[0]
+        self.assertTrue(
+            stall_frame.get("word_times"),
+            "the stall agent.sentence carries no word_times",
+        )
+        self.assertTrue(stall_frame.get("estimated"))
+        self.assertLess(
+            types.index("state.speaking"),
+            types.index("agent.sentence"),
+            f"state.speaking must precede the audio it describes: {types}",
+        )
+
+
+class TestCancelledSynthIsDiscarded(unittest.IsolatedAsyncioTestCase):
+    """A barged turn's pending synthesis never becomes audio."""
+
+    def tearDown(self):
+        from server import speech
+
+        speech.set_turn_cancel_event(None)
+
+    async def test_speak_sentence_drops_a_cancelled_turns_audio(self):
+        import threading
+
+        from server import speech
+
+        ws = fake_ws()
+        cancel = threading.Event()
+        cancel.set()
+        speech.set_turn_cancel_event(cancel)
+        spoken = await speech.speak_sentence(
+            ws, "t-cancel-1", "This must never be heard.", 3, TEST_PERSONA, StubTTS()
+        )
+        self.assertIsNone(spoken)
+        self.assertEqual(
+            [f.get("type") for f in sent_frames(ws)],
+            [],
+            "a cancelled turn sent a frame anyway",
+        )
+
+    async def test_stub_poll_loop_exits_early_on_the_event(self):
+        import threading
+
+        from server import speech
+
+        cancel = threading.Event()
+        speech.set_turn_cancel_event(cancel)
+        slow_stub = StubTTS(delay_s=5.0)
+        self.assertTrue(slow_stub.supports_cancel)
+        started = time.monotonic()
+        task = asyncio.create_task(
+            speech.synth_off_thread(slow_stub, "Some words here.", "af_heart", 1.0)
+        )
+        await asyncio.sleep(0.05)
+        cancel.set()
+        with self.assertRaises(ProviderError) as ctx:
+            await task
+        elapsed = time.monotonic() - started
+        self.assertEqual(ctx.exception.reason, "tts_cancelled")
+        self.assertLess(
+            elapsed, 1.0, f"synth thread held for {elapsed:.2f}s after the barge"
+        )
+        print(f"    cancelled synth released the thread in {elapsed * 1000:.0f}ms")
 
 
 class TestSpeakQueueMechanics(unittest.IsolatedAsyncioTestCase):

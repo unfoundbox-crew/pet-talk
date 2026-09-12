@@ -9,6 +9,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+from .logs import swallowed
+
 PERSONAS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "personas")
 
 DEFAULT_PERSONA = {
@@ -121,17 +123,29 @@ def list_personas(personas_dir: str = PERSONAS_DIR) -> list[Persona]:
     for name in sorted(names):
         try:
             personas.append(load_persona(name, personas_dir=personas_dir))
-        except Exception:
+        except Exception as e:
+            swallowed("persona_unloadable", e, name=name)
             continue
     return personas
+
+
+def sanitize_persona_name(name: str) -> str:
+    """The one name sanitizer. Drops every character that is not alphanumeric,
+    ``-`` or ``_`` — so a name can never carry ``/`` or ``..`` into a path.
+
+    ``delete_persona`` used to lowercase-and-strip only, which let
+    ``../../x`` address a file outside ``personas/``.
+    """
+    clean = "".join(c for c in str(name or "") if c.isalnum() or c in ("-", "_")).lower()
+    if not clean:
+        raise ValueError("persona_invalid_name: name must contain alphanumeric characters")
+    return clean
 
 
 def save_persona(persona: Persona, personas_dir: str = PERSONAS_DIR) -> str:
     """Save or update a persona as a Markdown frontmatter file."""
     os.makedirs(personas_dir, exist_ok=True)
-    clean_name = "".join(c for c in persona.name if c.isalnum() or c in ("-", "_")).lower()
-    if not clean_name:
-        raise ValueError("persona_invalid_name: name must contain alphanumeric characters")
+    clean_name = sanitize_persona_name(persona.name)
     path = os.path.join(personas_dir, f"{clean_name}.md")
 
     stalls_yaml = "\n".join(f"  - {s}" for s in (persona.stalls or DEFAULT_PERSONA["stalls"]))
@@ -151,8 +165,12 @@ tone: {first_line_tone}
 
 
 def delete_persona(name: str, personas_dir: str = PERSONAS_DIR) -> bool:
-    """Delete a custom persona file. Built-ins are protected and fail-closed."""
-    clean_name = name.strip().lower()
+    """Delete a custom persona file. Built-ins are protected and fail-closed.
+
+    Same sanitizer as :func:`save_persona`: a delete may only ever address a
+    file inside ``personas_dir``.
+    """
+    clean_name = sanitize_persona_name(name)
     if clean_name in BUILTIN_PERSONAS:
         raise ValueError(f"cannot delete built-in persona '{name}'")
     path = os.path.join(personas_dir, f"{clean_name}.md")

@@ -27,6 +27,7 @@ from server.persona import (
     delete_persona,
     list_personas,
     load_persona,
+    sanitize_persona_name,
     save_persona,
 )
 
@@ -82,6 +83,39 @@ class TestPersonaCustomization(unittest.TestCase):
         deleted = delete_persona("temp_bot", personas_dir=self.temp_dir)
         self.assertTrue(deleted)
         self.assertFalse(os.path.isfile(os.path.join(self.temp_dir, "temp_bot.md")))
+
+
+class TestPersonaNameSanitizer(unittest.TestCase):
+    """delete_persona used to lowercase-and-strip only: a name could carry a
+    path. Both writes and deletes now go through one sanitizer."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp(prefix="pet_talk_persona_traversal_")
+        self.outside = os.path.join(self.temp_dir, "outside.md")
+        with open(self.outside, "w", encoding="utf-8") as f:
+            f.write("---\nvoice: af_heart\nspeed: 1.0\nstalls:\n  - x\n---\nbody\n")
+        self.personas_dir = os.path.join(self.temp_dir, "personas")
+        os.makedirs(self.personas_dir, exist_ok=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_sanitizer_strips_path_characters(self):
+        self.assertEqual(sanitize_persona_name("../../Outside"), "outside")
+        self.assertEqual(sanitize_persona_name("a/b/c"), "abc")
+        with self.assertRaises(ValueError):
+            sanitize_persona_name("../..")
+        with self.assertRaises(ValueError):
+            sanitize_persona_name("")
+
+    def test_delete_cannot_reach_outside_the_personas_dir(self):
+        self.assertFalse(
+            delete_persona("../outside", personas_dir=self.personas_dir),
+            "traversal name resolved to a file",
+        )
+        self.assertTrue(
+            os.path.isfile(self.outside), "a file outside personas/ was deleted"
+        )
 
 
 class TestFastApiEndpoints(unittest.TestCase):

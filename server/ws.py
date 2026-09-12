@@ -39,10 +39,17 @@ MAX_BARGED_IDS = 64
 
 @dataclass
 class Session:
-    """Per-socket state. One speak queue, one live turn at a time."""
+    """Per-socket state. One speak queue PER TURN, one live turn at a time.
+
+    The queue used to be per-socket and reused across turns via
+    ``reopen()``, which raced: a new turn's ``reopen()`` could clear (and
+    reset the high-water of) a queue the previous turn's producer was still
+    pushing to. A turn now owns its queue outright; a barge flushes the
+    queues of exactly the turns it kills.
+    """
 
     ws: WebSocket
-    queue: SpeakQueue = field(default_factory=SpeakQueue)
+    turn_queues: dict[str, SpeakQueue] = field(default_factory=dict)
     turn_tasks: dict[str, asyncio.Task] = field(default_factory=dict)
     active_tasks: set[asyncio.Task] = field(default_factory=set)
     turn_persona: dict[str, Persona] = field(default_factory=dict)
@@ -56,6 +63,15 @@ class Session:
     )
     turn_id: str = field(default_factory=new_turn_id)
     chunks: list[bytes] = field(default_factory=list)
+    #: Returned by ``queue`` when no turn is live. Never spoken through.
+    _idle_queue: SpeakQueue = field(default_factory=SpeakQueue)
+
+    @property
+    def queue(self) -> SpeakQueue:
+        """The newest turn's queue. Compatibility seam for older callers."""
+        if self.turn_queues:
+            return next(reversed(list(self.turn_queues.values())))
+        return self._idle_queue
 
     def track(self, task: asyncio.Task) -> asyncio.Task:
         self.active_tasks.add(task)
@@ -82,10 +98,23 @@ class Session:
         """
         task = asyncio.create_task(coro_factory(), name=f"turn:{turn_id}")
         self.turn_tasks[turn_id] = task
-        # The per-turn persona dies with the turn. It used to accumulate one
-        # entry per turn for the life of the socket.
-        task.add_done_callback(lambda _t: self.turn_persona.pop(turn_id, None))
+
+        def _reap(_t: asyncio.Task) -> None:
+            # Per-turn state dies with the turn; both of these used to
+            # accumulate one entry per turn for the life of the socket.
+            self.turn_persona.pop(turn_id, None)
+            self.turn_queues.pop(turn_id, None)
+
+        task.add_done_callback(_reap)
         return self.track(task)
+
+    def queue_for(self, turn_id: str) -> SpeakQueue:
+        """This turn's own queue, created on first ask."""
+        queue = self.turn_queues.get(turn_id)
+        if queue is None:
+            queue = SpeakQueue()
+            self.turn_queues[turn_id] = queue
+        return queue
 
     async def barge(self, ref: Optional[str] = None, exclude: Optional[str] = None) -> int:
         """Kill playback: cancel the live turn, then flush. Returns dropped.
@@ -96,21 +125,31 @@ class Session:
         without cancelling the turn that carried the command.
         """
         targets: list[asyncio.Task] = []
+        killed: list[str] = []
         if ref and ref in self.turn_tasks and ref != exclude:
+            killed.append(ref)
             targets.append(self.turn_tasks.pop(ref))
         else:
             for tid in [t for t in self.turn_tasks if t != exclude]:
-                self.mark_barged(tid)
+                killed.append(tid)
                 targets.append(self.turn_tasks.pop(tid))
+        for tid in killed:
+            self.mark_barged(tid)
         if ref and ref != exclude:
             # Mark the id even when no task is registered yet: a turn whose
             # task has not reached its first line still has to die.
             self.mark_barged(ref)
+            if ref not in killed:
+                killed.append(ref)
         for task in targets:
             if not task.done():
                 task.cancel()
         self.last_barge_cancelled = len(targets)
-        dropped = await self.queue.flush()
+        dropped = 0
+        for tid in killed:
+            queue = self.turn_queues.pop(tid, None)
+            if queue is not None:
+                dropped += await queue.flush()
         log.info(
             "barge ref=%s exclude=%s cancelled=%d dropped=%d",
             ref, exclude, len(targets), dropped,
@@ -124,8 +163,8 @@ class Session:
     async def supersede(self, turn_id: str) -> int:
         """A new user turn supersedes any turn still speaking.
 
-        The speak queue is per-socket, so two overlapping turns would
-        interleave sentences. The newer turn wins; the older is barged.
+        Two overlapping turns would interleave sentences on one socket, so
+        the newer turn wins and the older is barged.
         """
         live = [t for t in self.turn_tasks if t != turn_id]
         if not live:
@@ -145,10 +184,18 @@ class Session:
                 )
             except asyncio.CancelledError:
                 swallowed("ws_shutdown_cancelled", None, pending=len(pending))
-        try:
-            await asyncio.shield(self.queue.flush())
-        except asyncio.CancelledError:
-            swallowed("ws_shutdown_flush_cancelled", None)
+        queues = list(self.turn_queues.values())
+        self.turn_queues.clear()
+        for queue in queues:
+            try:
+                await asyncio.shield(queue.flush())
+            except asyncio.CancelledError:
+                # Only a socket that had work in flight is worth a warning; a
+                # normal close with nothing live is not an anomaly.
+                if pending:
+                    swallowed("ws_shutdown_flush_cancelled", None, pending=len(pending))
+                else:
+                    log.debug("ws_shutdown_flush_cancelled_on_idle_close")
 
 
 def _decode_b64(value: str, field_name: str) -> bytes:
@@ -211,6 +258,9 @@ async def _on_user_stop(session: Session, msg: dict[str, Any]) -> None:
     persona = session.turn_persona.get(turn_id) or _persona_for_frame(msg)
     session.turn_persona[turn_id] = persona
     await session.supersede(turn_id)
+    # Create the turn's queue BEFORE the task exists, so a barge landing in
+    # the same tick has something to flush.
+    queue = session.queue_for(turn_id)
     # Fire and forget: STT runs inside the task, so the reader loop stays free
     # for a mid-turn barge.
     session.start_turn(
@@ -219,7 +269,7 @@ async def _on_user_stop(session: Session, msg: dict[str, Any]) -> None:
             session.ws,
             turn_id,
             None,
-            session.queue,
+            queue,
             session.turn_tasks,
             active_persona=persona,
             on_cancel=session.cancel_others,
@@ -241,13 +291,14 @@ async def _on_user_text(session: Session, msg: dict[str, Any]) -> None:
     session.turn_persona[turn_id] = persona
     await session.supersede(turn_id)
     await safe_send_json(session.ws, frame("transcript.user", turn_id, text=text))
+    queue = session.queue_for(turn_id)
     session.start_turn(
         turn_id,
         lambda: handle_turn_task(
             session.ws,
             turn_id,
             text,
-            session.queue,
+            queue,
             session.turn_tasks,
             active_persona=persona,
             on_cancel=session.cancel_others,

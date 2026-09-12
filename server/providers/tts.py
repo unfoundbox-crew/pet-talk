@@ -14,6 +14,7 @@ import io
 import math
 import os
 import struct
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -47,6 +48,12 @@ def _sine_wav_bytes(
 
 
 class TTSProvider(abc.ABC):
+    #: True when ``synth`` accepts a ``cancel`` threading.Event and checks it
+    #: inside its own sleep/poll loop. The server only passes the event to
+    #: backends that advertise this, so the sync three-argument contract
+    #: (TECH-SPEC section 3) still holds for every other tyre.
+    supports_cancel = False
+
     @abc.abstractmethod
     def synth(self, text: str, voice: str = "af_heart", speed: float = 1.0) -> tuple[bytes, list]:
         """Text -> (wav_bytes, word_times). Raises ProviderError on failure."""
@@ -61,14 +68,29 @@ class StubTTS(TTSProvider):
     estimated (never real) and always carry `estimated: True`.
     """
 
+    supports_cancel = True
+
     def __init__(self, delay_s: float = 0.0) -> None:
         self.delay_s = delay_s
 
-    def synth(self, text: str, voice: str = "af_heart", speed: float = 1.0) -> tuple[bytes, list]:
+    def synth(
+        self,
+        text: str,
+        voice: str = "af_heart",
+        speed: float = 1.0,
+        cancel: Optional["threading.Event"] = None,
+    ) -> tuple[bytes, list]:
         if not text or not text.strip():
             raise ProviderError("tts_empty_text", "nothing to synthesize")
+        if cancel is not None and cancel.is_set():
+            raise ProviderError("tts_cancelled", "turn was barged before synth")
         if self.delay_s:
-            time.sleep(self.delay_s)
+            # A barged turn must not hold a worker thread for the full delay.
+            if cancel is not None:
+                if cancel.wait(self.delay_s):
+                    raise ProviderError("tts_cancelled", "turn barged mid-synth")
+            else:
+                time.sleep(self.delay_s)
         wav = _sine_wav_bytes()
         word_times = estimate_word_times(text, pcm_duration_ms(wav))
         return wav, word_times
@@ -92,6 +114,7 @@ class KokoroSpacePilotTTS(TTSProvider):
     """
 
     POLL_INTERVAL_S = 0.5
+    supports_cancel = True
 
     def __init__(self, base_url: str = "http://127.0.0.1:8088", timeout_s: Optional[float] = None) -> None:
         self.base_url = base_url.rstrip("/")
@@ -178,9 +201,17 @@ class KokoroSpacePilotTTS(TTSProvider):
                 ]
         return None
 
-    def synth(self, text: str, voice: str = "af_heart", speed: float = 1.0) -> tuple[bytes, list]:
+    def synth(
+        self,
+        text: str,
+        voice: str = "af_heart",
+        speed: float = 1.0,
+        cancel: Optional["threading.Event"] = None,
+    ) -> tuple[bytes, list]:
         if not text or not text.strip():
             raise ProviderError("tts_empty_text", "nothing to synthesize")
+        if cancel is not None and cancel.is_set():
+            raise ProviderError("tts_cancelled", "turn was barged before synth")
         job = self._request(
             "POST", "/api/generate/voice", {"text": text, "voice": voice, "speed": speed}
         )
@@ -191,6 +222,8 @@ class KokoroSpacePilotTTS(TTSProvider):
         file_path = ""
         status: dict = {}
         while time.time() < deadline:
+            if cancel is not None and cancel.is_set():
+                raise ProviderError("tts_cancelled", f"turn barged; abandoned job {job_id}")
             status = self._request("GET", f"/api/jobs/{urllib.parse.quote(job_id)}")
             state = status.get("status", "")
             if state in ("done", "completed", "succeeded"):
@@ -199,7 +232,14 @@ class KokoroSpacePilotTTS(TTSProvider):
                 break
             if state in ("failed", "error"):
                 raise ProviderError("tts_job_failed", str(status))
-            time.sleep(self.POLL_INTERVAL_S)
+            # Wait on the event, not the clock: a barge ends the poll at once.
+            if cancel is not None:
+                if cancel.wait(self.POLL_INTERVAL_S):
+                    raise ProviderError(
+                        "tts_cancelled", f"turn barged; abandoned job {job_id}"
+                    )
+            else:
+                time.sleep(self.POLL_INTERVAL_S)
         if not file_path:
             raise ProviderError("tts_job_timeout", f"job {job_id} not done in {self.timeout_s}s")
         url = (
