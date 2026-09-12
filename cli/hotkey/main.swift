@@ -522,9 +522,10 @@ class HotkeyListener {
             }
         }
 
-        // 2. Transcribed user speech: [Donna heard]: "..." or [HEARD] "..."
+        // 2. Transcribed user speech: the engine's own log line names the persona;
+        // the capsule badge never does (docs/DYNAMIC-NOTCH-ISLAND-SPEC.md, "Copy").
         if let heard = extractTranscribedText(from: trimmed) {
-            return ("Donna heard", "\"\(heard)\"", .thinking)
+            return ("Heard", "\"\(heard)\"", .thinking)
         }
 
         // 3. Spoken sentence: [SPEAKING] Donna: "..."
@@ -828,7 +829,7 @@ class HotkeyListener {
             if !transcriptionReceived, let transcribed = HotkeyListener.extractTranscribedText(from: outputBuffer) {
                 transcriptionReceived = true
                 self?.log("| [transcription] Donna heard: \"\(transcribed)\"")
-                HUDController.shared.showTranscribedText(transcribed, persona: "Donna")
+                HUDController.shared.showTranscribedText(transcribed)
 
                 if self?.pasteEnabled == true {
                     self?.log("| [paste-injection] Injecting transcribed prompt into active cursor (Wispr Flow style)...")
@@ -957,7 +958,7 @@ class HotkeyListener {
         log("| Pause: double-tap Option + Tab within \(Int(HUDTokens.doubleTapWindowMs))ms")
         log("| Target CLI: \(cliPath)")
         log("| Earcons: enabled=\(EarconEngine.shared.isEnabled), pack=\(EarconEngine.shared.soundPack), vol=\(String(format: "%.2f", EarconEngine.shared.volume))")
-        log("| HUD: Obsidian Deep Zinc Capsule (\(Int(HUDCapsuleView.capsuleWidth))pt measured notch -> \(Int(HUDCapsuleView.expandedWidth))pt expanded)")
+        log("| HUD: \(HUDTheme.name) notch capsule (\(Int(HUDCapsuleView.capsuleWidth))pt measured notch -> \(Int(HUDCapsuleView.expandedWidth))pt expanded)")
         log("| Paste Injection: \(pasteEnabled ? "ENABLED (Wispr Flow style -> Cmd+V)" : "disabled (use --paste to enable)")")
         log("| Mode: \(isDaemon ? "Daemon (background)" : "Foreground")")
         log("| Ready for global Option+Tab barge-in turns & kill switch (<0.1% CPU)...")
@@ -1154,15 +1155,16 @@ func printUsage() {
       Pause:      Double-tap Option+Tab within 400ms toggles Sleep Mode (the ONLY pause gesture)
       Hand-over:  Option+Shift+Tab (0x0A00) hands the floor to the agent (user.handover)
       Barge-in:   <= 50ms afplay instant kill via Darwin libproc; the HUD is a hard cut
-      Dictation:  Live transcribed speech displayed in Obsidian Zinc Capsule (380x44px)
+      Dictation:  Live transcribed speech in the notch capsule, expanded envelope
       Paste:      NSPasteboard + CGEvent Cmd+V into Cursor / terminal / editor
       Earcons:    Pre-loaded NSSound in RAM (<2ms latency)
                   - Mic Open:       Tink.aiff (24ms)
                   - Silence Cutoff: Pop.aiff (32ms)
                   - Barge Kill:     Bottle.aiff (18ms)
                   - Error:          Basso.aiff (45ms)
-      HUD:        Measured-notch-wide Obsidian Glass NSPanel [.nonactivatingPanel],
-                  180pt fallback pill on a screen with no notch, real damped spring
+      HUD:        Measured-notch-wide NSPanel [.nonactivatingPanel] on the
+                  AgentWorth palette; fallback pill on a screen with no notch,
+                  real damped spring
     """
     print(usage)
 }
@@ -1460,11 +1462,10 @@ func doTestHUD() -> Int32 {
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
 
-    print("+-- Testing Pet-Talk Floating Glass Capsule HUD (Real-Time Visual Dictation)...")
-    print("| Window: 220x44px -> 380x44px NSPanel [.nonactivatingPanel, .borderless]")
-    print("| Level: .floating, Spaces: [.canJoinAllSpaces, .fullScreenAuxiliary]")
-    print("| Theme: Obsidian Deep Zinc (#12141c @ 85%) + 1px border (#282c3f)")
-    print("| State 1 (1.2s): [LISTENING] Emerald True (#10b981) + 'Listening...' (220px)")
+    print("+-- Testing the pet-talk notch HUD (AgentWorth)...")
+    print("| Panel: [.nonactivatingPanel, .borderless], level .floating, all Spaces")
+    print("| Theme: \(HUDTheme.name) — ground/border/ink/muted/faint from tokens.css")
+    print("| 1 (1.2s): compact / listening — glyph + the live 2pt line, no label")
 
     HUDController.shared.show(state: .listening)
 
@@ -1482,20 +1483,20 @@ func doTestHUD() -> Int32 {
     }
 
     DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-        print("| State 2 (1.2s): [THINKING] SpacePilot Gold (#c9a227) + 'Donna thinking...' (220px)")
+        print("| 2 (1.2s): compact / thinking — glyph light steady, stall text, no spinner")
         HUDController.shared.update(state: .thinking)
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
             let sampleText = "What is our deployment schedule today?"
-            print("| State 3 (2.0s): [EXPANDED DICTATION] Expand to 380px -> [Donna heard]: \"\(sampleText)\"")
-            HUDController.shared.showTranscribedText(sampleText, persona: "Donna")
+            print("| 3 (2.0s): expanded / heard — \"\(sampleText)\"")
+            HUDController.shared.showTranscribedText(sampleText)
 
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                print("| State 4 (1.5s): [SPEAKING] Liquid Silver (#cfd4dc) kinetic audio bars with transcribed text (380px)")
+                print("| 4 (1.5s): expanded / speaking — sentence in ink, no bars")
                 HUDController.shared.update(state: .speaking)
 
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                    print("| State 5 (0.5s): [ERROR SHAKE] 3-cycle ±3px micro-shake + Basso chime")
+                    print("| 5 (0.5s): error — 3-cycle micro-shake from the motion tokens")
                     HUDController.shared.shakeError {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                             print("| Dismissing HUD (200ms ease-out fade)...")

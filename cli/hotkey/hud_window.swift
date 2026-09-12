@@ -6,7 +6,8 @@
 //   to MEASURE the physical MacBook webcam notch at runtime (never a hardcoded size).
 //   No notch reported (external display, iMac, older MacBook) -> 180 pt fallback pill.
 // - Hardware-Software Fusion:
-//   - Top edge anchors flush to screen.frame.maxY, enveloping the camera notch in pure #000000.
+//   - Top edge anchors flush to screen.frame.maxY, enveloping the camera notch in the
+//     same black the notch glass already is (--mv-ground, dark).
 //   - Continuous squircle curvature (r=20px) on bottom corners.
 //   - Concave top ear fillets (r=10px) that sweep outward smoothly into the display bezel.
 // - Motion Design Language (Apple Fluid Springs):
@@ -265,52 +266,91 @@ public enum HUDState: String, CaseIterable {
     case thinking = "thinking"
     case speaking = "speaking"
 
+    /// The one line a compact capsule shows. No persona name, no milliseconds,
+    /// no frame names — the capsule says what is happening in a plain word, and
+    /// the developer detail lives in the cockpit.
+    ///
+    /// `listening` is deliberately empty: the moving line IS the label, and a
+    /// word beside it would only repeat it.
     public var labelText: String {
         switch self {
-        case .listening:
-            return "Listening..."
-        case .thinking:
-            return "Donna thinking..."
-        case .speaking:
-            return "Speaking..."
+        case .listening: return ""
+        case .thinking: return "working"
+        case .speaking: return "speaking"
         }
     }
 
-    public var accentColor: NSColor {
-        switch self {
-        case .listening:
-            // Emerald True (#10b981)
-            return NSColor(srgbRed: 0x10 / 255.0, green: 0xb9 / 255.0, blue: 0x81 / 255.0, alpha: 1.0)
-        case .thinking:
-            // SpacePilot Gold (#c9a227)
-            return NSColor(srgbRed: 0xc9 / 255.0, green: 0xa2 / 255.0, blue: 0x27 / 255.0, alpha: 1.0)
-        case .speaking:
-            // Liquid Silver (#cfd4dc)
-            return NSColor(srgbRed: 0xcf / 255.0, green: 0xd4 / 255.0, blue: 0xdc / 255.0, alpha: 1.0)
-        }
+    /// State is carried by Archie's light and by the envelope, never by painting
+    /// the text a different colour per state — the capsule is an instrument
+    /// panel, and an instrument panel that changes hue on every reading is
+    /// unreadable. Eyebrows are muted at every state; the reserved
+    /// success/warn/danger pegs are the only state colour, and only a real
+    /// out-of-budget number earns one.
+    public var eyebrowColor: NSColor { HUDTheme.muted }
+
+    /// Retained spelling for the breadcrumb call sites. Same answer as
+    /// `eyebrowColor` — there is no per-state accent any more.
+    public var accentColor: NSColor { eyebrowColor }
+
+    /// The envelope and glyph this state wears. One table, in HUDTheme.
+    public func visual(hasNotch: Bool = true, tall: Bool = false) -> HUDVisual {
+        HUDTheme.visual(for: rawValue, hasNotch: hasNotch, tall: tall)
     }
 }
 
-// MARK: - Kinetic Indicator View
+// MARK: - Listening line
 
+/// One line, 2pt, whose vertical displacement is the microphone's live level.
+///
+/// What this replaced: four bars with hand-tuned "vocal formant weights", a
+/// rotating gold arc for thinking, and four more bars looping forever for
+/// speaking. Three of those four were animation on a script — they moved
+/// identically whether or not anything was being heard, which is the one thing a
+/// listening indicator must never do.
+///
+/// What is left is a scrolling trace of real RMS. Silence is a flat line: still
+/// listening, nothing to say. Thinking and speaking show no line at all, because
+/// there is no microphone data to draw. Nothing here loops; when the level
+/// decays to zero the timer stops and the layer holds still.
 public class HUDIndicatorView: NSView {
-    private var activeLayers: [CALayer] = []
-    private var waveformBars: [CALayer] = []
+    private let traceLayer = CAShapeLayer()
+    private let peakLayer = CAShapeLayer()
+    private var samples: [CGFloat] = []
     private var smoothedRMS: Float = 0.0
     private var smoothedPeak: Float = 0.0
     private var decayTimer: Timer?
     private var isAcousticListening: Bool = false
 
+    /// How many samples span the capsule. From the token, so the trace has the
+    /// same density on a 14-inch notch and a 16-inch one.
+    private static var sampleCount: Int { max(8, Int(DesignTokens.listeningLineSamples)) }
+    private static var lineWidth: CGFloat { CGFloat(DesignTokens.listeningLineThickness) }
+
     public override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        self.wantsLayer = true
-        self.layer?.masksToBounds = false
+        commonInit()
     }
 
     public required init?(coder: NSCoder) {
         super.init(coder: coder)
+        commonInit()
+    }
+
+    private func commonInit() {
         self.wantsLayer = true
         self.layer?.masksToBounds = false
+        for shape in [traceLayer, peakLayer] {
+            shape.fillColor = nil
+            shape.lineWidth = Self.lineWidth
+            shape.lineCap = .round
+            shape.lineJoin = .round
+            shape.isHidden = true
+            self.layer?.addSublayer(shape)
+        }
+        // The body of the line is muted: it is chrome that reports, not a
+        // highlight. Only its peak is allowed the accent.
+        traceLayer.strokeColor = HUDTheme.muted.cgColor
+        peakLayer.strokeColor = HUDTheme.accent.cgColor
     }
 
     deinit {
@@ -320,67 +360,43 @@ public class HUDIndicatorView: NSView {
     public override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
         if isAcousticListening {
-            applyBarHeights()
+            redrawTrace()
         }
     }
 
     public func configure(for state: HUDState) {
-        guard let layer = self.layer else { return }
-
         decayTimer?.invalidate()
         decayTimer = nil
         smoothedRMS = 0.0
         smoothedPeak = 0.0
-        isAcousticListening = false
-        waveformBars.removeAll()
-
-        // Remove existing sublayers and active animations
-        activeLayers.forEach { $0.removeAllAnimations(); $0.removeFromSuperlayer() }
-        activeLayers.removeAll()
+        traceLayer.removeAllAnimations()
+        peakLayer.removeAllAnimations()
 
         switch state {
         case .listening:
-            setupListeningWaveform(parentLayer: layer, color: state.accentColor)
-        case .thinking:
-            setupThinkingSpinner(parentLayer: layer, color: state.accentColor)
-        case .speaking:
-            setupSpeakingAudioBars(parentLayer: layer, color: state.accentColor)
+            setupListeningLine()
+        case .thinking, .speaking:
+            // No line: there is no microphone data behind either state, and a
+            // drawn line with nothing behind it is the spinner problem again.
+            isAcousticListening = false
+            samples = []
+            traceLayer.isHidden = true
+            peakLayer.isHidden = true
         }
     }
 
-    // [LISTENING] Emerald True acoustic waveform bars (Acoustic Truth: zero fake looping animations)
-    private func setupListeningWaveform(parentLayer: CALayer, color: NSColor) {
+    /// Arm the live trace. No animation is added here — the only thing that moves
+    /// this layer is `updateAudioLevel(rms:peak:)`.
+    private func setupListeningLine() {
         isAcousticListening = true
-        waveformBars.removeAll()
-
-        let barCount = 4
-        let barWidth: CGFloat = 2.0
-        let spacing: CGFloat = 2.0
-        let minHeight: CGFloat = 3.5
-
-        let totalW = CGFloat(barCount) * barWidth + CGFloat(barCount - 1) * spacing
-        let startX: CGFloat = (bounds.width - totalW) / 2.0
-        let centerY = bounds.height / 2.0
-
-        for index in 0..<barCount {
-            let barLayer = CALayer()
-            let x = startX + CGFloat(index) * (barWidth + spacing)
-            barLayer.frame = CGRect(x: x, y: centerY - minHeight / 2.0, width: barWidth, height: minHeight)
-            barLayer.cornerRadius = barWidth / 2.0
-            barLayer.backgroundColor = color.cgColor
-
-            barLayer.shadowColor = color.cgColor
-            barLayer.shadowRadius = 3.0
-            barLayer.shadowOpacity = 0.55
-            barLayer.shadowOffset = .zero
-
-            parentLayer.addSublayer(barLayer)
-            activeLayers.append(barLayer)
-            waveformBars.append(barLayer)
-        }
+        samples = Array(repeating: 0.0, count: Self.sampleCount)
+        traceLayer.isHidden = false
+        peakLayer.isHidden = false
+        redrawTrace()
     }
 
-    /// Update live acoustic energy levels (RMS and Peak amplitude, normalized 0.0 ... 1.0)
+    /// Live microphone energy (RMS and peak, normalized 0.0 ... 1.0, or raw
+    /// 16-bit PCM scale — both are accepted).
     public func updateAudioLevel(rms: Float, peak: Float) {
         if !Thread.isMainThread {
             DispatchQueue.main.async { [weak self] in
@@ -389,171 +405,99 @@ public class HUDIndicatorView: NSView {
             return
         }
 
-        guard isAcousticListening, !waveformBars.isEmpty else { return }
+        guard isAcousticListening, !samples.isEmpty else { return }
 
-        // Normalize inputs (safely handles raw 16-bit PCM scale or 0.0 ... 1.0)
         let normRMS: Float = rms > 1.0 ? min(1.0, max(0.0, rms / 8000.0)) : min(1.0, max(0.0, rms))
         let normPeak: Float = peak > 1.0 ? min(1.0, max(0.0, peak / 32768.0)) : min(1.0, max(0.0, peak))
 
-        // Vocal cord acoustic filtering:
-        // Fast attack (~15ms) for crisp vocal onset, smooth springy decay to eliminate digital jitter
+        // Attack and decay coefficients are tokens: fast onset so a syllable
+        // registers, slower release so the trace is not jittery. Under reduced
+        // motion this smoothing is what stands in for suppressing the line —
+        // the data stays visible, it just moves less.
+        let attack = Float(Double(DesignTokens.attackDark) ?? 0.78)
+        let decay = Float(Double(DesignTokens.decayDark) ?? 0.78)
         if normRMS > smoothedRMS {
-            smoothedRMS = smoothedRMS * 0.22 + normRMS * 0.78
+            smoothedRMS = smoothedRMS * attack + normRMS * (1.0 - attack)
         } else {
-            smoothedRMS = smoothedRMS * 0.76 + normRMS * 0.24
+            smoothedRMS = smoothedRMS * decay + normRMS * (1.0 - decay)
         }
+        smoothedPeak = normPeak > smoothedPeak ? normPeak : smoothedPeak * decay
 
-        if normPeak > smoothedPeak {
-            smoothedPeak = normPeak
-        } else {
-            smoothedPeak = smoothedPeak * 0.80
-        }
-
-        applyBarHeights()
+        pushSample(CGFloat(min(1.0, max(0.0, smoothedRMS + smoothedPeak * 0.25))))
+        redrawTrace()
         startDecayTimerIfNeeded()
     }
 
-    private func applyBarHeights() {
-        guard isAcousticListening, !waveformBars.isEmpty else { return }
+    private func pushSample(_ value: CGFloat) {
+        guard !samples.isEmpty else { return }
+        samples.removeFirst()
+        samples.append(value)
+    }
 
-        let barCount = waveformBars.count
-        let barWidth: CGFloat = 2.0
-        let spacing: CGFloat = 2.0
-        let totalW = CGFloat(barCount) * barWidth + CGFloat(barCount - 1) * spacing
-        let startX = (bounds.width - totalW) / 2.0
+    /// Draw the trace, and draw the segment around its loudest sample in the
+    /// accent. That peak is one of exactly two things in the capsule allowed to
+    /// be violet (the other is the receipt total).
+    private func redrawTrace() {
+        guard isAcousticListening, !samples.isEmpty, bounds.width > 1 else { return }
+
         let centerY = bounds.height / 2.0
-        let minHeight: CGFloat = 3.5
-        let maxHeight: CGFloat = max(minHeight, bounds.height > 4 ? bounds.height - 3.0 : 15.0)
+        let maxAmplitude = max(1.0, (bounds.height - Self.lineWidth) / 2.0)
+        let step = bounds.width / CGFloat(max(1, samples.count - 1))
 
-        // Vocal formant frequency weights across 4 bars (low resonance, core vocal 1 & 2, high sibilance)
-        let weights: [(rms: Float, peak: Float)] = [
-            (rms: 0.65, peak: 0.25),
-            (rms: 1.00, peak: 0.35),
-            (rms: 0.90, peak: 0.45),
-            (rms: 0.55, peak: 0.35)
-        ]
-
-        CATransaction.begin()
-        CATransaction.setAnimationDuration(0.04)
-        CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeOut))
-
-        for (index, bar) in waveformBars.enumerated() {
-            let w = index < weights.count ? weights[index] : (rms: 0.8, peak: 0.3)
-            let energy = min(1.0, max(0.0, smoothedRMS * w.rms + smoothedPeak * w.peak))
-            let barH = minHeight + CGFloat(energy) * (maxHeight - minHeight)
-            let x = startX + CGFloat(index) * (barWidth + spacing)
-            let y = centerY - (barH / 2.0)
-            bar.frame = CGRect(x: x, y: y, width: barWidth, height: barH)
+        let trace = CGMutablePath()
+        var peakIndex = 0
+        for (index, sample) in samples.enumerated() {
+            let x = CGFloat(index) * step
+            let y = centerY - sample * maxAmplitude
+            if index == 0 { trace.move(to: CGPoint(x: x, y: y)) } else { trace.addLine(to: CGPoint(x: x, y: y)) }
+            if sample > samples[peakIndex] { peakIndex = index }
         }
 
+        let peak = CGMutablePath()
+        if samples[peakIndex] > 0.02 {
+            let lo = max(0, peakIndex - 1)
+            let hi = min(samples.count - 1, peakIndex + 1)
+            for index in lo...hi {
+                let point = CGPoint(x: CGFloat(index) * step, y: centerY - samples[index] * maxAmplitude)
+                if index == lo { peak.move(to: point) } else { peak.addLine(to: point) }
+            }
+        }
+
+        // Direct write, no implicit layer animation: the line's position is data,
+        // and easing data is fiction.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        traceLayer.frame = bounds
+        peakLayer.frame = bounds
+        traceLayer.path = trace
+        peakLayer.path = peak
         CATransaction.commit()
     }
 
+    /// Runs only while there is still energy to bleed off, then stops itself.
+    /// Nothing in this view ticks while the HUD is idle.
     private func startDecayTimerIfNeeded() {
         guard decayTimer == nil else { return }
         decayTimer = Timer.scheduledTimer(withTimeInterval: 0.033, repeats: true) { [weak self] timer in
-            guard let self = self else {
+            guard let self = self, self.isAcousticListening, !self.samples.isEmpty else {
                 timer.invalidate()
+                self?.decayTimer = nil
                 return
             }
-            if !self.isAcousticListening || self.waveformBars.isEmpty {
-                timer.invalidate()
-                self.decayTimer = nil
-                return
-            }
-
+            let decay = Float(Double(DesignTokens.decayDark) ?? 0.78)
             if self.smoothedRMS > 0.005 || self.smoothedPeak > 0.005 {
-                self.smoothedRMS *= 0.78
-                self.smoothedPeak *= 0.80
-                self.applyBarHeights()
+                self.smoothedRMS *= decay
+                self.smoothedPeak *= decay
+                self.pushSample(CGFloat(self.smoothedRMS))
+                self.redrawTrace()
             } else {
                 self.smoothedRMS = 0.0
                 self.smoothedPeak = 0.0
-                self.applyBarHeights()
+                self.samples = Array(repeating: 0.0, count: Self.sampleCount)
+                self.redrawTrace()
                 timer.invalidate()
                 self.decayTimer = nil
             }
-        }
-    }
-
-    // [THINKING] SpacePilot Gold spinning orbit indicator
-    private func setupThinkingSpinner(parentLayer: CALayer, color: NSColor) {
-        let spinnerLayer = CAShapeLayer()
-        let radius: CGFloat = 6.5
-        let center = CGPoint(x: bounds.width / 2.0, y: bounds.height / 2.0)
-
-        let path = CGMutablePath()
-        path.addArc(
-            center: center,
-            radius: radius,
-            startAngle: 0,
-            endAngle: CGFloat(Double.pi * 1.5), // 270 degree open arc
-            clockwise: false
-        )
-
-        spinnerLayer.bounds = bounds
-        spinnerLayer.position = center
-        spinnerLayer.path = path
-        spinnerLayer.fillColor = nil
-        spinnerLayer.strokeColor = color.cgColor
-        spinnerLayer.lineWidth = 2.0
-        spinnerLayer.lineCap = .round
-
-        spinnerLayer.shadowColor = color.cgColor
-        spinnerLayer.shadowRadius = 3.0
-        spinnerLayer.shadowOpacity = 0.6
-        spinnerLayer.shadowOffset = .zero
-
-        let rotation = CABasicAnimation(keyPath: "transform.rotation.z")
-        rotation.fromValue = 0
-        rotation.toValue = -Double.pi * 2.0
-        rotation.duration = 0.75
-        rotation.repeatCount = .infinity
-        rotation.isRemovedOnCompletion = false
-
-        spinnerLayer.add(rotation, forKey: "thinkingSpin")
-        parentLayer.addSublayer(spinnerLayer)
-        activeLayers.append(spinnerLayer)
-    }
-
-    // [SPEAKING] Liquid Silver kinetic audio bars
-    private func setupSpeakingAudioBars(parentLayer: CALayer, color: NSColor) {
-        let barWidth: CGFloat = 2.0
-        let spacing: CGFloat = 2.5
-        let bars: [(initial: CGFloat, target: CGFloat, duration: Double)] = [
-            (initial: 4.0, target: 12.0, duration: 0.30),
-            (initial: 11.0, target: 16.0, duration: 0.38),
-            (initial: 6.0, target: 14.0, duration: 0.26),
-            (initial: 12.0, target: 5.0, duration: 0.34)
-        ]
-
-        let totalWidth = CGFloat(bars.count) * barWidth + CGFloat(bars.count - 1) * spacing
-        let startX = (bounds.width - totalWidth) / 2.0
-        let centerY = bounds.height / 2.0
-
-        for (index, cfg) in bars.enumerated() {
-            let bar = CALayer()
-            let x = startX + CGFloat(index) * (barWidth + spacing)
-            bar.frame = CGRect(x: x, y: centerY - cfg.initial / 2.0, width: barWidth, height: cfg.initial)
-            bar.cornerRadius = barWidth / 2.0
-            bar.backgroundColor = color.cgColor
-
-            bar.shadowColor = color.cgColor
-            bar.shadowRadius = 2.0
-            bar.shadowOpacity = 0.4
-            bar.shadowOffset = .zero
-
-            let anim = CABasicAnimation(keyPath: "bounds.size.height")
-            anim.fromValue = cfg.initial
-            anim.toValue = cfg.target
-            anim.duration = cfg.duration
-            anim.autoreverses = true
-            anim.repeatCount = .infinity
-            anim.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-
-            bar.add(anim, forKey: "kineticAudioBar")
-            parentLayer.addSublayer(bar)
-            activeLayers.append(bar)
         }
     }
 }
@@ -592,12 +536,23 @@ public class HUDCapsuleView: NSView {
     private let maskShapeLayer = CAShapeLayer()
     private let borderShapeLayer = CAShapeLayer()
     private let visualEffectView = NSVisualEffectView()
-    private let obsidianBackgroundLayer = CALayer()
+    /// The capsule ground: --mv-ground (dark) is the same black as the notch
+    /// glass, so the software edge and the hardware edge read as one shape.
+    private let groundLayer = CALayer()
 
     public let indicatorView = HUDIndicatorView()
-    public let personaBadge = NSTextField()
+    /// Mono eyebrow: "heard", "paused", an error code. Never a persona name.
+    public let eyebrowField = NSTextField()
     public let labelField = NSTextField()
-    public let goldDotLayer = CALayer()
+    /// The next sentence, dimmed to --mv-faint. Present in the expanded envelope
+    /// only — it tells you she has more to say without competing with what she is
+    /// saying now.
+    public let previewField = NSTextField()
+    /// Right-aligned mono receipt. Its total is the second and last thing in the
+    /// capsule allowed the violet accent.
+    public let receiptField = NSTextField()
+    /// The sleep bead: the one pixel left behind when the capsule retracts.
+    public let sleepBeadLayer = CALayer()
     /// Archie's small form (PLAN-2026-09-12 §C, lane 5a's ArchieGlyphView), wired
     /// once per capsule at the leading edge. C4 ("Quiet") — dense chrome, must not
     /// out-shout the data (agentworth/docs/DESIGN.md, "Archie"). Never the full
@@ -644,25 +599,15 @@ public class HUDCapsuleView: NSView {
         visualEffectView.wantsLayer = true
         addSubview(visualEffectView)
 
-        // 2. Obsidian Jet Black & Deep Zinc surface overlay
-        obsidianBackgroundLayer.frame = bounds
-        // Pitch black (#000000) base matching physical notch glass with subtle deep zinc warmth
-        obsidianBackgroundLayer.backgroundColor = NSColor(
-            srgbRed: 0x08 / 255.0,
-            green: 0x09 / 255.0,
-            blue: 0x0e / 255.0,
-            alpha: 0.95
-        ).cgColor
-        rootLayer.insertSublayer(obsidianBackgroundLayer, above: visualEffectView.layer)
+        // 2. Ground — --mv-ground (dark). Opaque, not 95%: a translucent ground
+        // lets the desktop through and the capsule stops being the notch.
+        groundLayer.frame = bounds
+        groundLayer.backgroundColor = HUDTheme.ground.cgColor
+        rootLayer.insertSublayer(groundLayer, above: visualEffectView.layer)
 
-        // 3. Precision Border Outline Layer (1px subtle graphite stroke)
+        // 3. One-point outline — --mv-border (dark).
         borderShapeLayer.fillColor = nil
-        borderShapeLayer.strokeColor = NSColor(
-            srgbRed: 0x22 / 255.0,
-            green: 0x26 / 255.0,
-            blue: 0x36 / 255.0,
-            alpha: 0.85
-        ).cgColor
+        borderShapeLayer.strokeColor = HUDTheme.border.cgColor
         borderShapeLayer.lineWidth = 1.0
         rootLayer.addSublayer(borderShapeLayer)
 
@@ -676,24 +621,19 @@ public class HUDCapsuleView: NSView {
         indicatorView.frame = NSRect(x: 18, y: 22, width: 20, height: 20)
         addSubview(indicatorView)
 
-        // 5. Persona Badge (SpacePilot Gold semibold "Donna" badge)
-        personaBadge.isEditable = false
-        personaBadge.isSelectable = false
-        personaBadge.isBordered = false
-        personaBadge.drawsBackground = false
-        personaBadge.font = NSFont.systemFont(ofSize: 11.5, weight: .bold)
-        personaBadge.textColor = NSColor(srgbRed: 0xc9 / 255.0, green: 0xa2 / 255.0, blue: 0x27 / 255.0, alpha: 1.0) // SpacePilot Gold
-        personaBadge.stringValue = "Donna"
-        personaBadge.isHidden = true
-        addSubview(personaBadge)
+        // 5. Mono eyebrow — what kind of line this is, never who said it.
+        Self.configurePlainField(eyebrowField, role: .eyebrow)
+        eyebrowField.stringValue = ""
+        eyebrowField.isHidden = true
+        addSubview(eyebrowField)
 
         // 6. Status & Dictation Typography (Multi-line word wrapping)
         labelField.isEditable = false
         labelField.isSelectable = false
         labelField.isBordered = false
         labelField.drawsBackground = false
-        labelField.font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
-        labelField.textColor = NSColor(srgbRed: 0xf3 / 255.0, green: 0xf4 / 255.0, blue: 0xf6 / 255.0, alpha: 1.0)
+        labelField.font = HUDTheme.font(.sentence)
+        labelField.textColor = HUDTheme.colour(.sentence)
         labelField.alignment = .left
         labelField.lineBreakMode = .byWordWrapping
         labelField.cell?.wraps = true
@@ -701,23 +641,44 @@ public class HUDCapsuleView: NSView {
         labelField.cell?.truncatesLastVisibleLine = true
         labelField.maximumNumberOfLines = 4
         labelField.usesSingleLineMode = false
-        labelField.stringValue = "Listening..."
+        labelField.stringValue = HUDState.listening.labelText
         addSubview(labelField)
 
-        // 7. SpacePilot Gold Dot Layer for Subtle Notch Peek
-        goldDotLayer.bounds = CGRect(x: 0, y: 0, width: 6.0, height: 6.0)
-        goldDotLayer.cornerRadius = 3.0
-        let goldColor = NSColor(srgbRed: 0xc9 / 255.0, green: 0xa2 / 255.0, blue: 0x27 / 255.0, alpha: 1.0)
-        goldDotLayer.backgroundColor = goldColor.cgColor
-        goldDotLayer.shadowColor = goldColor.cgColor
-        goldDotLayer.shadowRadius = 3.0
-        goldDotLayer.shadowOpacity = 0.8
-        goldDotLayer.shadowOffset = .zero
-        goldDotLayer.opacity = 0.0
-        rootLayer.addSublayer(goldDotLayer)
+        // 6a. Dimmed next-sentence preview.
+        Self.configurePlainField(previewField, role: .preview)
+        previewField.isHidden = true
+        addSubview(previewField)
+
+        // 6b. Right-aligned mono receipt.
+        Self.configurePlainField(receiptField, role: .receipt)
+        receiptField.alignment = .right
+        receiptField.isHidden = true
+        addSubview(receiptField)
+
+        // 7. Sleep bead — --mv-faint, the width of the sleep.bead token. No glow:
+        // a 2pt bead that blooms is a notification, and this is the opposite.
+        let bead = CGFloat(DesignTokens.sleepBead)
+        sleepBeadLayer.bounds = CGRect(x: 0, y: 0, width: bead * 3.0, height: bead)
+        sleepBeadLayer.cornerRadius = bead / 2.0
+        sleepBeadLayer.backgroundColor = HUDTheme.faint.cgColor
+        sleepBeadLayer.opacity = 0.0
+        rootLayer.addSublayer(sleepBeadLayer)
 
         updateShapePath(width: bounds.width, height: bounds.height)
         layoutSubviews(forWidth: bounds.width, height: bounds.height)
+    }
+
+    /// Every text field in the capsule is the same kind of object: no border, no
+    /// background, no selection. Only the role differs.
+    static func configurePlainField(_ field: NSTextField, role: HUDTheme.TextRole) {
+        field.isEditable = false
+        field.isSelectable = false
+        field.isBordered = false
+        field.drawsBackground = false
+        field.font = HUDTheme.font(role)
+        field.textColor = HUDTheme.colour(role)
+        field.lineBreakMode = .byTruncatingTail
+        field.usesSingleLineMode = true
     }
 
     public override func updateTrackingAreas() {
@@ -836,7 +797,7 @@ public class HUDCapsuleView: NSView {
         self.layer?.mask = maskShapeLayer
 
         borderShapeLayer.path = cgPath
-        obsidianBackgroundLayer.frame = CGRect(x: 0, y: 0, width: width, height: height)
+        groundLayer.frame = CGRect(x: 0, y: 0, width: width, height: height)
         visualEffectView.frame = NSRect(x: 0, y: 0, width: width, height: height)
     }
 
@@ -902,48 +863,66 @@ public class HUDCapsuleView: NSView {
         // right, only while it is actually shown.
         let glyphOffset: CGFloat = glyphVisible ? (glyphPadding + glyphSize + 6.0) : 0.0
 
+        // Instrument-panel layout, two zones: content reads from the leading edge
+        // after the glyph, receipts sit right-aligned against the trailing edge.
+        // Horizontal metrics are fractions of the ACTUAL width, never the 180pt
+        // the design boards were drawn at — the notch is 220pt on this machine and
+        // a different number on the next one.
+        let inset: CGFloat = 12.0
+        let contentX = inset + glyphOffset
+        let receiptW: CGFloat = isExpanded ? min(96.0, width * 0.24) : 0.0
+        let contentW = max(24.0, width - contentX - inset - receiptW)
+
         if isExpanded {
-            if notchInfo.hasNotch {
-                // Expanded wings layout (flanking notch core + downward shelf)
-                personaBadge.isHidden = false
-                // Persona badge in the open left ear wing flanking the hardware notch
-                personaBadge.frame = NSRect(x: 20 + glyphOffset, y: 10, width: 64, height: 18)
-                // Status indicator on shelf below physical notch
-                indicatorView.frame = NSRect(x: 20 + glyphOffset, y: 41, width: 16, height: 16)
-                // Multi-line word-wrapping label spanning width below notch
-                let textTop: CGFloat = 38.0
-                let textH = max(20.0, height - textTop - 10.0)
-                labelField.frame = NSRect(x: 44 + glyphOffset, y: textTop, width: width - 64 - glyphOffset, height: textH)
+            eyebrowField.isHidden = true
+            receiptField.isHidden = receiptField.stringValue.isEmpty
+            // Below the notch on a notched screen; vertically centred on a pill.
+            let contentTop: CGFloat = notchInfo.hasNotch ? notchInfo.notchHeight : inset
+            let isTall = height > Self.notchExpandedHeight + 1.0
+            let lineH: CGFloat = 18.0
+
+            indicatorView.frame = NSRect(x: contentX, y: contentTop + 2.0,
+                                        width: contentW, height: lineH)
+
+            if isTall {
+                // Tall: the sentence takes the room it needs, down to the ceiling.
+                let textH = max(lineH, height - contentTop - inset)
+                labelField.frame = NSRect(x: contentX, y: contentTop, width: contentW, height: textH)
+                previewField.isHidden = true
             } else {
-                // External monitor floating layout
-                personaBadge.isHidden = false
-                indicatorView.frame = NSRect(x: 16 + glyphOffset, y: 14, width: 16, height: 16)
-                personaBadge.frame = NSRect(x: 38 + glyphOffset, y: 13, width: 50, height: 18)
-                let textTop: CGFloat = 12.0
-                let textH = max(20.0, height - textTop - 10.0)
-                labelField.frame = NSRect(x: 94 + glyphOffset, y: textTop, width: width - 110 - glyphOffset, height: textH)
+                labelField.frame = NSRect(x: contentX, y: contentTop, width: contentW, height: lineH)
+                // The preview only exists if there is a next sentence to show.
+                previewField.isHidden = previewField.stringValue.isEmpty
+                previewField.frame = NSRect(x: contentX, y: contentTop + lineH,
+                                           width: contentW, height: 14.0)
             }
+            receiptField.frame = NSRect(x: width - inset - receiptW, y: contentTop,
+                                        width: receiptW, height: 14.0)
         } else {
-            // Compact shelf layout right beneath camera lens
-            personaBadge.isHidden = true
-            if notchInfo.hasNotch {
-                indicatorView.frame = NSRect(x: 18 + glyphOffset, y: 38, width: 14, height: 14)
-                labelField.frame = NSRect(x: 38 + glyphOffset, y: 36, width: width - 48 - glyphOffset, height: 16)
-            } else {
-                let centerY = (height - 18.0) / 2.0
-                indicatorView.frame = NSRect(x: 18 + glyphOffset, y: centerY, width: 18, height: 18)
-                labelField.frame = NSRect(x: 44 + glyphOffset, y: (height - 20.0) / 2.0, width: width - 56 - glyphOffset, height: 20)
-            }
+            // Compact: the glyph and one line. On a notched screen that line sits
+            // on the shelf below the hardware notch; on a pill it is centred.
+            eyebrowField.isHidden = true
+            previewField.isHidden = true
+            receiptField.isHidden = true
+            let lineH: CGFloat = 16.0
+            let lineY: CGFloat = notchInfo.hasNotch
+                ? notchInfo.notchHeight - 1.0
+                : (height - lineH) / 2.0
+            indicatorView.frame = NSRect(x: contentX, y: lineY, width: contentW, height: lineH)
+            labelField.frame = NSRect(x: contentX, y: lineY, width: contentW, height: lineH)
         }
 
-        // Gold dot positioned at bottom center of the shelf
-        goldDotLayer.position = CGPoint(x: width / 2.0, y: height - 5.0)
+        // The sleep bead rides the bottom edge, centred.
+        sleepBeadLayer.position = CGPoint(x: width / 2.0, y: height - CGFloat(DesignTokens.sleepBead))
     }
 
     public func update(state: HUDState) {
         indicatorView.configure(for: state)
         labelField.stringValue = state.labelText
-        labelField.textColor = NSColor(srgbRed: 0xf3 / 255.0, green: 0xf4 / 255.0, blue: 0xf6 / 255.0, alpha: 1.0)
+        labelField.font = HUDTheme.font(.line)
+        labelField.textColor = HUDTheme.colour(.line)
+        eyebrowField.isHidden = true
+        previewField.isHidden = true
         archieGlyph.state = Self.archieGlyphState(for: state)
     }
 
@@ -964,25 +943,27 @@ public class HUDCapsuleView: NSView {
     }
 
     @discardableResult
-    public func setTranscribedText(_ text: String, persona: String = "Donna") -> CGFloat {
+    public func setTranscribedText(_ text: String) -> CGFloat {
         let cleanText = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
+        // No persona: the capsule never names her. What was heard is the content,
+        // and a mono eyebrow says which kind of line it is.
         let attr = NSMutableAttributedString()
-        let prefixAttr: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 12.0, weight: .bold),
-            .foregroundColor: NSColor(srgbRed: 0xc9 / 255.0, green: 0xa2 / 255.0, blue: 0x27 / 255.0, alpha: 1.0) // SpacePilot Gold
+        let eyebrowAttr: [NSAttributedString.Key: Any] = [
+            .font: HUDTheme.font(.eyebrow),
+            .foregroundColor: HUDTheme.colour(.eyebrow),
+            .kern: 0.4
         ]
         let textAttr: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 12.5, weight: .medium),
-            .foregroundColor: NSColor(srgbRed: 0xf3 / 255.0, green: 0xf4 / 255.0, blue: 0xf6 / 255.0, alpha: 1.0) // Zinc White
+            .font: HUDTheme.font(.sentence),
+            .foregroundColor: HUDTheme.colour(.sentence)
         ]
 
-        let prefixStr = "[\(persona) heard]: "
-        attr.append(NSAttributedString(string: prefixStr, attributes: prefixAttr))
-        attr.append(NSAttributedString(string: "\"\(cleanText)\"", attributes: textAttr))
+        attr.append(NSAttributedString(string: "heard  ", attributes: eyebrowAttr))
+        attr.append(NSAttributedString(string: "\u{201C}\(cleanText)\u{201D}", attributes: textAttr))
 
         labelField.attributedStringValue = attr
-        labelField.toolTip = "[\(persona) heard]: \"\(cleanText)\""
+        labelField.toolTip = cleanText
 
         let availableWidth = Self.expandedWidth - 64.0
         let textH = Self.calculateTextHeight(for: attr, constrainedToWidth: availableWidth)
@@ -995,26 +976,81 @@ public class HUDCapsuleView: NSView {
         let cleanDetail = detail.trimmingCharacters(in: .whitespacesAndNewlines)
 
         let attr = NSMutableAttributedString()
-        let prefixAttr: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 12.0, weight: .bold),
-            .foregroundColor: accentColor
+        let eyebrowAttr: [NSAttributedString.Key: Any] = [
+            .font: HUDTheme.font(.eyebrow),
+            .foregroundColor: accentColor,
+            .kern: 0.4
         ]
         let textAttr: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 12.5, weight: .medium),
-            .foregroundColor: NSColor(srgbRed: 0xf3 / 255.0, green: 0xf4 / 255.0, blue: 0xf6 / 255.0, alpha: 1.0) // Zinc White
+            .font: HUDTheme.font(.sentence),
+            .foregroundColor: HUDTheme.colour(.sentence)
         ]
 
-        let prefixStr = "[\(badge)]: "
-        attr.append(NSAttributedString(string: prefixStr, attributes: prefixAttr))
+        // Lowercase mono eyebrow, then the detail. No brackets, no colon: the
+        // capsule is not a log line.
+        attr.append(NSAttributedString(string: badge.lowercased() + "  ", attributes: eyebrowAttr))
         attr.append(NSAttributedString(string: cleanDetail, attributes: textAttr))
 
         labelField.attributedStringValue = attr
-        labelField.toolTip = "[\(badge)]: \(cleanDetail)"
+        labelField.toolTip = cleanDetail
 
         let availableWidth = Self.expandedWidth - 64.0
         let textH = Self.calculateTextHeight(for: attr, constrainedToWidth: availableWidth)
         let notchInfo = NotchManager.shared.currentNotch()
         return Self.computeDynamicNotchHeight(for: textH, hasNotch: notchInfo.hasNotch)
+    }
+
+    /// The expanded envelope: the sentence being spoken, plus a dimmed preview of
+    /// the next one when there is one. The preview is --mv-faint, one step below
+    /// body text — present enough to say "there is more", quiet enough not to be
+    /// read first.
+    @discardableResult
+    public func setSentence(_ current: String, next: String? = nil) -> CGFloat {
+        let clean = current.trimmingCharacters(in: .whitespacesAndNewlines)
+        labelField.attributedStringValue = NSAttributedString(
+            string: clean,
+            attributes: [.font: HUDTheme.font(.sentence),
+                         .foregroundColor: HUDTheme.colour(.sentence)]
+        )
+        labelField.toolTip = clean
+        let preview = (next ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        previewField.stringValue = preview
+        previewField.isHidden = preview.isEmpty
+
+        let availableWidth = Self.expandedWidth - 64.0
+        let textH = Self.calculateTextHeight(for: labelField.attributedStringValue,
+                                            constrainedToWidth: availableWidth)
+        let notchInfo = NotchManager.shared.currentNotch()
+        return Self.computeDynamicNotchHeight(for: textH, hasNotch: notchInfo.hasNotch)
+    }
+
+    /// A receipt: a mono label over its total, right-aligned. The total is the
+    /// second and last thing in the capsule allowed --mv-accent; the label is
+    /// muted. Pass an empty label to clear it — the HUD never invents a number.
+    public func setReceipt(label: String, total: String) {
+        let cleanLabel = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanTotal = total.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanLabel.isEmpty || !cleanTotal.isEmpty else {
+            receiptField.stringValue = ""
+            receiptField.isHidden = true
+            return
+        }
+        let attr = NSMutableAttributedString()
+        if !cleanLabel.isEmpty {
+            attr.append(NSAttributedString(
+                string: cleanLabel,
+                attributes: [.font: HUDTheme.font(.receipt),
+                             .foregroundColor: HUDTheme.colour(.receipt)]))
+        }
+        if !cleanTotal.isEmpty {
+            if attr.length > 0 { attr.append(NSAttributedString(string: "  ")) }
+            attr.append(NSAttributedString(
+                string: cleanTotal,
+                attributes: [.font: HUDTheme.font(.receiptTotal),
+                             .foregroundColor: HUDTheme.colour(.receiptTotal)]))
+        }
+        receiptField.attributedStringValue = attr
+        receiptField.isHidden = false
     }
 
     public func reset() {
@@ -1023,9 +1059,13 @@ public class HUDCapsuleView: NSView {
         layer?.removeAnimation(forKey: "hudSpringFade")
         layer?.opacity = 1.0
         layoutSubviews(forWidth: Self.capsuleWidth, height: defaultH)
-        labelField.stringValue = "Listening..."
-        labelField.textColor = NSColor(srgbRed: 0xf3 / 255.0, green: 0xf4 / 255.0, blue: 0xf6 / 255.0, alpha: 1.0)
-        goldDotLayer.opacity = 0.0
+        labelField.stringValue = HUDState.listening.labelText
+        labelField.font = HUDTheme.font(.line)
+        labelField.textColor = HUDTheme.colour(.line)
+        eyebrowField.isHidden = true
+        previewField.isHidden = true
+        receiptField.isHidden = true
+        sleepBeadLayer.opacity = 0.0
         indicatorView.isHidden = false
         archieGlyph.state = .idle
     }
@@ -1098,6 +1138,26 @@ public class HUDController {
     public private(set) var lifecycle: HUDLifecycle = .hidden
     public var isVisible: Bool { lifecycle == .presenting || lifecycle == .visible || lifecycle == .dismissing }
     public private(set) var isHoverPeekActive: Bool = false
+
+    /// The capsule is showing a failure and waiting to be dismissed. Set by the
+    /// error path, cleared on the next show/dismiss — the error envelope is the
+    /// only one that does not retract on its own.
+    public private(set) var isErrorEnvelope: Bool = false
+    /// Paused (sleep mode). Set from a "PAUSED" breadcrumb.
+    public private(set) var isSleepEnvelope: Bool = false
+
+    /// Which of the six envelopes the capsule is wearing right now. Derived, never
+    /// stored twice: the envelope is a consequence of state plus measured
+    /// geometry, so it cannot disagree with what is on screen.
+    public var currentEnvelope: HUDEnvelope {
+        let notchInfo = NotchManager.shared.currentNotch()
+        guard notchInfo.hasNotch else { return .pill }
+        if isErrorEnvelope { return .error }
+        if isSleepEnvelope { return .sleep }
+        if currentHeight > HUDCapsuleView.notchExpandedHeight + 1.0 { return .tall }
+        if currentWidth > HUDCapsuleView.capsuleWidth + 40.0 { return .expanded }
+        return .compact
+    }
 
     /// Bumped on every show()/dismiss() call. A completion handler captures the
     /// generation at schedule time and only applies its cleanup if it is still
@@ -1228,7 +1288,8 @@ public class HUDController {
         }
     }
 
-    /// Subtle notch hover peek (6px downward expansion revealing SpacePilot Gold dot)
+    /// Hover peek: the capsule drops by the hoverPeek token and shows the sleep
+    /// bead — enough to say "she is here" and nothing more.
     public func showHoverPeek() {
         ensureMainThread {
             guard !self.isVisible, !self.isHoverPeekActive else { return }
@@ -1242,7 +1303,7 @@ public class HUDController {
             self.panel.ignoresMouseEvents = false
             self.panel.setFrame(frame, display: true)
             self.panel.alphaValue = 1.0
-            self.panel.capsuleView.goldDotLayer.opacity = 1.0
+            self.panel.capsuleView.sleepBeadLayer.opacity = 1.0
             self.panel.capsuleView.indicatorView.isHidden = true
             self.panel.capsuleView.labelField.stringValue = ""
             self.orderFrontUnlessHeadless()
@@ -1255,7 +1316,7 @@ public class HUDController {
             guard self.isHoverPeekActive else { return }
             self.isHoverPeekActive = false
             self.panel.ignoresMouseEvents = true
-            self.panel.capsuleView.goldDotLayer.opacity = 0.0
+            self.panel.capsuleView.sleepBeadLayer.opacity = 0.0
             self.panel.capsuleView.indicatorView.isHidden = false
             self.panel.orderOut(nil)
         }
@@ -1303,6 +1364,7 @@ public class HUDController {
                 return
             }
 
+            self.isErrorEnvelope = true
             // error -> off, restored once the shake ends.
             let previousGlyphState = self.panel.capsuleView.archieGlyph.state
             self.panel.capsuleView.archieGlyph.state = .error
@@ -1380,6 +1442,8 @@ public class HUDController {
 
             self.currentState = state
             self.transcribedText = nil
+            self.isErrorEnvelope = false
+            self.isSleepEnvelope = false
             self.currentWidth = targetW
             self.currentHeight = targetH
 
@@ -1446,17 +1510,17 @@ public class HUDController {
     }
 
     /// Expand Dynamic Island outward for dictation with dynamic multi-line height expansion (52px -> 76px -> 96px -> 110px).
-    public func showTranscribedText(_ text: String, persona: String = "Donna") {
+    public func showTranscribedText(_ text: String) {
         ensureMainThread {
             self.transcribedText = text
-            let targetH = self.panel.capsuleView.setTranscribedText(text, persona: persona)
+            let targetH = self.panel.capsuleView.setTranscribedText(text)
             let targetW = HUDCapsuleView.expandedWidth
 
             self.resizeIsland(toWidth: targetW, height: targetH, animated: true)
 
             if !self.isVisible {
                 self.show(state: .thinking)
-                _ = self.panel.capsuleView.setTranscribedText(text, persona: persona)
+                _ = self.panel.capsuleView.setTranscribedText(text)
                 self.resizeIsland(toWidth: targetW, height: targetH, animated: false)
             }
         }
@@ -1476,6 +1540,7 @@ public class HUDController {
             let targetH = self.panel.capsuleView.setBreadcrumb(badge: badge, detail: detail, accentColor: color)
             let targetW = HUDCapsuleView.expandedWidth
 
+            self.isSleepEnvelope = (badge.uppercased() == "PAUSED")
             self.panel.capsuleView.archieGlyph.state = HUDCapsuleView.archieGlyphState(for: state, badge: badge)
             // Sentence-arrival hook: main.swift emits one "Speaking" breadcrumb per spoken sentence
             // (word-level timing is not delivered to the HUD today) — one beat per sentence, not per word.
@@ -1501,7 +1566,7 @@ public class HUDController {
 
             if let text = self.transcribedText, !text.isEmpty {
                 self.panel.capsuleView.indicatorView.configure(for: state)
-                let targetH = self.panel.capsuleView.setTranscribedText(text, persona: "Donna")
+                let targetH = self.panel.capsuleView.setTranscribedText(text)
                 self.resizeIsland(toWidth: HUDCapsuleView.expandedWidth, height: targetH, animated: false)
             } else {
                 self.panel.capsuleView.update(state: state)
@@ -1575,6 +1640,8 @@ public class HUDController {
                 self.lifecycle = .hidden
                 self.currentState = nil
                 self.transcribedText = nil
+                self.isErrorEnvelope = false
+                self.isSleepEnvelope = false
                 let notchInfo = NotchManager.shared.currentNotch()
                 self.currentWidth = HUDCapsuleView.capsuleWidth
                 self.currentHeight = notchInfo.hasNotch ? HUDCapsuleView.notchListeningHeight : HUDCapsuleView.capsuleHeight
@@ -1676,6 +1743,14 @@ public class HUDController {
         }
 
         return [
+            // The reskin, reported so it can be asserted rather than eyeballed.
+            "theme": HUDTheme.name,
+            "envelope": currentEnvelope.rawValue,
+            "envelopes": HUDEnvelope.allCases.map { $0.rawValue },
+            "accentRoles": HUDTheme.accentRoles,
+            "stateVisuals": HUDTheme.stateVisualTable,
+            "typeTokens": HUDTheme.typeTokens,
+            "reducedMotion": HUDTheme.reducedMotionPolicy,
             "glyph": [
                 "state": glyphStateName,
                 "colourway": glyphColourwayName,

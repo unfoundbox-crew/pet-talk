@@ -29,6 +29,11 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 HUD_SWIFT_SRC = os.path.join(ROOT, "cli", "hotkey", "hud_window.swift")
+HUD_THEME_SRC = os.path.join(ROOT, "cli", "hotkey", "HUDTheme.swift")
+# The two files that draw the capsule. Every colour in them must come from
+# DesignTokens (generated from AgentWorth's tokens.css) — a hex literal or a
+# hand-rolled NSColor component here is the Gemini-era skin coming back.
+HUD_PAINT_SRCS = (HUD_SWIFT_SRC, HUD_THEME_SRC)
 ALL_SWIFT_SRCS = sorted(glob.glob(os.path.join(ROOT, "cli", "hotkey", "*.swift")))
 BIN_PATH = os.environ.get("PET_TALK_HOTKEY_BIN") or os.path.join(ROOT, "bin", "pet-talk-hotkey")
 HAVE_BIN = os.path.isfile(BIN_PATH) and os.access(BIN_PATH, os.X_OK)
@@ -188,12 +193,12 @@ class TestHUDInteractiveSequence(unittest.TestCase):
             env=HEADLESS_ENV,
         )
         self.assertEqual(res.returncode, 0, f"test-hud failed:\n{res.stderr}\n{res.stdout}")
-        self.assertIn("Testing Pet-Talk Floating Glass Capsule HUD", res.stdout)
-        self.assertIn("[LISTENING] Emerald True (#10b981)", res.stdout)
-        self.assertIn("[THINKING] SpacePilot Gold (#c9a227)", res.stdout)
-        self.assertIn("[EXPANDED DICTATION]", res.stdout)
-        self.assertIn("[SPEAKING] Liquid Silver (#cfd4dc)", res.stdout)
-        self.assertIn("[ERROR SHAKE]", res.stdout)
+        self.assertIn("Testing the pet-talk notch HUD (AgentWorth)", res.stdout)
+        self.assertIn("compact / listening", res.stdout)
+        self.assertIn("compact / thinking", res.stdout)
+        self.assertIn("expanded / heard", res.stdout)
+        self.assertIn("expanded / speaking", res.stdout)
+        self.assertIn("5 (0.5s): error", res.stdout)
         self.assertIn("PASS: HUD visual test sequence completed.", res.stdout)
 
 
@@ -216,7 +221,7 @@ class TestErrorShakeSilentUnderFlags(unittest.TestCase):
             env=HEADLESS_ENV,
         )
         self.assertEqual(res.returncode, 0, f"test-hud failed:\n{res.stderr}\n{res.stdout}")
-        self.assertIn("[ERROR SHAKE]", res.stdout,
+        self.assertIn("5 (0.5s): error", res.stdout,
                       "must reach the error-shake step (the guarded Basso call) under PET_TALK_SILENT=1")
         self.assertIn("PASS: HUD visual test sequence completed.", res.stdout,
                       "must complete cleanly with audio suppressed, never crash or hang")
@@ -253,18 +258,19 @@ class TestAcousticTruthAndTelemetry(unittest.TestCase):
         with open(HUD_SWIFT_SRC, "r", encoding="utf-8") as f:
             content = f.read()
 
-        # Check setupListeningWaveform implementation
-        self.assertIn("setupListeningWaveform", content)
-        # Extract setupListeningWaveform function block
-        idx = content.find("setupListeningWaveform")
+        # The listening line replaced the bar rig in the 2026-09-12 reskin; the
+        # rule it was protecting is unchanged — nothing in the listening path may
+        # animate on a script rather than on live acoustic data.
+        self.assertIn("setupListeningLine", content)
+        idx = content.find("setupListeningLine")
         block = content[idx:idx + 1200]
 
         self.assertNotIn("CABasicAnimation(keyPath: \"bounds.size.height\")", block,
-                         "Fake looping CABasicAnimation must be eliminated from setupListeningWaveform")
+                         "Fake looping CABasicAnimation must be eliminated from setupListeningLine")
         self.assertNotIn("repeatCount = .infinity", block,
-                         "Infinite repeatCount must be eliminated from setupListeningWaveform")
+                         "Infinite repeatCount must be eliminated from setupListeningLine")
         self.assertIn("isAcousticListening = true", block,
-                         "setupListeningWaveform must activate acoustic listening mode")
+                         "setupListeningLine must activate acoustic listening mode")
 
     def test_acoustic_truth_update_audio_level_api(self):
         """Verify updateAudioLevel(rms:peak:) API is exposed on HUD components."""
@@ -420,7 +426,7 @@ class TestDynamicMultiLineAndBreadcrumbs(unittest.TestCase):
         self.assertIn("[Thinking]", res.stdout)
         self.assertIn("[Running]", res.stdout)
         self.assertIn("[Editing]", res.stdout)
-        self.assertIn("[Donna heard]", res.stdout)
+        self.assertIn("[Heard]", res.stdout)
         self.assertIn("[Speaking]", res.stdout)
         self.assertIn("PASS: Semantic Action Breadcrumbs & Multi-line visual test completed.", res.stdout)
 
@@ -543,7 +549,9 @@ class TestSpringMechanics(unittest.TestCase):
 
     def test_error_shake_amplitude_and_cycles_come_from_tokens(self):
         idx = self.src.find("func triggerErrorShake")
-        block = self.src[idx:idx + 1600]
+        # 2400, not 1600: the function grew an envelope flag in the 2026-09-12
+        # reskin and the three token reads sit past the old window.
+        block = self.src[idx:idx + 2400]
         self.assertIn("errorShakeAmplitude", block, "±3pt amplitude must read the token")
         self.assertIn("errorShakeCycles", block, "cycle count must read the token")
         self.assertIn("errorShakeDuration", block, "120ms duration must read the token")
@@ -894,6 +902,320 @@ class TestHeadlessGuard(unittest.TestCase):
                if "orderFrontRegardless()" in ln and "func " not in ln]
         self.assertEqual(len(raw), 1,
                          f"every show path must route through the guard; raw calls: {raw}")
+
+
+# ---------------------------------------------------------------------------
+# Receipts Over Prose: the AgentWorth reskin (2026-09-12)
+# ---------------------------------------------------------------------------
+
+#: The six envelopes the notch HUD can wear. Fixed set — a seventh is a design
+#: decision, not a code change, so the suite pins the list.
+HUD_ENVELOPES = ("compact", "expanded", "tall", "error", "sleep", "pill")
+
+#: Colour hex, as written in CSS or a Swift string.
+_HEX_LITERAL_RE = re.compile(r"#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?(?:[0-9a-fA-F]{2})?\b")
+#: `0x08 / 255.0` — the hand-rolled NSColor component the old skin used. HEX_RE
+#: in qa/test_design_tokens.py does NOT catch this form, which is how three
+#: Gemini-era colours survived that suite.
+_HEX_COMPONENT_RE = re.compile(r"0x[0-9a-fA-F]{2}\s*/\s*255")
+
+
+class TestNoHexInHUDPaintFiles(unittest.TestCase):
+    """No colour is spelled out in the files that paint the capsule.
+
+    Every colour comes from DesignTokens.swift, which design/build.py generates
+    from AgentWorth's tokens.css — so the HUD cannot drift from the palette and
+    a new colour has to be argued for in the token source, not typed into a
+    view. Both literal forms are checked: `#rrggbb` and `0xNN / 255`.
+    """
+
+    def test_hud_paint_files_exist(self):
+        for path in HUD_PAINT_SRCS:
+            self.assertTrue(os.path.exists(path),
+                            f"{os.path.relpath(path, ROOT)} must exist")
+
+    def test_no_hex_colour_literal(self):
+        offenders = []
+        for path in HUD_PAINT_SRCS:
+            if not os.path.exists(path):
+                continue
+            with open(path, "r", encoding="utf-8") as f:
+                for n, line in enumerate(f, 1):
+                    if _HEX_LITERAL_RE.search(line) or _HEX_COMPONENT_RE.search(line):
+                        offenders.append(f"{os.path.relpath(path, ROOT)}:{n}: {line.strip()}")
+        self.assertFalse(
+            offenders,
+            "hand-rolled colour literal(s) in the HUD paint files — every colour "
+            "must read from DesignTokens (generated from AgentWorth tokens.css):\n"
+            + "\n".join(offenders),
+        )
+
+    def test_colour_construction_is_centralised(self):
+        """NSColor is constructed in exactly one place: HUDTheme's hex decoder.
+
+        A second constructor anywhere else is how a literal gets in without
+        looking like one.
+        """
+        if not os.path.exists(HUD_SWIFT_SRC):
+            self.skipTest("hud_window.swift not present")
+        with open(HUD_SWIFT_SRC, "r", encoding="utf-8") as f:
+            src = f.read()
+        for ctor in ("NSColor(srgbRed:", "NSColor(red:", "NSColor(calibratedRed:",
+                     "NSColor(deviceRed:", "CGColor("):
+            self.assertNotIn(ctor, src,
+                             f"{ctor} in hud_window.swift — colours belong to HUDTheme")
+
+    def test_theme_reads_the_generated_palette(self):
+        if not os.path.exists(HUD_THEME_SRC):
+            self.skipTest("HUDTheme.swift not present")
+        with open(HUD_THEME_SRC, "r", encoding="utf-8") as f:
+            src = f.read()
+        for token in ("DesignTokens.paletteGroundDark", "DesignTokens.paletteInkDark",
+                      "DesignTokens.paletteMutedDark", "DesignTokens.paletteFaintDark",
+                      "DesignTokens.paletteAccentDark", "DesignTokens.paletteSurfaceDark",
+                      "DesignTokens.paletteTextDark", "DesignTokens.paletteSuccessDark",
+                      "DesignTokens.paletteWarnDark", "DesignTokens.paletteDangerDark"):
+            self.assertIn(token, src, f"HUDTheme must take its colour from {token}")
+
+    def test_type_sizes_come_from_the_token_scale(self):
+        """SF Pro / SF Mono are the native stand-ins for Geist / Geist Mono, but
+        the SIZES are the token scale — no magic 12.5 typed into a view."""
+        if not os.path.exists(HUD_THEME_SRC):
+            self.skipTest("HUDTheme.swift not present")
+        with open(HUD_THEME_SRC, "r", encoding="utf-8") as f:
+            src = f.read()
+        for token in ("DesignTokens.sizeMicro", "DesignTokens.sizeCaption"):
+            self.assertIn(token, src, f"HUDTheme font sizes must read {token}")
+        self.assertIn("monospacedSystemFont", src,
+                      "SF Mono via NSFont.monospacedSystemFont is the Geist Mono stand-in")
+        self.assertIn("systemFont", src,
+                      "SF Pro via NSFont.systemFont is the Geist stand-in")
+
+    def test_no_font_size_literals_in_capsule(self):
+        if not os.path.exists(HUD_SWIFT_SRC):
+            self.skipTest("hud_window.swift not present")
+        with open(HUD_SWIFT_SRC, "r", encoding="utf-8") as f:
+            src = f.read()
+        bad = re.findall(r"(?:systemFont|monospacedSystemFont)\(ofSize:\s*[0-9]", src)
+        self.assertFalse(bad, "font sizes in hud_window.swift must come via HUDTheme.font(_:), "
+                              f"found literal sizes: {bad}")
+
+
+class TestHUDThemeIsAgentWorth(unittest.TestCase):
+    """`--dump-state` names the theme and the envelope it is wearing. This is the
+    only headless read of the reskin, so it is the one the suite trusts."""
+
+    @classmethod
+    def setUpClass(cls):
+        _skip_if_no_bin()
+        res = subprocess.run([BIN_PATH, "--dump-state"], capture_output=True,
+                             text=True, timeout=15, env=HEADLESS_ENV)
+        if res.returncode != 0:
+            raise AssertionError(f"--dump-state failed (rc={res.returncode}):\n{res.stderr}\n{res.stdout}")
+        cls.data = json.loads(res.stdout.strip().splitlines()[-1])
+
+    def test_theme_is_agentworth(self):
+        self.assertEqual(self.data.get("theme"), "agentworth",
+                         "--dump-state must report theme: agentworth")
+
+    def test_envelope_in_use_is_reported(self):
+        env = self.data.get("envelope")
+        self.assertIn(env, HUD_ENVELOPES,
+                      f"--dump-state must report the envelope in use, got {env!r}")
+
+    def test_all_envelopes_are_declared(self):
+        self.assertEqual(tuple(self.data.get("envelopes") or ()), HUD_ENVELOPES,
+                         "the envelope set is fixed: compact/expanded/tall/error/sleep/pill")
+
+    def test_one_violet_rule(self):
+        """The accent appears in exactly two roles: the listening-line peak and
+        the receipt total. Anything else painted violet is a bug."""
+        roles = self.data.get("accentRoles")
+        self.assertEqual(sorted(roles or []), ["listeningLinePeak", "receiptTotal"],
+                         "--mv-accent carries the listening-line peak and the receipt "
+                         f"total, nothing else; got {roles!r}")
+
+    def test_tall_envelope_height_ceiling(self):
+        self.assertEqual(self.data.get("geometry", {}).get("maxExpandedHeight"), 110.0,
+                         "the tall envelope is capped at the existing 110pt")
+
+
+class TestStateToVisualMapping(unittest.TestCase):
+    """The state-to-visual table, asserted rather than described in a doc.
+
+    Each HUD state maps to one envelope, one glyph pose, and one answer to
+    "is the listening line live?". Thinking is the case that matters: the glyph
+    light goes steady and the stall text carries it — there is no spinner.
+    """
+
+    EXPECTED = {
+        "listening": {"envelope": "compact", "glyph": "listening", "line": "live"},
+        "thinking": {"envelope": "compact", "glyph": "idle", "line": "off"},
+        "speaking": {"envelope": "expanded", "glyph": "speaking", "line": "off"},
+        "error": {"envelope": "error", "glyph": "error", "line": "off"},
+        "sleep": {"envelope": "sleep", "glyph": "error", "line": "off"},
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        _skip_if_no_bin()
+        res = subprocess.run([BIN_PATH, "--dump-state"], capture_output=True,
+                             text=True, timeout=15, env=HEADLESS_ENV)
+        if res.returncode != 0:
+            raise AssertionError(f"--dump-state failed:\n{res.stderr}\n{res.stdout}")
+        cls.table = json.loads(res.stdout.strip().splitlines()[-1]).get("stateVisuals")
+
+    def test_table_is_exported(self):
+        self.assertIsInstance(self.table, dict,
+                              "--dump-state must export the stateVisuals mapping table")
+        self.assertEqual(sorted(self.table.keys()), sorted(self.EXPECTED.keys()))
+
+    def test_each_state_maps_as_designed(self):
+        for state, want in self.EXPECTED.items():
+            got = self.table.get(state, {})
+            for key, value in want.items():
+                self.assertEqual(got.get(key), value,
+                                 f"{state}.{key}: expected {value!r}, got {got.get(key)!r}")
+
+    def test_only_listening_drives_the_line(self):
+        live = [s for s, v in self.table.items() if v.get("line") == "live"]
+        self.assertEqual(live, ["listening"],
+                         "only listening drives the line — no fake motion in any other state")
+
+
+class TestListeningLineIsOneLine(unittest.TestCase):
+    """One 2pt line whose amplitude is the real RMS. No bars, no spinner, no
+    loop — and nothing animating at all while the HUD is idle."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not os.path.exists(HUD_SWIFT_SRC):
+            raise unittest.SkipTest("hud_window.swift not present")
+        with open(HUD_SWIFT_SRC, "r", encoding="utf-8") as f:
+            cls.src = f.read()
+
+    def test_line_thickness_is_the_token(self):
+        self.assertIn("DesignTokens.listeningLineThickness", self.src,
+                      "the line's 2pt stroke must come from the token, not a literal")
+
+    def test_no_spinner(self):
+        for gone in ("setupThinkingSpinner", "thinkingSpin", "transform.rotation.z"):
+            self.assertNotIn(gone, self.src,
+                             f"{gone}: the gold spinner is gone — thinking is a steady "
+                             "glyph light plus the stall text")
+
+    def test_no_kinetic_speaking_bars(self):
+        for gone in ("setupSpeakingAudioBars", "kineticAudioBar", "Liquid Silver"):
+            self.assertNotIn(gone, self.src, f"{gone}: the kinetic bars are gone")
+
+    def test_nothing_loops(self):
+        self.assertNotIn("repeatCount = .infinity", self.src,
+                         "no infinite animation anywhere in the HUD — nothing loops while idle")
+        self.assertNotIn("autoreverses = true", self.src,
+                         "an autoreversing animation is a loop by another name")
+
+    def test_line_follows_real_rms(self):
+        self.assertIn("public func updateAudioLevel(rms: Float, peak: Float)", self.src,
+                      "the line's amplitude is fed by the RMS the CLI already sends")
+        idx = self.src.find("func setupListeningLine")
+        self.assertNotEqual(idx, -1, "the listening line has its own setup path")
+        block = self.src[idx:idx + 1600]
+        self.assertNotIn("CABasicAnimation", block,
+                         "no scripted animation in the listening line — it is live data")
+        self.assertIn("isAcousticListening = true", block)
+
+
+class TestCapsuleCopyIsClean(unittest.TestCase):
+    """No persona name, no millisecond readings, no frame names on the capsule.
+    Developer detail lives in the cockpit."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not os.path.exists(HUD_SWIFT_SRC):
+            raise unittest.SkipTest("hud_window.swift not present")
+        with open(HUD_SWIFT_SRC, "r", encoding="utf-8") as f:
+            cls.src = f.read()
+
+    def _string_literals(self):
+        return re.findall(r'"((?:[^"\\]|\\.)*)"', self.src)
+
+    def test_no_persona_name_in_any_string(self):
+        offenders = [s for s in self._string_literals() if "donna" in s.lower()]
+        self.assertFalse(offenders,
+                         f"the persona name never reaches the capsule: {offenders}")
+
+    def test_label_copy_is_plain_lowercase(self):
+        """HUDState.labelText is the one line the capsule shows per state."""
+        idx = self.src.find("public var labelText")
+        self.assertNotEqual(idx, -1, "HUDState must still expose labelText")
+        block = self.src[idx:idx + 600]
+        for literal in re.findall(r'"([^"]*)"', block):
+            self.assertNotRegex(literal, r"\d",
+                                f"no number on the capsule label: {literal!r}")
+            self.assertEqual(literal, literal.lower(),
+                             f"capsule copy is lowercase and plain: {literal!r}")
+
+    def test_no_gemini_era_skin_names(self):
+        for gone in ("Obsidian", "Emerald True", "SpacePilot Gold", "Liquid Silver",
+                     "goldDotLayer", "obsidianBackgroundLayer"):
+            self.assertNotIn(gone, self.src, f"{gone}: Gemini-era skin name still present")
+
+
+class TestReducedMotionPath(unittest.TestCase):
+    """Reduced motion zeroes distance and keeps time; live mic data is smoothed,
+    never suppressed; a barge is still a hard cut."""
+
+    @classmethod
+    def setUpClass(cls):
+        _skip_if_no_bin()
+        res = subprocess.run([BIN_PATH, "--dump-state"], capture_output=True,
+                             text=True, timeout=15, env=HEADLESS_ENV)
+        if res.returncode != 0:
+            raise AssertionError(f"--dump-state failed:\n{res.stderr}\n{res.stdout}")
+        cls.data = json.loads(res.stdout.strip().splitlines()[-1])
+
+    def test_reduced_motion_policy_is_reported(self):
+        policy = self.data.get("reducedMotion")
+        self.assertIsInstance(policy, dict,
+                              "--dump-state must report the reduced-motion policy")
+        self.assertEqual(policy.get("distance"), "zero",
+                         "reduced motion zeroes distance")
+        self.assertEqual(policy.get("crossfadeMs"), DesignTokensProbe.reduced_crossfade_ms(),
+                         "reduced motion keeps time: the token crossfade, unchanged")
+        self.assertTrue(policy.get("micDataSmoothedNotSuppressed"),
+                        "the listening line stays live under reduced motion — "
+                        "suppressing it would hide whether she can hear")
+
+    def test_barge_is_still_a_hard_cut(self):
+        self.assertTrue(self.data.get("motion", {}).get("bargeIsHardCut"),
+                        "a barge is a stop, not a transition")
+
+    def test_error_shake_is_skipped_under_reduced_motion(self):
+        with open(HUD_SWIFT_SRC, "r", encoding="utf-8") as f:
+            src = f.read()
+        idx = src.find("func triggerErrorShake")
+        self.assertNotEqual(idx, -1)
+        block = src[idx:idx + 1800]
+        self.assertIn("accessibilityDisplayShouldReduceMotion", block,
+                      "the shake must be skipped when the user asked for less motion")
+
+
+class DesignTokensProbe:
+    """Reads the generated DesignTokens.swift so the suite never hardcodes a
+    token value it could look up."""
+
+    @staticmethod
+    def _double(name: str) -> float:
+        path = os.path.join(ROOT, "cli", "hotkey", "DesignTokens.swift")
+        with open(path, "r", encoding="utf-8") as f:
+            m = re.search(rf"let {name}: Double = ([0-9.]+)", f.read())
+        if not m:
+            raise AssertionError(f"DesignTokens.{name} not found")
+        return float(m.group(1))
+
+    @classmethod
+    def reduced_crossfade_ms(cls) -> float:
+        return cls._double("reducedMotionCrossfade")
 
 
 if __name__ == "__main__":

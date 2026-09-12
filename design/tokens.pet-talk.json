@@ -8,12 +8,16 @@
   },
   "type": {
     "scale.ratio": "1.200",
+    "size.micro": "9.9px",
+    "size.caption": "11.8px",
     "size.label": "14.2px",
     "size.body": "17px",
     "size.sub": "20.4px",
     "size.head": "24.5px",
     "size.display": "29.4px",
-    "family.spoken": "IBM Plex Sans"
+    "family.spoken": "IBM Plex Sans",
+    "family.ui": "SF Pro",
+    "family.mono": "SF Mono"
   },
   "geometry": {
     "notch.width": "180pt",
@@ -26,6 +30,9 @@
     "radius.bottom": "20pt",
     "radius.earFillet": "10pt",
     "idle.line.thickness": "4pt",
+    "listening.line.thickness": "2pt",
+    "listening.line.samples": "56",
+    "capsule.height.error": "60pt",
     "sleep.bead": "2pt",
     "hoverPeek": "6pt"
   },
@@ -35,6 +42,7 @@
     "spring.mass": "1",
     "duration.stallIn": "120ms",
     "duration.sentenceArrive": "160ms",
+    "duration.receiptStagger": "60ms",
     "duration.bargeCut": "0ms",
     "duration.sleepRetract": "180ms",
     "duration.escapeDismiss": "40ms",
