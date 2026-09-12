@@ -114,7 +114,14 @@ class KokoroSpacePilotTTS(TTSProvider):
     downloaded WAV's duration.
     """
 
-    POLL_INTERVAL_S = 0.5
+    #: First poll goes out almost immediately and the interval backs off from
+    #: there. A flat 0.5s tick charged every synth up to half a second of pure
+    #: waiting: measured 2026-09-12, the same 12-word sentence took 1554ms p50
+    #: on the flat tick and 1235ms p50 on a 25ms tick. Adaptive keeps that win
+    #: without hammering the daemon on a long job.
+    POLL_INTERVAL_S = 0.025
+    POLL_MAX_INTERVAL_S = 0.1
+    POLL_BACKOFF = 1.5
     supports_cancel = True
 
     def __init__(self, base_url: str = "http://127.0.0.1:8088", timeout_s: Optional[float] = None) -> None:
@@ -223,6 +230,7 @@ class KokoroSpacePilotTTS(TTSProvider):
         deadline = time.time() + self.timeout_s
         file_path = ""
         status: dict = {}
+        interval = self.POLL_INTERVAL_S
         while time.time() < deadline:
             if cancel is not None and cancel.is_set():
                 raise ProviderError("tts_cancelled", f"turn barged; abandoned job {job_id}")
@@ -236,12 +244,13 @@ class KokoroSpacePilotTTS(TTSProvider):
                 raise ProviderError("tts_job_failed", str(status))
             # Wait on the event, not the clock: a barge ends the poll at once.
             if cancel is not None:
-                if cancel.wait(self.POLL_INTERVAL_S):
+                if cancel.wait(interval):
                     raise ProviderError(
                         "tts_cancelled", f"turn barged; abandoned job {job_id}"
                     )
             else:
-                time.sleep(self.POLL_INTERVAL_S)
+                time.sleep(interval)
+            interval = min(self.POLL_MAX_INTERVAL_S, interval * self.POLL_BACKOFF)
         if not file_path:
             raise ProviderError("tts_job_timeout", f"job {job_id} not done in {self.timeout_s}s")
         url = (
@@ -303,6 +312,132 @@ def _word_times_from_char_alignment(alignment: dict) -> list:
             {"word": cur_word, "start_ms": int(cur_start * 1000), "end_ms": int(cur_end * 1000), "estimated": False}
         )
     return words
+
+
+class KokoroLocalTTS(TTSProvider):
+    """In-process Kokoro-82M on Apple Silicon via `mlx-audio`. No daemon, no
+    network, no job queue, no poll tick.
+
+    Select with ``TTS_PROVIDER=kokoro-local``. This is the default TTS tyre
+    (2026-09-12) because it is 5x faster than the same model behind the
+    SpacePilot daemon: 255ms p50 for a 12-word sentence against 1235ms for the
+    daemon's POST/poll/download flow on its best tick, and 1939ms for Deepgram
+    Aura-2 from this machine. Same weights (``hexgrad``/``prince-canuma``
+    Kokoro-82M, ~330MB, already in the HF cache) — what goes away is the
+    per-call HTTP round trips, the LUFS normalisation pass, and the file write
+    plus download.
+
+    **Still over budget, and not softened.** 255ms p50 vs a 200ms ``tts_ms``
+    budget is a FAIL. Kokoro's real-time factor here is ~0.06, so any sentence
+    past about nine words costs more than 200ms to synthesise in full, and
+    this provider returns a complete WAV by contract. Meeting 200ms on a
+    20-word sentence needs chunked synthesis that streams audio as it is
+    produced — an architecture change (the ``audio_url``/`agent.sentence`
+    contract assumes one finished WAV per sentence), not a provider tweak.
+    What the product gets today: the first audible sentence is the persona's
+    stall phrase, served from the RAM cache at zero synth cost, so the turn
+    budget is met even while this one is not.
+
+    Threading: MLX arrays are not safe to touch from two threads at once, and
+    the server calls ``synth`` through ``asyncio.to_thread``. One lock
+    serialises generation. The model is loaded and warmed once, in a
+    background thread started at construction, so the first real turn does not
+    pay the ~4.6s cold start (0.9s import and load, 3.7s first-synth graph
+    build).
+
+    Word timings are estimated from the WAV's duration like every other
+    Kokoro path — mlx-audio's segments carry no per-word timestamps.
+    """
+
+    #: Any mlx-audio-compatible Kokoro repo; override with KOKORO_LOCAL_MODEL.
+    DEFAULT_MODEL = "prince-canuma/Kokoro-82M"
+    SAMPLE_RATE = 24000
+
+    def __init__(self, model: Optional[str] = None, warm: bool = True) -> None:
+        self.model_name = model or os.environ.get("KOKORO_LOCAL_MODEL", self.DEFAULT_MODEL)
+        self._model = None
+        self._lock = threading.Lock()
+        self._load_error: Optional[ProviderError] = None
+        if warm and os.environ.get("KOKORO_LOCAL_WARM", "1") != "0":
+            # Daemon thread: construction stays cheap and non-blocking (the
+            # factory contract), but a server that boots idle is warm by the
+            # time a person speaks to it.
+            threading.Thread(
+                target=self._warm, name="kokoro-local-warm", daemon=True
+            ).start()
+
+    def __repr__(self) -> str:
+        return f"KokoroLocalTTS(model={self.model_name!r}, loaded={self._model is not None})"
+
+    def _warm(self) -> None:
+        try:
+            self.synth("Warming up.")
+        except Exception as e:  # a failed warmup must never kill the process
+            logger.warning("kokoro_local_warmup_failed: %s", e)
+
+    def _load(self):
+        """Load once. A load failure is remembered so every later call fails
+        the same named way instead of re-paying a slow import to fail again."""
+        if self._load_error is not None:
+            raise self._load_error
+        if self._model is not None:
+            return self._model
+        try:
+            from mlx_audio.tts.utils import load_model  # type: ignore  # lazy, heavy
+        except ImportError as e:
+            self._load_error = ProviderError(
+                "tts_mlx_audio_not_installed",
+                f"{e} — pip install mlx-audio 'misaki[en]' into the interpreter "
+                "running the server (Apple Silicon only)",
+            )
+            raise self._load_error
+        try:
+            self._model = load_model(self.model_name)
+        except Exception as e:
+            self._load_error = ProviderError("tts_local_load_failed", f"{self.model_name}: {e}")
+            raise self._load_error
+        return self._model
+
+    def synth(self, text: str, voice: str = "af_heart", speed: float = 1.0) -> tuple[bytes, list]:
+        if not text or not text.strip():
+            raise ProviderError("tts_empty_text", "nothing to synthesize")
+        with self._lock:
+            model = self._load()
+            try:
+                segments = list(model.generate(text=text, voice=voice, speed=speed))
+            except Exception as e:
+                raise ProviderError("tts_local_synth_failed", str(e))
+        if not segments:
+            raise ProviderError("tts_empty_audio", "kokoro-local produced no segments")
+        wav = _wav_from_float_segments(segments, self.SAMPLE_RATE)
+        return wav, estimate_word_times(text, pcm_duration_ms(wav))
+
+
+def _wav_from_float_segments(segments: list, sample_rate: int) -> bytes:
+    """Concatenate mlx-audio's float audio segments into one 16-bit WAV.
+
+    The segments are MLX arrays of float samples in roughly [-1, 1]. numpy is
+    already a hard dependency of mlx-audio, so using it here costs nothing.
+    """
+    import numpy as np  # type: ignore
+
+    chunks = []
+    for seg in segments:
+        arr = np.asarray(seg.audio, dtype=np.float32).reshape(-1)
+        chunks.append(arr)
+        rate = getattr(seg, "sample_rate", None)
+        if rate:
+            sample_rate = int(rate)
+    audio = np.concatenate(chunks) if len(chunks) > 1 else chunks[0]
+    pcm = np.clip(audio, -1.0, 1.0)
+    pcm = (pcm * 32767.0).astype("<i2").tobytes()
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sample_rate)
+        w.writeframes(pcm)
+    return buf.getvalue()
 
 
 class ElevenLabsTTS(TTSProvider):
@@ -498,14 +633,21 @@ def make_tts(
     api_key: Optional[str] = None,
     voice: Optional[str] = None,
 ) -> TTSProvider:
-    """Tyre switch: TTS_PROVIDER=kokoro|smallest|deepgram|elevenlabs|stub (default: kokoro).
+    """Tyre switch: TTS_PROVIDER=kokoro-local|kokoro|smallest|deepgram|elevenlabs|stub.
+
+    Default is ``kokoro-local`` — the same Kokoro-82M weights in-process
+    instead of behind the SpacePilot daemon, 5x faster on measurement
+    (2026-09-12: 255ms p50 vs 1235ms vs Deepgram's 1939ms). ``kokoro`` (the
+    daemon) stays one env var away for a machine without mlx-audio.
 
     Fail-closed: unknown provider names raise ProviderError instead of
     silently defaulting to Kokoro. Construction is cheap and does no
-    network I/O.
+    network I/O (kokoro-local's model load happens on a background thread).
     """
-    which = (provider or os.environ.get("TTS_PROVIDER", "kokoro")).lower()
+    which = (provider or os.environ.get("TTS_PROVIDER", "kokoro-local")).lower()
     logger.debug("make_tts: selecting provider=%s", which)
+    if which in ("kokoro-local", "kokoro_local", "kokoro-mlx", "mlx"):
+        return KokoroLocalTTS()
     if which in ("smallest", "smallest-ai", "smallest_ai", "waves"):
         return SmallestAITTS(
             api_key=api_key or os.environ.get("SMALLEST_API_KEY"),

@@ -425,7 +425,34 @@ class SenseVoiceSTT(STTProvider):
 
 
 class FasterWhisperSTT(STTProvider):
-    """Local faster-whisper backend running on CPU/Metal. Zero cloud dependencies."""
+    """Local faster-whisper backend running on CPU. Zero cloud dependencies.
+
+    The default STT tyre (2026-09-12) because it is the only one measured
+    inside the 150ms ``stt_ms`` budget from this machine: 143ms p50 / 148ms
+    p95 on the 1.37s `qa/fixtures/weather_turn.wav`, against Groq
+    whisper-large-v3-turbo at 306ms and Deepgram nova-3 at 1432ms — both of
+    which are paying this machine's real HTTPS round trip, not model time.
+
+    Three things buy that number, all of them measured, none of them a
+    guess (default 193ms -> beam/language 169ms -> this 143ms):
+
+    * **No temp file.** The PCM goes to the model as a float32 ndarray, so a
+      transcribe is not also a WAV encode plus two filesystem round trips.
+    * **`beam_size=1`, `language="en"`.** Greedy decode, and no language
+      detection pass on audio we already know is English.
+    * **`vad_filter=False`, `without_timestamps=True`.** The turn's own VAD
+      has already cut the clip; a second VAD pass and per-segment timestamps
+      are work whose output nothing reads.
+
+    The accuracy cost is real and named: greedy decode on `tiny.en` is the
+    weakest setting in the family. It transcribes the fixture exactly, but a
+    harder clip will do worse than `base.en` (332ms p50, over budget) or the
+    cloud tyres. `WHISPER_MODEL` swaps the model without a code change.
+    """
+
+    #: 16kHz is whisper's native rate and the wire protocol's default, so the
+    #: resample below is normally a no-op.
+    TARGET_SAMPLE_RATE = 16000
 
     def __init__(
         self,
@@ -447,16 +474,44 @@ class FasterWhisperSTT(STTProvider):
             self._model = WhisperModel(self.model_name, device=self.device, compute_type=self.compute_type)
         return self._model
 
+    def _as_float32(self, pcm16_bytes: bytes, sample_rate: int):
+        """int16 PCM -> mono float32 at 16kHz, or None when numpy is absent."""
+        try:
+            import numpy as np  # type: ignore
+        except ImportError:
+            return None
+        audio = np.frombuffer(pcm16_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+        if sample_rate != self.TARGET_SAMPLE_RATE and len(audio) > 1:
+            n = int(len(audio) * self.TARGET_SAMPLE_RATE / sample_rate)
+            audio = np.interp(
+                np.linspace(0, len(audio) - 1, n), np.arange(len(audio)), audio
+            ).astype(np.float32)
+        return audio
+
     def transcribe(self, pcm16_bytes: bytes, sample_rate: int = 16000) -> str:
         if not pcm16_bytes:
             raise ProviderError("stt_empty_audio", "no bytes to transcribe")
         model = self._load()
-        wav = pcm16_to_wav_bytes(pcm16_bytes, sample_rate=sample_rate)
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as f:
-            f.write(wav)
-            f.flush()
-            segments, _ = model.transcribe(f.name)
+        decode = dict(
+            beam_size=1,
+            language="en",
+            condition_on_previous_text=False,
+            vad_filter=False,
+            without_timestamps=True,
+        )
+        audio = self._as_float32(pcm16_bytes, sample_rate)
+        if audio is not None:
+            segments, _ = model.transcribe(audio, **decode)
             text = " ".join(s.text.strip() for s in segments).strip()
+        else:
+            # No numpy: fall back to the WAV/temp-file path. Correct, ~50ms
+            # slower, and it keeps this tyre usable on a bare interpreter.
+            wav = pcm16_to_wav_bytes(pcm16_bytes, sample_rate=sample_rate)
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as f:
+                f.write(wav)
+                f.flush()
+                segments, _ = model.transcribe(f.name, **decode)
+                text = " ".join(s.text.strip() for s in segments).strip()
         if not text:
             raise ProviderError("stt_empty_result", "faster-whisper returned no text")
         return text
@@ -473,7 +528,11 @@ def make_stt(
     Fail-closed: raises ProviderError on unknown provider or missing credentials.
     Construction is cheap and does no network I/O.
     """
-    default_provider = "deepgram" if os.environ.get("DEEPGRAM_API_KEY") else "faster-whisper"
+    # Local first, and on measurement rather than taste: faster-whisper is the
+    # only tyre inside the 150ms `stt_ms` budget from this machine (143ms p50
+    # vs Groq 306ms vs Deepgram 1432ms, 2026-09-12). Both cloud tyres stay one
+    # env var away — STT_PROVIDER=groq|deepgram.
+    default_provider = "faster-whisper"
     which = (provider or os.environ.get("STT_PROVIDER", default_provider)).lower().strip()
     logger.debug("make_stt: selecting provider=%s", which)
     if which in ("", "stub"):
