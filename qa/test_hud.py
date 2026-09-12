@@ -191,6 +191,46 @@ class TestHUDInteractiveSequence(unittest.TestCase):
         self.assertIn("PASS: HUD visual test sequence completed.", res.stdout)
 
 
+class TestErrorShakeSilentUnderFlags(unittest.TestCase):
+    """FINDING 9: the Basso chime in triggerErrorShake must be suppressed under
+    PET_TALK_SILENT and PET_TALK_HEADLESS — reusing the existing silent/headless
+    helpers rather than inventing a new one. `orderFrontUnlessHeadless()` means
+    PET_TALK_HEADLESS=1 never orders the panel's window front, so — unlike
+    TestHUDInteractiveSequence's PET_TALK_HUD_VISUAL=1-gated run — this exercises
+    the real triggerErrorShake path (including the error-shake block) with no
+    window ever reaching the screen: a real subprocess run, not just a grep."""
+
+    def test_test_hud_sequence_completes_headless_and_silent(self):
+        _skip_if_no_bin()
+        res = subprocess.run(
+            [BIN_PATH, "test-hud"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env=HEADLESS_ENV,
+        )
+        self.assertEqual(res.returncode, 0, f"test-hud failed:\n{res.stderr}\n{res.stdout}")
+        self.assertIn("[ERROR SHAKE]", res.stdout,
+                      "must reach the error-shake step (the guarded Basso call) under PET_TALK_SILENT=1")
+        self.assertIn("PASS: HUD visual test sequence completed.", res.stdout,
+                      "must complete cleanly with audio suppressed, never crash or hang")
+
+    def test_basso_call_is_gated_on_silent_and_headless(self):
+        """Runtime cannot observe whether NSSound actually played (no audio
+        capture in CI), so this static check backs the subprocess run above:
+        the Basso call must sit behind the existing silent/headless flags, not
+        fire unconditionally in the else branch."""
+        with open(os.path.join(ROOT, "cli", "hotkey", "hud_window.swift"), "r", encoding="utf-8") as f:
+            src = f.read()
+        idx = src.find('NSSound(named: "Basso")')
+        self.assertNotEqual(idx, -1, "Basso earcon call must still exist in triggerErrorShake")
+        preceding = src[max(0, idx - 200):idx]
+        self.assertIn("isSilentModeEnv", preceding,
+                      "Basso must be gated on the existing EarconEngine.isSilentModeEnv helper")
+        self.assertIn("isHeadless", preceding,
+                      "Basso must also be gated on the existing HUDController.isHeadless helper")
+
+
 class TestAcousticTruthAndTelemetry(unittest.TestCase):
     """Verify acoustic truth implementation: zero looping animations, live RMS parsing, and audio levels.
 
@@ -579,6 +619,65 @@ class TestDumpState(unittest.TestCase):
         self.assertEqual(c.get("optionShiftTab"), "handover")
         self.assertEqual(c.get("optionTabDoubleTap"), "pause")
         self.assertEqual(c.get("doubleTapWindowMs"), 400.0)
+
+
+class TestConfigNumericHardening(unittest.TestCase):
+    """FINDING 6: config.swift must reject non-finite spring numbers (fall back
+    to the built-in default) and clamp out-of-range ones — never let `nan`/`inf`/
+    an absurd value reach the spring integrator. Driven end to end through
+    `--dump-state` against a real config.yaml, via PET_TALK_CONFIG_PATH."""
+
+    def _dump_state_with_config(self, yaml_text: str) -> dict:
+        _skip_if_no_bin()
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = os.path.join(tmp, "config.yaml")
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                f.write(yaml_text)
+            env = dict(HEADLESS_ENV, PET_TALK_CONFIG_PATH=cfg_path)
+            res = subprocess.run([BIN_PATH, "--dump-state"], capture_output=True,
+                                  text=True, timeout=15, env=env)
+            self.assertEqual(res.returncode, 0,
+                              f"--dump-state must never crash on a bad config "
+                              f"(rc={res.returncode}):\n{res.stderr}\n{res.stdout}")
+            lines = [ln for ln in res.stdout.splitlines() if ln.strip()]
+            self.assertEqual(len(lines), 1, "--dump-state must still print exactly one JSON line")
+            return json.loads(res.stdout)
+
+    def test_nan_falls_back_to_default_stiffness(self):
+        state = self._dump_state_with_config(
+            "motion:\n  spring_stiffness: nan\n  spring_damping: 21.0\n  spring_mass: 1.0\n"
+        )
+        self.assertEqual(state["spring"]["stiffness"], 220.0,
+                          "a non-finite spring_stiffness must fall back to the built-in default, not NaN")
+
+    def test_inf_falls_back_to_default_damping(self):
+        state = self._dump_state_with_config(
+            "motion:\n  spring_stiffness: 220.0\n  spring_damping: inf\n  spring_mass: 1.0\n"
+        )
+        self.assertEqual(state["spring"]["damping"], 21.0,
+                          "a non-finite spring_damping must fall back to the built-in default, not inf")
+
+    def test_out_of_range_values_are_clamped(self):
+        state = self._dump_state_with_config(
+            "motion:\n  spring_stiffness: 999999\n  spring_damping: -50\n  spring_mass: 50\n"
+        )
+        s = state["spring"]
+        self.assertEqual(s["stiffness"], 2000.0, "stiffness must clamp to the 1...2000 ceiling")
+        self.assertEqual(s["damping"], 0.0, "damping must clamp to the 0...200 floor")
+        self.assertEqual(s["mass"], 10.0, "mass must clamp to the 0.1...10 ceiling")
+
+    def test_nan_and_out_of_range_together_never_crash(self):
+        state = self._dump_state_with_config(
+            "motion:\n  spring_stiffness: nan\n  spring_damping: 999\n  spring_mass: 0.0001\n"
+        )
+        s = state["spring"]
+        self.assertEqual(s["stiffness"], 220.0)
+        self.assertEqual(s["damping"], 200.0)
+        self.assertEqual(s["mass"], 0.1)
+        for v in (s["stiffness"], s["damping"], s["mass"]):
+            self.assertTrue(v == v and v not in (float("inf"), float("-inf")),
+                             "no non-finite spring number may ever reach --dump-state")
 
 
 class TestSpringConstantsSourcedFromDesignTokens(unittest.TestCase):

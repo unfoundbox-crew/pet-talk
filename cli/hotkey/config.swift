@@ -199,11 +199,20 @@ public struct PetTalkConfig {
                 return true
             }
         case "motion.spring_stiffness":
-            if let d = Double(cleanVal) { motion.springStiffness = d; return true }
+            if Double(cleanVal) != nil {
+                motion.springStiffness = PetTalkConfig.parseFiniteClamped(cleanVal, range: PetTalkConfig.stiffnessRange, key: key)
+                return true
+            }
         case "motion.spring_damping":
-            if let d = Double(cleanVal) { motion.springDamping = d; return true }
+            if Double(cleanVal) != nil {
+                motion.springDamping = PetTalkConfig.parseFiniteClamped(cleanVal, range: PetTalkConfig.dampingRange, key: key)
+                return true
+            }
         case "motion.spring_mass":
-            if let d = Double(cleanVal) { motion.springMass = d; return true }
+            if Double(cleanVal) != nil {
+                motion.springMass = PetTalkConfig.parseFiniteClamped(cleanVal, range: PetTalkConfig.massRange, key: key)
+                return true
+            }
         case "geometry.notch_width_fallback":
             if let d = Double(cleanVal) { geometry.notchWidthFallback = CGFloat(d); return true }
         case "geometry.expanded_width":
@@ -289,6 +298,42 @@ public struct PetTalkConfig {
         return String(format: "%g", value ?? defaultValue)
     }
 
+    /// Ranges the three spring numbers are clamped into. Anything outside these
+    /// bounds risks feeding a nonsense value straight into the spring integrator.
+    static let stiffnessRange: ClosedRange<Double> = 1...2000
+    static let dampingRange: ClosedRange<Double> = 0...200
+    static let massRange: ClosedRange<Double> = 0.1...10
+
+    /// Parses a config numeric value for a spring key, rejecting non-finite
+    /// values (NaN/inf) outright — those fall back to the built-in default (the
+    /// caller keeps `nil`, which HUDTokens.apply(from:) reads as "keep the
+    /// token") — and clamping anything in-range-of-parseable but out-of-bounds.
+    /// Never crashes; always emits a named reason to stderr so a bad config.yaml
+    /// value is visible, not silent.
+    static func parseFiniteClamped(_ val: String, range: ClosedRange<Double>, key: String) -> Double? {
+        guard let d = Double(val) else { return nil }
+        guard d.isFinite else {
+            logConfigReason("config_value_non_finite", key: key, raw: val)
+            return nil
+        }
+        if d < range.lowerBound || d > range.upperBound {
+            let clamped = Swift.min(Swift.max(d, range.lowerBound), range.upperBound)
+            logConfigReason("config_value_out_of_range", key: key, raw: val, clamped: clamped)
+            return clamped
+        }
+        return d
+    }
+
+    private static func logConfigReason(_ reason: String, key: String, raw: String, clamped: Double? = nil) {
+        var line = "!-- config: reason=\(reason) key=\(key) value=\(raw)"
+        if let clamped = clamped {
+            line += " clamped_to=\(clamped)"
+        } else {
+            line += " using_default"
+        }
+        FileHandle.standardError.write((line + "\n").data(using: .utf8)!)
+    }
+
     public static func parseYAML(_ content: String) -> PetTalkConfig {
         var config = PetTalkConfig()
         let lines = content.components(separatedBy: .newlines)
@@ -354,11 +399,17 @@ public struct PetTalkConfig {
                     currentSubSection = nil
                     switch key {
                     case "spring_stiffness":
-                        if let d = Double(val) { config.motion.springStiffness = d }
+                        if Double(val) != nil {
+                            config.motion.springStiffness = parseFiniteClamped(val, range: stiffnessRange, key: "motion.spring_stiffness")
+                        }
                     case "spring_damping":
-                        if let d = Double(val) { config.motion.springDamping = d }
+                        if Double(val) != nil {
+                            config.motion.springDamping = parseFiniteClamped(val, range: dampingRange, key: "motion.spring_damping")
+                        }
                     case "spring_mass":
-                        if let d = Double(val) { config.motion.springMass = d }
+                        if Double(val) != nil {
+                            config.motion.springMass = parseFiniteClamped(val, range: massRange, key: "motion.spring_mass")
+                        }
                     default:
                         break
                     }
