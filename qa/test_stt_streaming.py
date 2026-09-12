@@ -693,6 +693,29 @@ class TestProviderCapability(unittest.TestCase):
 
         asyncio.run(go())
 
+    def test_the_refusal_is_logged_once_per_session_not_once_per_chunk(self) -> None:
+        """A reason worth naming once is a flood at 5 chunks a second.
+
+        _stream_for_chunk returns None on every chunk of an unsupported tyre,
+        and logged the reason each time. A 30-second utterance at a 200ms chunk
+        cadence wrote 150 identical lines, which is how a named reason stops
+        being readable.
+        """
+
+        async def go():
+            install(make_stt("groq", api_key="x"))
+            session = ws_mod.Session(ws=fake_ws())
+            with StreamEnv(PET_TALK_STT_STREAM="1"):
+                with self.assertLogs("pet_talk.server", level="INFO") as caught:
+                    await drive(session, "t-flood", chunk_ms=200, n_chunks=12)
+            offs = [r for r in caught.output if "stt_stream_off" in r]
+            self.assertEqual(
+                len(offs), 1,
+                "expected one stt_stream_off line for 12 chunks, got %d" % len(offs),
+            )
+
+        asyncio.run(go())
+
     def test_streaming_off_leaves_the_old_path_alone(self) -> None:
         async def go():
             install(SegmentSTT())

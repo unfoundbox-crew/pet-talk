@@ -74,6 +74,11 @@ class Session:
     #: One per turn, keyed by its own ``turn_id`` — the chunk handler replaces
     #: a session belonging to an older turn rather than feeding it.
     stt_stream: Optional[stt_stream.SttStreamSession] = None
+    #: Reasons this socket has already been told streaming is off. A chunk
+    #: handler that logs per chunk writes ~150 identical lines for a 30-second
+    #: utterance, which is how a named reason stops being readable. Named once
+    #: per socket, not per chunk.
+    stream_off_logged: set[str] = field(default_factory=set)
     #: Returned by ``queue`` when no turn is live. Never spoken through.
     _idle_queue: SpeakQueue = field(default_factory=SpeakQueue)
 
@@ -309,9 +314,11 @@ def _stream_for_chunk(
     provider = runtime.snapshot().stt
     usable, reason = stt_stream.streaming_available(provider)
     if not usable:
-        # Named once per turn, not per chunk: a PET_TALK_STT_STREAM=1 that
-        # cannot stream must never read as if it did.
-        if reason != "stt_stream_disabled":
+        # Named once per SOCKET, not per chunk: a PET_TALK_STT_STREAM=1 that
+        # cannot stream must never read as if it did, and must not bury the
+        # log either. `stt_stream_disabled` is the default and says nothing.
+        if reason != "stt_stream_disabled" and reason not in session.stream_off_logged:
+            session.stream_off_logged.add(reason)
             log.info("stt_stream_off turn_id=%s reason=%s", turn_id, reason)
         return None
     created = stt_stream.SttStreamSession(
