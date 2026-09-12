@@ -31,7 +31,30 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUDGETS_PATH = os.path.join(ROOT, "qa", "budgets.json")
 
 APP_PORT = int(os.environ.get("APP_PORT", "8089"))
-WS_URL = os.environ.get("LATENCY_WS_URL", f"ws://127.0.0.1:{APP_PORT}/ws")
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _studio_token() -> str:
+    """Same resolution order as server/auth.py: env STUDIO_TOKEN, env
+    STUDIO_TOKEN_FILE, then the generated <repo>/.qa-scratch/studio.token."""
+    tok = (os.environ.get("STUDIO_TOKEN") or "").strip()
+    if tok:
+        return tok
+    for path in (os.environ.get("STUDIO_TOKEN_FILE") or "", os.path.join(ROOT, ".qa-scratch", "studio.token")):
+        if path and os.path.exists(path):
+            try:
+                with open(path) as f:
+                    tok = f.read().strip()
+            except OSError:
+                tok = ""
+            if tok:
+                return tok
+    return ""
+
+
+STUDIO_TOKEN = _studio_token()
+_BASE_WS_URL = os.environ.get("LATENCY_WS_URL", f"ws://127.0.0.1:{APP_PORT}/ws")
+WS_URL = f"{_BASE_WS_URL}?token={STUDIO_TOKEN}" if STUDIO_TOKEN else _BASE_WS_URL
 N_TURNS = int(os.environ.get("LATENCY_N", "5"))
 
 PCM_B64 = base64.b64encode(bytes(320 * 2)).decode()
@@ -159,6 +182,8 @@ def main():
     samples, err = run_measurements()
     if samples is None:
         print(f"\nserver on :{APP_PORT} reachable but could not measure: {err}")
+        if not STUDIO_TOKEN:
+            print("  hint: no studio token found (STUDIO_TOKEN, STUDIO_TOKEN_FILE, .qa-scratch/studio.token)")
         for metric in ("stall_ms", "first_sentence_ms", "barge_ms"):
             print(f"  {metric:<18} NOT-MEASURED ({err})")
         print("RESULT: NOT-MEASURED")
@@ -172,7 +197,7 @@ def main():
         ("barge_ms", samples["barge_ms"], budgets.get("barge_ms")),
     ]
 
-    print(f"\nlive measurement over {WS_URL} (N={N_TURNS} turns):")
+    print(f"\nlive measurement over {_BASE_WS_URL} (N={N_TURNS} turns):")
     print("  %-18s %8s %8s %10s %6s" % ("metric", "p50", "p95", "budget", "n"))
     fail = False
     for name, values, budget in checks:
