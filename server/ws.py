@@ -513,6 +513,16 @@ async def _on_user_text(session: Session, msg: dict[str, Any]) -> None:
 
 async def _on_barge(session: Session, msg: dict[str, Any]) -> None:
     ref = msg.get("turn_id") or session.turn_id
+    # The stream session goes too. Cancelling the turn task left it attached to
+    # the socket with a decode in a worker thread: that decode landed after the
+    # ack and pushed a `transcript.user partial` for a turn the person had
+    # already abandoned. Cancel first, so the flag is set before the thread
+    # finishes and the partial is discarded on arrival.
+    stream = session.stt_stream
+    if stream is not None:
+        stream.cancel("barged")
+        session.stt_stream = None
+        log.info("stt_stream_cancelled turn_id=%s reason=barged", stream.turn_id)
     dropped = await session.barge(ref)
     session.turn_id = new_turn_id()
     await safe_send_json(

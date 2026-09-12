@@ -388,6 +388,48 @@ class TestSentenceSeqNeverCollides(unittest.TestCase):
                          "expected exactly two answer paths, both at first_seq=1")
 
 
+class TestBargeCancelsTheStreamSession(unittest.TestCase):
+    """A barge must end the live stream session, not just the turn task.
+
+    ``_on_barge`` cancelled the turn, minted a new id and acked — and left
+    ``session.stt_stream`` alive with a decode in a worker thread. That decode
+    landed afterwards and pushed a ``transcript.user partial`` for a turn the
+    person had already abandoned, arriving AFTER the barge ack.
+    """
+
+    def test_no_partial_arrives_after_the_barge_ack(self) -> None:
+        async def go():
+            install(SegmentSTT(delay_s=0.25))  # slow enough to still be running
+            w = fake_ws()
+            session = ws_mod.Session(ws=w)
+            session.turn_persona["t-cancel"] = TEST_PERSONA
+            with StreamEnv(
+                PET_TALK_STT_STREAM="1",
+                PET_TALK_STT_STREAM_MS="300",
+                PET_TALK_STT_PARTIALS="1",
+            ):
+                await drive(session, "t-cancel", chunk_ms=150, n_chunks=4)
+                self.assertIsNotNone(session.stt_stream,
+                                     "fixture failed: no stream session to cancel")
+                await ws_mod._on_barge(session, {"type": "barge", "turn_id": "t-cancel"})
+                self.assertIsNone(
+                    session.stt_stream,
+                    "the barge left the stream session attached to the socket",
+                )
+                await asyncio.sleep(0.5)  # let the in-flight decode land
+
+            i_ack = index_of(w, "state.listening")
+            self.assertIsNotNone(i_ack, f"no barge ack: {types_of(w)}")
+            after = types_of(w)[i_ack + 1 :]
+            self.assertNotIn(
+                "transcript.user", after,
+                f"a partial arrived after the barge ack: {types_of(w)}",
+            )
+            await session.shutdown()
+
+        asyncio.run(go())
+
+
 class TestBargeSilencesTheEarlyStall(unittest.TestCase):
     """A barge during the filler's synth must swallow the filler.
 
