@@ -1,5 +1,10 @@
 // cli/hotkey/main.swift
-// Native macOS Carbon global hotkey listener for Pet-Talk (Option + Tab).
+// Native macOS Carbon global hotkey listener for Pet-Talk.
+//
+// Gestures (one chord, one meaning):
+//   Option+Tab              ask / kill the live turn
+//   Option+Tab twice        pause / resume (inside HUDTokens.doubleTapWindowMs)
+//   Option+Shift+Tab        hand over to the agent
 //
 // Technical Architecture:
 // - Uses Carbon `RegisterEventHotKey` (global key events WITHOUT Accessibility/TCC permissions).
@@ -18,10 +23,12 @@ import Foundation
 struct HotkeyConfig {
     static let hotKeyCode: UInt32 = UInt32(kVK_Tab) // 48
     static let hotKeyModifier: UInt32 = UInt32(optionKey) // 0x0800 = 2048
-    static let pauseHotKeyModifier: UInt32 = UInt32(optionKey | shiftKey) // 0x0A00 = 2560
+    /// Option+Shift+Tab is HAND-OVER (was pause until 2026-09-12; pause moved to
+    /// a double-tap of Option+Tab so the chord could carry the hand-over).
+    static let handoverHotKeyModifier: UInt32 = UInt32(optionKey | shiftKey) // 0x0A00 = 2560
     static let hotKeySignature: OSType = 0x50544C4B // 'PTLK'
     static let hotKeyId: UInt32 = 1
-    static let pauseHotKeyId: UInt32 = 2
+    static let handoverHotKeyId: UInt32 = 2
 
     /// Private per-user runtime directory for state files. $XDG_RUNTIME_DIR is
     /// already 0700-and-tmpfs on Linux; on macOS (no XDG_RUNTIME_DIR) we fall
@@ -292,7 +299,7 @@ class HotkeyListener {
 
     private var activeCliProc: Process?
     private var hotKeyRef: EventHotKeyRef?
-    private var pauseHotKeyRef: EventHotKeyRef?
+    private var handoverHotKeyRef: EventHotKeyRef?
     private var eventHandlerRef: EventHandlerRef?
     private var lastTapTime: DispatchTime?
 
@@ -595,7 +602,7 @@ class HotkeyListener {
         }
 
         EarconEngine.shared.playBargeKill()
-        HUDController.shared.dismiss(immediate: true)
+        HUDController.shared.dismiss(hardCut: true)
     }
 
     func togglePause() {
@@ -608,7 +615,7 @@ class HotkeyListener {
             EarconEngine.shared.playSilenceCutoff()
             HUDController.shared.showBreadcrumb(
                 badge: "PAUSED",
-                detail: "Donna paused (Option+Shift+Tab or double-tap to wake)",
+                detail: "Paused — double-tap Option+Tab to wake",
                 state: .thinking
             )
         } else {
@@ -627,18 +634,93 @@ class HotkeyListener {
         }
     }
 
-    func handlePauseHotKeyTrigger() {
-        log("+-- [HOTKEY] Option+Shift+Tab pause toggle triggered")
-        togglePause()
+    func handleHandoverHotKeyTrigger() {
+        log("+-- [HOTKEY] Option+Shift+Tab hand-over triggered")
+        emitHandover()
+    }
+
+    /// Hand over the current context to the agent. Emitted exactly the way a wake
+    /// turn is emitted today — spawn `pet-talk-cli` with the event's own
+    /// subcommand — so the daemon stays a keyboard/HUD process with no socket of
+    /// its own. The CLI turns it into one WS frame:
+    ///
+    ///     {"type": "user.handover", "turn_id": "<uuid4>", "source": "hotkey"}
+    ///
+    /// A CLI that does not know the subcommand exits non-zero: that is reported as
+    /// a named reason and an error shake, never swallowed into a silent no-op.
+    func emitHandover() {
+        if ProcessManager.isPaused() {
+            log("| [paused] Hand-over ignored — Donna is paused")
+            EarconEngine.shared.playError()
+            HUDController.shared.showBreadcrumb(
+                badge: "PAUSED",
+                detail: "Paused — double-tap Option+Tab to wake",
+                state: .thinking
+            )
+            return
+        }
+
+        let cliPath: String
+        do {
+            cliPath = try resolveCliPath()
+        } catch {
+            log("! [error] handover_cli_unresolved: \(error)")
+            EarconEngine.shared.playError()
+            HUDController.shared.triggerErrorShake()
+            return
+        }
+
+        EarconEngine.shared.playMicOpen()
+        HUDController.shared.showBreadcrumb(
+            badge: "Hand-over",
+            detail: "Handing the floor to the agent",
+            state: .thinking
+        )
+
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: cliPath)
+        proc.arguments = ["handover"]
+
+        let errPipe = Pipe()
+        proc.standardError = errPipe
+
+        do {
+            try proc.run()
+            ProcessManager.registerOwnedChild(proc.processIdentifier)
+            proc.terminationHandler = { [weak self] finished in
+                ProcessManager.unregisterOwnedChild(finished.processIdentifier)
+                guard finished.terminationStatus != 0 else {
+                    self?.log("| [handover] emitted (user.handover)")
+                    return
+                }
+                let detail = String(
+                    data: errPipe.fileHandleForReading.readDataToEndOfFile(),
+                    encoding: .utf8
+                ) ?? ""
+                self?.log("! [error] handover_emit_failed (exit \(finished.terminationStatus)): \(detail)")
+                EarconEngine.shared.playError()
+                HUDController.shared.triggerErrorShake()
+            }
+        } catch {
+            log("! [error] handover_spawn_failed: \(error)")
+            EarconEngine.shared.playError()
+            HUDController.shared.triggerErrorShake()
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+            if !self.isTurnActive() {
+                HUDController.shared.dismiss()
+            }
+        }
     }
 
     func handleHotKeyTrigger() {
         let now = DispatchTime.now()
         if let last = lastTapTime {
             let intervalMs = Double(now.uptimeNanoseconds - last.uptimeNanoseconds) / 1_000_000.0
-            if intervalMs <= 350.0 {
+            if intervalMs <= HUDTokens.doubleTapWindowMs {
                 lastTapTime = nil
-                log("+-- [HOTKEY] Double-tap detected (\(String(format: "%.1f", intervalMs))ms) -> toggling pause mode")
+                log("+-- [HOTKEY] Double-tap detected (\(String(format: "%.1f", intervalMs))ms, window \(Int(HUDTokens.doubleTapWindowMs))ms) -> toggling pause mode")
                 togglePause()
                 return
             }
@@ -653,7 +735,7 @@ class HotkeyListener {
             EarconEngine.shared.playError()
             HUDController.shared.showBreadcrumb(
                 badge: "PAUSED",
-                detail: "Donna paused (Option+Shift+Tab or double-tap to wake)",
+                detail: "Paused — double-tap Option+Tab to wake",
                 state: .thinking
             )
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
@@ -813,19 +895,19 @@ class HotkeyListener {
             UnregisterEventHotKey(ref)
         }
 
-        var pauseTestRef: EventHotKeyRef?
-        let pauseTestID = EventHotKeyID(signature: HotkeyConfig.hotKeySignature, id: 998)
-        let pauseStatus = RegisterEventHotKey(
+        var handoverTestRef: EventHotKeyRef?
+        let handoverTestID = EventHotKeyID(signature: HotkeyConfig.hotKeySignature, id: 998)
+        let handoverStatus = RegisterEventHotKey(
             HotkeyConfig.hotKeyCode,
-            HotkeyConfig.pauseHotKeyModifier,
-            pauseTestID,
+            HotkeyConfig.handoverHotKeyModifier,
+            handoverTestID,
             GetApplicationEventTarget(),
             0,
-            &pauseTestRef
+            &handoverTestRef
         )
-        guard pauseStatus == noErr else { return false }
-        if let pRef = pauseTestRef {
-            UnregisterEventHotKey(pRef)
+        guard handoverStatus == noErr else { return false }
+        if let hRef = handoverTestRef {
+            UnregisterEventHotKey(hRef)
         }
 
         return true
@@ -861,10 +943,11 @@ class HotkeyListener {
         log("+-- pet-talk-hotkey daemon active")
         log("| PID: \(getpid())")
         log("| Hotkey: Option + Tab (keycode: \(HotkeyConfig.hotKeyCode), mod: 0x\(String(HotkeyConfig.hotKeyModifier, radix: 16, uppercase: true)))")
-        log("| Pause Hotkey: Option + Shift + Tab (keycode: \(HotkeyConfig.hotKeyCode), mod: 0x\(String(HotkeyConfig.pauseHotKeyModifier, radix: 16, uppercase: true)))")
+        log("| Hand-over Hotkey: Option + Shift + Tab (keycode: \(HotkeyConfig.hotKeyCode), mod: 0x\(String(HotkeyConfig.handoverHotKeyModifier, radix: 16, uppercase: true)))")
+        log("| Pause: double-tap Option + Tab within \(Int(HUDTokens.doubleTapWindowMs))ms")
         log("| Target CLI: \(cliPath)")
         log("| Earcons: enabled=\(EarconEngine.shared.isEnabled), pack=\(EarconEngine.shared.soundPack), vol=\(String(format: "%.2f", EarconEngine.shared.volume))")
-        log("| HUD: Obsidian Deep Zinc Capsule (220x44px -> 380x44px live dictation)")
+        log("| HUD: Obsidian Deep Zinc Capsule (\(Int(HUDCapsuleView.capsuleWidth))pt measured notch -> \(Int(HUDCapsuleView.expandedWidth))pt expanded)")
         log("| Paste Injection: \(pasteEnabled ? "ENABLED (Wispr Flow style -> Cmd+V)" : "disabled (use --paste to enable)")")
         log("| Mode: \(isDaemon ? "Daemon (background)" : "Foreground")")
         log("| Ready for global Option+Tab barge-in turns & kill switch (<0.1% CPU)...")
@@ -897,8 +980,8 @@ class HotkeyListener {
                 nil,
                 &hotKeyID
             )
-            if status == noErr && hotKeyID.id == HotkeyConfig.pauseHotKeyId {
-                HotkeyListener.shared.handlePauseHotKeyTrigger()
+            if status == noErr && hotKeyID.id == HotkeyConfig.handoverHotKeyId {
+                HotkeyListener.shared.handleHandoverHotKeyTrigger()
             } else {
                 HotkeyListener.shared.handleHotKeyTrigger()
             }
@@ -942,19 +1025,19 @@ class HotkeyListener {
             return 1
         }
 
-        // 3. Register Global Pause/Resume Hotkey (kVK_Tab + optionKey + shiftKey) on Event Dispatcher Target
-        let pauseHotKeyID = EventHotKeyID(signature: HotkeyConfig.hotKeySignature, id: HotkeyConfig.pauseHotKeyId)
-        let pauseRegStatus = RegisterEventHotKey(
+        // 3. Register Global Hand-over Hotkey (kVK_Tab + optionKey + shiftKey) on Event Dispatcher Target
+        let handoverHotKeyID = EventHotKeyID(signature: HotkeyConfig.hotKeySignature, id: HotkeyConfig.handoverHotKeyId)
+        let handoverRegStatus = RegisterEventHotKey(
             HotkeyConfig.hotKeyCode,
-            HotkeyConfig.pauseHotKeyModifier,
-            pauseHotKeyID,
+            HotkeyConfig.handoverHotKeyModifier,
+            handoverHotKeyID,
             GetEventDispatcherTarget(),
             0,
-            &pauseHotKeyRef
+            &handoverHotKeyRef
         )
 
-        if pauseRegStatus != noErr {
-            log("! [warning] Could not register secondary Option+Shift+Tab hotkey (status: \(pauseRegStatus))")
+        if handoverRegStatus != noErr {
+            log("! [warning] Could not register the Option+Shift+Tab hand-over chord (status: \(handoverRegStatus)) — hand-over is unavailable this session")
         }
 
         // 4. Register POSIX Signal Handlers for clean exit, pause toggle, and instant kill
@@ -1001,9 +1084,9 @@ class HotkeyListener {
             UnregisterEventHotKey(ref)
             hotKeyRef = nil
         }
-        if let pRef = pauseHotKeyRef {
-            UnregisterEventHotKey(pRef)
-            pauseHotKeyRef = nil
+        if let hRef = handoverHotKeyRef {
+            UnregisterEventHotKey(hRef)
+            handoverHotKeyRef = nil
         }
         if let handler = eventHandlerRef {
             RemoveEventHandler(handler)
@@ -1038,6 +1121,8 @@ func printUsage() {
       pet-talk-hotkey test-paste [text]   Test Cursor paste injection (Wispr Flow style -> Cmd+V)
       pet-talk-hotkey config show         Show current configuration
       pet-talk-hotkey config set <k> <v>  Update configuration setting
+      pet-talk-hotkey --self-test         Headless spring + geometry checks (needs PET_TALK_HEADLESS=1)
+      pet-talk-hotkey --dump-state        Dump one JSON line: state machine, geometry, springs, chords
       pet-talk-hotkey --dump-hud-spec     Dump HUD specification JSON for test assertions
       pet-talk-hotkey --check-registration Verify Carbon hotkey registration
       pet-talk-hotkey --barge-benchmark   Benchmark afplay barge-in kill latency
@@ -1053,12 +1138,12 @@ func printUsage() {
       --sound-pack <pack>                 apple_minimal | cyberpunk | haptic | none
       --no-audio                          Disable earcons
 
-    Sensory Presence Specifications:
-      Key:        Tab (kVK_Tab, keycode 48)
-      Modifier:   Option (optionKey, 0x0800 / 2048)
+    Gestures:
+      Ask:        Option+Tab (kVK_Tab 48 + optionKey 0x0800)
       Kill:       Single-tap Option+Tab while active cuts audio in <2ms & dismisses HUD
-      Pause:      Double-tap Option+Tab (<=350ms) or Option+Shift+Tab toggles Sleep Mode
-      Barge-in:   <= 50ms afplay instant kill via Darwin libproc
+      Pause:      Double-tap Option+Tab within 400ms toggles Sleep Mode (the ONLY pause gesture)
+      Hand-over:  Option+Shift+Tab (0x0A00) hands the floor to the agent (user.handover)
+      Barge-in:   <= 50ms afplay instant kill via Darwin libproc; the HUD is a hard cut
       Dictation:  Live transcribed speech displayed in Obsidian Zinc Capsule (380x44px)
       Paste:      NSPasteboard + CGEvent Cmd+V into Cursor / terminal / editor
       Earcons:    Pre-loaded NSSound in RAM (<2ms latency)
@@ -1066,7 +1151,8 @@ func printUsage() {
                   - Silence Cutoff: Pop.aiff (32ms)
                   - Barge Kill:     Bottle.aiff (18ms)
                   - Error:          Basso.aiff (45ms)
-      HUD:        220x44px -> 380x44px Obsidian Glass NSPanel [.nonactivatingPanel]
+      HUD:        Measured-notch-wide Obsidian Glass NSPanel [.nonactivatingPanel],
+                  180pt fallback pill on a screen with no notch, real damped spring
     """
     print(usage)
 }
@@ -1318,7 +1404,9 @@ func doAX(args: [String]) -> Int32 {
 func doVerify() -> Int32 {
     print("+-- Verifying Carbon Option+Tab registration...")
     print("| Keycode:  \(HotkeyConfig.hotKeyCode) (kVK_Tab)")
-    print("| Modifier: 0x\(String(HotkeyConfig.hotKeyModifier, radix: 16, uppercase: true)) (optionKey / 2048)")
+    print("| Modifier: 0x\(String(HotkeyConfig.hotKeyModifier, radix: 16, uppercase: true)) (optionKey / 2048) -> ask")
+    print("| Hand-over modifier: 0x\(String(HotkeyConfig.handoverHotKeyModifier, radix: 16, uppercase: true)) (optionKey|shiftKey / 2560) -> handover")
+    print("| Pause: double-tap Option+Tab within \(Int(HUDTokens.doubleTapWindowMs))ms")
     let ok = HotkeyListener.shared.verifyRegistration()
     if ok {
         print("+-- PASS: Carbon RegisterEventHotKey succeeded (no TCC/Accessibility prompt required).")
@@ -1508,6 +1596,171 @@ func doTestPaste(args: [String]) -> Int32 {
     }
 }
 
+/// `pet-talk-hotkey --self-test` — headless verification of the spring
+/// integrator and the geometry math. Orders NO window front (and refuses to run
+/// unless PET_TALK_HEADLESS=1, so it can never pop the capsule onto a screen
+/// someone is working on), plays no audio, starts no daemon.
+func doSelfTest() -> Int32 {
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+
+    guard HUDController.isHeadless else {
+        print("!-- FAIL: --self-test requires PET_TALK_HEADLESS=1 (it must never show a window)")
+        return 1
+    }
+
+    var failures: [String] = []
+    func check(_ label: String, _ condition: Bool, _ detail: String = "") {
+        if condition {
+            print("| PASS: \(label)\(detail.isEmpty ? "" : " — \(detail)")")
+        } else {
+            print("!-- FAIL: \(label)\(detail.isEmpty ? "" : " — \(detail)")")
+            failures.append(label)
+        }
+    }
+
+    print("+-- pet-talk-hotkey --self-test (headless: no window, no audio, no daemon)")
+
+    // 1. Spring integrator: the three declared tokens must produce real, settling,
+    //    underdamped motion — not a no-op and not a divergence.
+    print("| [spring] stiffness=\(HUDTokens.springStiffness) damping=\(HUDTokens.springDamping) mass=\(HUDTokens.springMass)")
+    var samples: [Double] = []
+    var finished = false
+    let started = DispatchTime.now()
+    let driver = HUDSpringDriver(onStep: { p in samples.append(p) }, onDone: { finished = true })
+    driver.start()
+
+    let deadline = Date().addingTimeInterval(3.0)
+    while !finished && Date() < deadline {
+        RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01))
+    }
+    let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds) / 1_000_000.0
+
+    check("spring settles", finished, "\(String(format: "%.1f", elapsedMs))ms, \(samples.count) steps")
+    check("spring integrates many steps", samples.count > 10, "\(samples.count) steps")
+    check("spring starts at rest", samples.first == 0.0, "first=\(samples.first ?? -1)")
+    check("spring lands exactly on target", samples.last == 1.0, "last=\(samples.last ?? -1)")
+    // The spring's PERCEPTUAL duration — first time it reaches 99% of travel — is
+    // what the dripDuration token budgets. The settling tail after that is
+    // sub-pixel.
+    let perceptualSteps = samples.firstIndex(where: { $0 >= 0.99 }) ?? samples.count
+    let perceptualMs = Double(perceptualSteps) * (1000.0 / 120.0)
+    check("spring lands inside the drip budget",
+          perceptualMs <= HUDMotionTokens.dripDuration * 1000.0 * 1.5,
+          "\(String(format: "%.1f", perceptualMs))ms perceptual vs \(Int(HUDMotionTokens.dripDuration * 1000.0))ms budget")
+
+    let overshoot = samples.max() ?? 0.0
+    check("spring is underdamped (overshoots)", overshoot > 1.0, "peak=\(String(format: "%.4f", overshoot))")
+    check("spring stays bounded", overshoot < 1.5, "peak=\(String(format: "%.4f", overshoot))")
+    check("spring never undershoots below rest", (samples.min() ?? 0.0) >= 0.0)
+    check("CASpringAnimation settling is positive", HUDSpring.settlingDuration > 0.0,
+          "\(String(format: "%.1f", HUDSpring.settlingDuration * 1000.0))ms")
+    let springAnim = HUDSpring.animation(keyPath: "opacity", from: 0.0, to: 1.0)
+    check("CASpringAnimation reads the tokens",
+          Double(springAnim.stiffness) == HUDTokens.springStiffness
+            && Double(springAnim.damping) == HUDTokens.springDamping
+            && Double(springAnim.mass) == HUDTokens.springMass
+            && springAnim.initialVelocity == 0.0)
+
+    // 2. Geometry: measured notch width, fallback pill, ear fillet threshold,
+    //    multi-line height stepping, and top-edge anchoring.
+    let measured = HUDCapsuleView.measuredNotchWidth()
+    let width = HUDCapsuleView.capsuleWidth
+    print("| [geometry] measuredNotchWidth=\(measured.map { String(format: "%.1f", $0) } ?? "none") capsuleWidth=\(String(format: "%.1f", width))")
+    if let measured = measured {
+        check("capsule width is the measured notch", width == measured)
+    } else {
+        check("capsule width falls back to the pill token", width == HUDTokens.fallbackCapsuleWidth,
+              "\(HUDTokens.fallbackCapsuleWidth)pt")
+    }
+
+    let notchW: CGFloat = measured ?? HUDTokens.fallbackCapsuleWidth
+    check("no ears at the notch width",
+          HUDCapsuleView.earFilletRadius(forWidth: notchW, notchWidth: notchW) == 0.0)
+    check("no ears at exactly notch + threshold",
+          HUDCapsuleView.earFilletRadius(forWidth: notchW + HUDTokens.earFilletThreshold, notchWidth: notchW) == 0.0)
+    check("ears once content clears notch + threshold",
+          HUDCapsuleView.earFilletRadius(forWidth: notchW + HUDTokens.earFilletThreshold + 1.0, notchWidth: notchW)
+            == HUDTokens.earFilletRadius)
+
+    check("one-line height", HUDCapsuleView.computeDynamicNotchHeight(for: 20.0, hasNotch: true) == HUDCapsuleView.notchExpandedHeight)
+    check("two-line height", HUDCapsuleView.computeDynamicNotchHeight(for: 40.0, hasNotch: true) == 76.0)
+    check("three-line height", HUDCapsuleView.computeDynamicNotchHeight(for: 60.0, hasNotch: true) == 96.0)
+    check("four-line clamp", HUDCapsuleView.computeDynamicNotchHeight(for: 400.0, hasNotch: true) == HUDCapsuleView.maxExpandedHeight)
+
+    let frame = HUDController.shared.computeFrame(width: width, height: HUDCapsuleView.notchListeningHeight)
+    check("frame keeps the requested size",
+          frame.width == width && frame.height == HUDCapsuleView.notchListeningHeight)
+    let screen = NSScreen.main ?? (NSScreen.screens.first ?? NSScreen())
+    let notchInfo = NotchManager.shared.currentNotch(for: screen)
+    if notchInfo.hasNotch {
+        check("frame is flush with the top of the display", abs(frame.maxY - notchInfo.screenFrame.maxY) < 0.5)
+        check("frame is centred on the notch", abs(frame.midX - notchInfo.rect.midX) < 0.5)
+    } else {
+        check("pill floats below the menu bar",
+              abs(frame.maxY - (notchInfo.visibleFrame.maxY - 12.0)) < 0.5)
+    }
+
+    // 3. The HUD never became visible during any of this.
+    check("no window was shown", !HUDController.shared.panel.isVisible)
+    check("lifecycle untouched", HUDController.shared.lifecycleName == "hidden")
+
+    if failures.isEmpty {
+        print("+-- PASS: self-test (spring integrator + geometry math), headless")
+        return 0
+    }
+    print("!-- FAIL: self-test — \(failures.count) check(s) failed: \(failures.joined(separator: ", "))")
+    return 1
+}
+
+/// `pet-talk-hotkey --dump-state` — ONE line of JSON: the state machine, the
+/// measured capsule geometry, the spring constants in force, and the chord map.
+/// No daemon, no window, no audio: the read a test can make.
+func doDumpState() -> Int32 {
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+
+    var dump = HUDController.shared.getStateDump()
+
+    if var state = dump["state"] as? [String: Any] {
+        state["paused"] = ProcessManager.isPaused()
+        if let pid = ProcessManager.readPid(), ProcessManager.isProcessAlive(pid: pid) {
+            state["daemonPid"] = Int(pid)
+        } else {
+            state["daemonPid"] = 0
+        }
+        dump["state"] = state
+    }
+
+    dump["chords"] = [
+        "optionTab": "ask",
+        "optionTabDoubleTap": "pause",
+        "optionShiftTab": "handover",
+        "escape": "barge",
+        "doubleTapWindowMs": HUDTokens.doubleTapWindowMs,
+        "keyCode": Int(HotkeyConfig.hotKeyCode),
+        "askModifier": Int(HotkeyConfig.hotKeyModifier),
+        "handoverModifier": Int(HotkeyConfig.handoverHotKeyModifier)
+    ] as [String: Any]
+
+    // The contract the server lane implements. Documented here so it is readable
+    // from the binary, not only from prose.
+    dump["handoverEvent"] = [
+        "type": "user.handover",
+        "fields": ["type", "turn_id", "source"],
+        "source": "hotkey",
+        "transport": "pet-talk-cli handover"
+    ] as [String: Any]
+
+    guard let data = try? JSONSerialization.data(withJSONObject: dump, options: [.sortedKeys]),
+          let json = String(data: data, encoding: .utf8) else {
+        print("{\"ok\":false,\"reason\":\"dump_state_serialize_failed\"}")
+        return 1
+    }
+    print(json)
+    return 0
+}
+
 func doDumpHUDSpec() -> Int32 {
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
@@ -1626,6 +1879,10 @@ func doConfig(args: [String]) -> Int32 {
 let args = Array(CommandLine.arguments.dropFirst())
 let command = args.first ?? "run"
 
+// Spring/geometry/gesture tokens: a ~/.pet-talk/config.yaml override (or a
+// design-playground export written into it) applies here, with no rebuild.
+HUDTokens.apply(from: PetTalkConfig.load())
+
 // Global paste flag extraction
 if args.contains("--paste") {
     HotkeyListener.shared.explicitPasteFlag = true
@@ -1662,6 +1919,10 @@ case "breadcrumb", "--breadcrumb":
     exit(doShowBreadcrumb(args: Array(args.dropFirst())))
 case "test-paste", "--test-paste":
     exit(doTestPaste(args: Array(args.dropFirst())))
+case "--self-test", "self-test":
+    exit(doSelfTest())
+case "--dump-state", "dump-state":
+    exit(doDumpState())
 case "--dump-hud-spec":
     exit(doDumpHUDSpec())
 case "--check-registration", "--verify":

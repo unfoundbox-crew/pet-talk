@@ -34,6 +34,13 @@ BIN_PATH = os.environ.get("PET_TALK_HOTKEY_BIN") or os.path.join(ROOT, "bin", "p
 HAVE_BIN = os.path.isfile(BIN_PATH) and os.access(BIN_PATH, os.X_OK)
 
 
+# Every subprocess call below runs headless: PET_TALK_HEADLESS=1 makes the daemon
+# run its full state machine, springs and geometry without ordering any panel on
+# screen. A QA suite must never pop the capsule onto the display someone is
+# working on (Saurabh, 2026-09-12).
+HEADLESS_ENV = dict(os.environ, PET_TALK_HEADLESS="1", PET_TALK_SILENT="1")
+
+
 def _skip_if_no_bin():
     if not HAVE_BIN:
         raise unittest.SkipTest(
@@ -69,6 +76,7 @@ class TestHUDWindowSpecifications(unittest.TestCase):
             capture_output=True,
             text=True,
             timeout=15,
+            env=HEADLESS_ENV,
         )
         if res.returncode != 0:
             raise unittest.SkipTest(f"SKIP: --dump-hud-spec failed:\n{res.stderr}")
@@ -151,11 +159,19 @@ class TestHUDWindowSpecifications(unittest.TestCase):
 
 
 class TestHUDInteractiveSequence(unittest.TestCase):
-    """Verify CLI test-hud sequence execution (visual only — no audio)."""
+    """`test-hud` draws the real capsule over whatever the developer is doing, so
+    it is opt-in: set PET_TALK_HUD_VISUAL=1 to run it. The headless equivalents
+    (`--self-test`, `--dump-state`) cover the same mechanics and always run."""
 
     @classmethod
     def setUpClass(cls):
         _skip_if_no_bin()
+        if os.environ.get("PET_TALK_HUD_VISUAL") != "1":
+            raise unittest.SkipTest(
+                "SKIP: `test-hud` shows the capsule on the developer's screen — "
+                "set PET_TALK_HUD_VISUAL=1 to run it; the headless "
+                "`--self-test` and `--dump-state` checks cover the mechanics"
+            )
 
     def test_hud_visual_test_command_output(self):
         res = subprocess.run(
@@ -163,6 +179,7 @@ class TestHUDInteractiveSequence(unittest.TestCase):
             capture_output=True,
             text=True,
             timeout=15,
+            env=HEADLESS_ENV,
         )
         self.assertEqual(res.returncode, 0, f"test-hud failed:\n{res.stderr}\n{res.stdout}")
         self.assertIn("Testing Pet-Talk Floating Glass Capsule HUD", res.stdout)
@@ -260,7 +277,8 @@ class TestDynamicMultiLineAndBreadcrumbs(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         _skip_if_no_bin()
-        res = subprocess.run([BIN_PATH, "--dump-hud-spec"], capture_output=True, text=True, timeout=15)
+        res = subprocess.run([BIN_PATH, "--dump-hud-spec"], capture_output=True,
+                             text=True, timeout=15, env=HEADLESS_ENV)
         if res.returncode != 0:
             raise unittest.SkipTest(f"SKIP: --dump-hud-spec failed:\n{res.stderr}")
         cls.spec = json.loads(res.stdout)
@@ -338,12 +356,18 @@ class TestDynamicMultiLineAndBreadcrumbs(unittest.TestCase):
         self.assertIsNone(sanitize('[RMS: 0.245, PEAK: 0.512]'))
 
     def test_breadcrumbs_visual_command_output(self):
-        """Verify test-breadcrumbs CLI command executes successfully."""
+        """Opt-in: `test-breadcrumbs` draws the capsule on the developer's screen."""
+        if os.environ.get("PET_TALK_HUD_VISUAL") != "1":
+            raise unittest.SkipTest(
+                "SKIP: `test-breadcrumbs` shows the capsule on the developer's "
+                "screen — set PET_TALK_HUD_VISUAL=1 to run it"
+            )
         res = subprocess.run(
             [BIN_PATH, "test-breadcrumbs"],
             capture_output=True,
             text=True,
             timeout=15,
+            env=HEADLESS_ENV,
         )
         self.assertEqual(res.returncode, 0, f"test-breadcrumbs failed:\n{res.stderr}\n{res.stdout}")
         self.assertIn("Testing Dynamic Island Semantic Action Breadcrumbs", res.stdout)
@@ -421,10 +445,17 @@ class TestSpringMechanics(unittest.TestCase):
         """With no notch (external display) the fallback pill is 180pt, via a token."""
         self.assertTrue("fallbackCapsuleWidth" in self.src, "missing: fallbackCapsuleWidth")
         import re
+        # The default is the design lane's token (capsuleWidthRest = 180), never a
+        # second copy of the number in this file.
         self.assertIsNotNone(
-            re.search(r"fallbackCapsuleWidth[^\n]*=\s*180\.0", self.src),
-            "HUDTokens.fallbackCapsuleWidth must default to 180.0",
+            re.search(r"fallbackCapsuleWidth[^\n]*=\s*CGFloat\(DesignTokens\.capsuleWidthRest\)", self.src),
+            "HUDTokens.fallbackCapsuleWidth must read DesignTokens.capsuleWidthRest",
         )
+        with open(os.path.join(ROOT, "cli", "hotkey", "DesignTokens.swift"), "r", encoding="utf-8") as f:
+            dt = f.read()
+        m = re.search(r"capsuleWidthRest: Double = ([0-9.]+)", dt)
+        self.assertIsNotNone(m, "DesignTokens.capsuleWidthRest missing")
+        self.assertEqual(float(m.group(1)), 180.0, "the no-notch fallback pill is 180pt")
         self.assertTrue("measuredNotchWidth() ?? HUDTokens.fallbackCapsuleWidth" in self.src,
                         "capsuleWidth must fall back to the 180pt token when no notch is reported")
 
@@ -435,7 +466,7 @@ class TestSpringMechanics(unittest.TestCase):
             re.search(r"earFilletThreshold[^\n]*=\s*24\.0", self.src),
             "ear fillet threshold token must default to 24.0pt",
         )
-        self.assertTrue("notchInfo.notchWidth + HUDTokens.earFilletThreshold" in self.src,
+        self.assertTrue("notchWidth + HUDTokens.earFilletThreshold" in self.src,
                         "ear fillets appear only when content exceeds notch width + threshold")
 
     def test_reduce_motion_zeroes_travel_and_keeps_time(self):
@@ -498,7 +529,8 @@ class TestDumpState(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         _skip_if_no_bin()
-        res = subprocess.run([BIN_PATH, "--dump-state"], capture_output=True, text=True, timeout=15)
+        res = subprocess.run([BIN_PATH, "--dump-state"], capture_output=True,
+                             text=True, timeout=15, env=HEADLESS_ENV)
         # A present binary whose --dump-state fails is a real failure, never a skip.
         if res.returncode != 0:
             raise AssertionError(f"--dump-state failed (rc={res.returncode}):\n{res.stderr}\n{res.stdout}")
@@ -604,6 +636,64 @@ class TestSpringConstantsSourcedFromDesignTokens(unittest.TestCase):
             "public static let springStiffness: Double = 220.0", src,
             "hud_window.swift is wired to DesignTokens but still keeps its own literal",
         )
+
+
+class TestHeadlessSelfTest(unittest.TestCase):
+    """`--self-test` exercises the spring integrator and the geometry math with no
+    window ordered front — the headless replacement for watching `test-hud`."""
+
+    @classmethod
+    def setUpClass(cls):
+        _skip_if_no_bin()
+        cls.res = subprocess.run([BIN_PATH, "--self-test"], capture_output=True,
+                                 text=True, timeout=30, env=HEADLESS_ENV)
+
+    def test_self_test_passes(self):
+        self.assertEqual(self.res.returncode, 0,
+                         f"--self-test failed:\n{self.res.stdout}\n{self.res.stderr}")
+        self.assertIn("PASS: self-test", self.res.stdout)
+
+    def test_self_test_covers_the_spring_integrator(self):
+        out = self.res.stdout
+        for needle in ("[spring]", "spring settles", "spring is underdamped",
+                       "spring lands exactly on target", "CASpringAnimation reads the tokens"):
+            self.assertIn(needle, out, f"--self-test must report: {needle}")
+
+    def test_self_test_covers_the_geometry_math(self):
+        out = self.res.stdout
+        for needle in ("[geometry]", "measuredNotchWidth=", "ears once content clears notch",
+                       "four-line clamp", "no window was shown"):
+            self.assertIn(needle, out, f"--self-test must report: {needle}")
+
+    def test_self_test_refuses_to_run_non_headless(self):
+        env = dict(os.environ)
+        env.pop("PET_TALK_HEADLESS", None)
+        res = subprocess.run([BIN_PATH, "--self-test"], capture_output=True,
+                             text=True, timeout=30, env=env)
+        self.assertEqual(res.returncode, 1,
+                         "--self-test must refuse to run without PET_TALK_HEADLESS=1")
+        self.assertIn("requires PET_TALK_HEADLESS=1", res.stdout)
+
+
+class TestHeadlessGuard(unittest.TestCase):
+    """No panel may reach the screen while PET_TALK_HEADLESS=1."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not os.path.exists(HUD_SWIFT_SRC):
+            raise unittest.SkipTest(f"SKIP: {HUD_SWIFT_SRC} not present yet")
+        with open(HUD_SWIFT_SRC, "r", encoding="utf-8") as f:
+            cls.src = f.read()
+
+    def test_every_show_path_goes_through_the_headless_guard(self):
+        self.assertTrue("PET_TALK_HEADLESS" in self.src, "missing: PET_TALK_HEADLESS")
+        self.assertTrue("orderFrontUnlessHeadless" in self.src, "missing: orderFrontUnlessHeadless")
+        # Exactly one raw orderFrontRegardless() call may exist: the one inside
+        # the guard itself.
+        raw = [ln.strip() for ln in self.src.splitlines()
+               if "orderFrontRegardless()" in ln and "func " not in ln]
+        self.assertEqual(len(raw), 1,
+                         f"every show path must route through the guard; raw calls: {raw}")
 
 
 if __name__ == "__main__":

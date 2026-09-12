@@ -4,6 +4,7 @@
 // Reads ~/.pet-talk/config.yaml or falls back gracefully to built-in defaults.
 // Supports audio toggling, volume adjustment, sound pack selection, and custom sounds.
 
+import CoreGraphics
 import Foundation
 
 public struct AudioConfig {
@@ -44,10 +45,62 @@ public struct PasteConfig {
     }
 }
 
+/// Spring physics, overridable so a design-playground export applies without a
+/// rebuild. `nil` means "keep the built-in token" — see HUDTokens.apply(from:).
+public struct MotionConfig {
+    public var springStiffness: Double?
+    public var springDamping: Double?
+    public var springMass: Double?
+
+    public init(springStiffness: Double? = nil, springDamping: Double? = nil, springMass: Double? = nil) {
+        self.springStiffness = springStiffness
+        self.springDamping = springDamping
+        self.springMass = springMass
+    }
+}
+
+/// Notch/capsule geometry overrides. Same contract: nil keeps the token.
+public struct GeometryConfig {
+    public var notchWidthFallback: CGFloat?
+    public var expandedWidth: CGFloat?
+    public var earFilletThreshold: CGFloat?
+    public var earFilletRadius: CGFloat?
+    public var bottomCornerRadius: CGFloat?
+    public var pillCornerRadius: CGFloat?
+
+    public init(
+        notchWidthFallback: CGFloat? = nil,
+        expandedWidth: CGFloat? = nil,
+        earFilletThreshold: CGFloat? = nil,
+        earFilletRadius: CGFloat? = nil,
+        bottomCornerRadius: CGFloat? = nil,
+        pillCornerRadius: CGFloat? = nil
+    ) {
+        self.notchWidthFallback = notchWidthFallback
+        self.expandedWidth = expandedWidth
+        self.earFilletThreshold = earFilletThreshold
+        self.earFilletRadius = earFilletRadius
+        self.bottomCornerRadius = bottomCornerRadius
+        self.pillCornerRadius = pillCornerRadius
+    }
+}
+
+/// Gesture timing. `double_tap_window_ms` is the pause chord's window.
+public struct ChordConfig {
+    public var doubleTapWindowMs: Double?
+
+    public init(doubleTapWindowMs: Double? = nil) {
+        self.doubleTapWindowMs = doubleTapWindowMs
+    }
+}
+
 public struct PetTalkConfig {
     public var version: String = "1.0"
     public var audio: AudioConfig = AudioConfig()
     public var paste: PasteConfig = PasteConfig()
+    public var motion: MotionConfig = MotionConfig()
+    public var geometry: GeometryConfig = GeometryConfig()
+    public var hotkey: ChordConfig = ChordConfig()
     /// Optional explicit path to the pet-talk-cli executable. Second in the
     /// resolution order (after env PET_TALK_CLI_PATH, before the sibling/repo-root
     /// walk) — see HotkeyListener.resolveCliPath(). Never a hardcoded default here;
@@ -58,11 +111,17 @@ public struct PetTalkConfig {
         version: String = "1.0",
         audio: AudioConfig = AudioConfig(),
         paste: PasteConfig = PasteConfig(),
+        motion: MotionConfig = MotionConfig(),
+        geometry: GeometryConfig = GeometryConfig(),
+        hotkey: ChordConfig = ChordConfig(),
         cliPath: String? = nil
     ) {
         self.version = version
         self.audio = audio
         self.paste = paste
+        self.motion = motion
+        self.geometry = geometry
+        self.hotkey = hotkey
         self.cliPath = cliPath
     }
 
@@ -139,6 +198,26 @@ public struct PetTalkConfig {
                 paste.delayMs = max(5, i)
                 return true
             }
+        case "motion.spring_stiffness":
+            if let d = Double(cleanVal) { motion.springStiffness = d; return true }
+        case "motion.spring_damping":
+            if let d = Double(cleanVal) { motion.springDamping = d; return true }
+        case "motion.spring_mass":
+            if let d = Double(cleanVal) { motion.springMass = d; return true }
+        case "geometry.notch_width_fallback":
+            if let d = Double(cleanVal) { geometry.notchWidthFallback = CGFloat(d); return true }
+        case "geometry.expanded_width":
+            if let d = Double(cleanVal) { geometry.expandedWidth = CGFloat(d); return true }
+        case "geometry.ear_fillet_threshold":
+            if let d = Double(cleanVal) { geometry.earFilletThreshold = CGFloat(d); return true }
+        case "geometry.ear_fillet_radius":
+            if let d = Double(cleanVal) { geometry.earFilletRadius = CGFloat(d); return true }
+        case "geometry.bottom_corner_radius":
+            if let d = Double(cleanVal) { geometry.bottomCornerRadius = CGFloat(d); return true }
+        case "geometry.pill_corner_radius":
+            if let d = Double(cleanVal) { geometry.pillCornerRadius = CGFloat(d); return true }
+        case "hotkey.double_tap_window_ms":
+            if let d = Double(cleanVal) { hotkey.doubleTapWindowMs = d; return true }
         case "cli_path":
             cliPath = cleanVal.isEmpty ? nil : cleanVal
             return true
@@ -181,7 +260,33 @@ public struct PetTalkConfig {
         lines.append("  restore_clipboard: \(paste.restoreClipboard ? "true" : "false")")
         lines.append("  delay_ms: \(paste.delayMs)")
         lines.append("")
+        lines.append("# Spring physics. A design-playground export lands here and")
+        lines.append("# applies on next launch — no rebuild. Omit a key to keep the token.")
+        lines.append("motion:")
+        lines.append("  spring_stiffness: \(fmt(motion.springStiffness, default: 220.0))")
+        lines.append("  spring_damping: \(fmt(motion.springDamping, default: 21.0))")
+        lines.append("  spring_mass: \(fmt(motion.springMass, default: 1.0))")
+        lines.append("")
+        lines.append("# Notch / capsule geometry. The resting width is MEASURED from the")
+        lines.append("# screen; notch_width_fallback only applies when there is no notch.")
+        lines.append("geometry:")
+        lines.append("  notch_width_fallback: \(fmt(geometry.notchWidthFallback.map(Double.init), default: 180.0))")
+        lines.append("  expanded_width: \(fmt(geometry.expandedWidth.map(Double.init), default: 440.0))")
+        lines.append("  ear_fillet_threshold: \(fmt(geometry.earFilletThreshold.map(Double.init), default: 24.0))")
+        lines.append("  ear_fillet_radius: \(fmt(geometry.earFilletRadius.map(Double.init), default: 10.0))")
+        lines.append("  bottom_corner_radius: \(fmt(geometry.bottomCornerRadius.map(Double.init), default: 20.0))")
+        lines.append("  pill_corner_radius: \(fmt(geometry.pillCornerRadius.map(Double.init), default: 22.0))")
+        lines.append("")
+        lines.append("# Gestures: Option+Tab asks, Option+Shift+Tab hands over,")
+        lines.append("# two Option+Tab presses inside this window pause.")
+        lines.append("hotkey:")
+        lines.append("  double_tap_window_ms: \(Int(hotkey.doubleTapWindowMs ?? 400.0))")
+        lines.append("")
         return lines.joined(separator: "\n")
+    }
+
+    private func fmt(_ value: Double?, default defaultValue: Double) -> String {
+        return String(format: "%g", value ?? defaultValue)
     }
 
     public static func parseYAML(_ content: String) -> PetTalkConfig {
@@ -244,6 +349,41 @@ public struct PetTalkConfig {
                         default:
                             break
                         }
+                    }
+                } else if currentSection == "motion" {
+                    currentSubSection = nil
+                    switch key {
+                    case "spring_stiffness":
+                        if let d = Double(val) { config.motion.springStiffness = d }
+                    case "spring_damping":
+                        if let d = Double(val) { config.motion.springDamping = d }
+                    case "spring_mass":
+                        if let d = Double(val) { config.motion.springMass = d }
+                    default:
+                        break
+                    }
+                } else if currentSection == "geometry" {
+                    currentSubSection = nil
+                    switch key {
+                    case "notch_width_fallback":
+                        if let d = Double(val) { config.geometry.notchWidthFallback = CGFloat(d) }
+                    case "expanded_width":
+                        if let d = Double(val) { config.geometry.expandedWidth = CGFloat(d) }
+                    case "ear_fillet_threshold":
+                        if let d = Double(val) { config.geometry.earFilletThreshold = CGFloat(d) }
+                    case "ear_fillet_radius":
+                        if let d = Double(val) { config.geometry.earFilletRadius = CGFloat(d) }
+                    case "bottom_corner_radius":
+                        if let d = Double(val) { config.geometry.bottomCornerRadius = CGFloat(d) }
+                    case "pill_corner_radius":
+                        if let d = Double(val) { config.geometry.pillCornerRadius = CGFloat(d) }
+                    default:
+                        break
+                    }
+                } else if currentSection == "hotkey" {
+                    currentSubSection = nil
+                    if key == "double_tap_window_ms", let d = Double(val) {
+                        config.hotkey.doubleTapWindowMs = d
                     }
                 } else if currentSection == "paste" {
                     currentSubSection = nil
