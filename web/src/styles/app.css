@@ -1,0 +1,803 @@
+/* =========================================================================
+   pet-talk cockpit — Receipts Over Prose, staged on Oscilloscope.
+   ------------------------------------------------------------------------
+   The cockpit is the DEVELOPER INSPECTOR. The notch is the product. So this
+   sheet is a laboratory instrument: hairline graticule rules, a mono face on
+   every number, one signal colour for live acoustic data, and red only for
+   "outside its budget".
+
+   Colour comes from exactly two places, both generated:
+     tokens.css           AgentWorth's palette, vendored (--mv-*)
+     tokens.pet-talk.css  pet-talk's own layer (--pt-*): geometry, motion,
+                          the listening signal
+   Nothing in this file hand-rolls a colour. qa/test_design_tokens.py enforces
+   that for the .tsx files; the same law holds here by choice.
+
+   Oscilloscope's five named roles map onto those tokens rather than adding a
+   sixth palette:
+     face      -> --mv-ground / --mv-surface
+     ink       -> --mv-ink
+     graticule -> --mv-border / --mv-border-soft
+     signal    -> --pt-listening-signal   (live, measured, acoustic)
+     peg       -> --mv-danger             (semantic breach, AgentWorth's own)
+   ========================================================================= */
+
+:root {
+  /* Spacing scale. One ladder, used everywhere; no ad-hoc pixel values. */
+  --pt-s1: 4px;
+  --pt-s2: 8px;
+  --pt-s3: 12px;
+  --pt-s4: 16px;
+  --pt-s5: 24px;
+  --pt-s6: 32px;
+
+  /* Frame geometry of the inspector, from AppleInspector.dc.html. */
+  --pt-header-h: 48px;
+  --pt-rail-w: 200px;
+  --pt-dev-rail-w: 316px;
+  --pt-gutter-w: 112px;
+  --pt-hair: 1px;
+
+  /* Faces. The spoken line wears the sans face at reading size; every
+     number, frame name and timestamp wears mono. */
+  --pt-face-spoken: var(--pt-type-family-spoken), var(--font-sans);
+  --pt-face-mono: var(--font-mono);
+}
+
+/* ── App frame ──────────────────────────────────────────────────────────── */
+
+.pt-app {
+  min-height: 100vh;
+  display: grid;
+  grid-template-rows: var(--pt-header-h) 1fr;
+  background: var(--mv-ground);
+  color: var(--mv-text);
+  font-family: var(--font-sans);
+}
+
+.pt-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--pt-s4);
+  padding: 0 var(--pt-s5);
+  border-bottom: var(--pt-hair) solid var(--mv-border);
+  background: var(--mv-ground);
+}
+
+.pt-header-left,
+.pt-header-right {
+  display: flex;
+  align-items: center;
+  gap: var(--pt-s3);
+  min-width: 0;
+}
+
+.pt-wordmark {
+  font-family: var(--pt-face-mono);
+  font-size: var(--pt-type-size-label);
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--mv-ink);
+}
+
+.pt-body {
+  display: grid;
+  grid-template-columns: var(--pt-rail-w) minmax(0, 1fr);
+  min-height: 0;
+  align-items: stretch;
+}
+
+.pt-body[data-developer="true"] {
+  grid-template-columns: var(--pt-rail-w) minmax(0, 1fr) var(--pt-dev-rail-w);
+}
+
+.pt-rail {
+  border-right: var(--pt-hair) solid var(--mv-border);
+  padding: var(--pt-s4) 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--pt-s5);
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.pt-rail--right {
+  border-right: none;
+  border-left: var(--pt-hair) solid var(--mv-border);
+  padding: var(--pt-s4);
+  gap: var(--pt-s4);
+}
+
+.pt-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  padding: var(--pt-s4) var(--pt-s5) 0;
+}
+
+/* Every scrolling region owns its own box: the page body never scrolls
+   sideways, and wide content (a receipt's source, a raw frame) scrolls inside
+   itself. */
+.pt-scroll-y {
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.pt-scroll-x {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+/* ── Type ───────────────────────────────────────────────────────────────── */
+
+.pt-lbl {
+  font-family: var(--pt-face-mono);
+  font-size: 10px;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--mv-faint);
+  margin: 0 0 var(--pt-s2);
+}
+
+.pt-mono {
+  font-family: var(--pt-face-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--pt-type-size-label);
+  color: var(--mv-muted);
+}
+
+.pt-num {
+  font-family: var(--pt-face-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--mv-ink);
+  font-weight: 500;
+}
+
+.pt-num.is-breach {
+  color: var(--mv-danger);
+}
+
+/* ── Transcript stream ──────────────────────────────────────────────────── */
+
+.pt-stream {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Left-aligned grid, not a centred column: gutter carries the role, the
+   content column carries the line and its receipt. */
+.pt-turn {
+  display: grid;
+  grid-template-columns: var(--pt-gutter-w) minmax(0, 1fr);
+  gap: var(--pt-s4);
+  padding: var(--pt-s3) 0;
+  border-top: var(--pt-hair) solid var(--mv-border-soft);
+  text-align: left;
+}
+
+.pt-turn:first-child {
+  border-top: none;
+}
+
+.pt-role {
+  font-family: var(--pt-face-mono);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--mv-faint);
+  padding-top: var(--pt-s1);
+}
+
+.pt-turn[data-phase="speaking"] .pt-role {
+  color: var(--pt-listening-signal);
+}
+
+/* The spoken line: sans face, reading size. Nothing shrinks it to fit chrome. */
+.pt-said {
+  font-family: var(--pt-face-spoken);
+  font-size: var(--pt-type-size-body);
+  line-height: 1.45;
+  color: var(--mv-text);
+  margin: 0;
+  transition: color var(--motion-base) var(--ease-out),
+    opacity var(--motion-base) var(--ease-out);
+}
+
+.pt-turn[data-phase="speaking"] .pt-said {
+  font-size: var(--pt-type-size-sub);
+  font-weight: 500;
+  color: var(--mv-ink);
+}
+
+.pt-turn[data-phase="spoken"] .pt-said {
+  color: var(--mv-muted);
+}
+
+/* Read-ahead: a buffered sentence is dim and slightly smaller, and it is
+   PRESENT — you can read past the voice. Dimming is opacity, so the theme
+   decides the colour. */
+.pt-turn[data-phase="buffered"] {
+  opacity: 0.55;
+}
+
+.pt-turn[data-phase="buffered"] .pt-said {
+  color: var(--mv-muted);
+}
+
+.pt-said--thinking {
+  font-style: italic;
+  color: var(--mv-faint);
+  font-size: var(--pt-type-size-label);
+}
+
+.pt-said--user {
+  color: var(--mv-text);
+}
+
+.pt-chipline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--pt-s2);
+  margin-top: var(--pt-s2);
+}
+
+/* A sentence arrives at --motion-base; its receipt lands 60ms behind it
+   (AppleMotion: "sentence + receipt"). Reduced motion zeroes the delay and
+   the distance below. */
+.pt-arrive {
+  animation: pt-arrive var(--motion-base) var(--ease-out) both;
+}
+
+.pt-arrive--receipt {
+  animation-delay: 60ms;
+}
+
+@keyframes pt-arrive {
+  from {
+    opacity: 0;
+    transform: translateY(var(--mv-rise));
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* ── Latency bar ────────────────────────────────────────────────────────── */
+
+.pt-lat {
+  display: flex;
+  flex-direction: column;
+  gap: var(--pt-s2);
+  margin: var(--pt-s2) 0 var(--pt-s3);
+  transition: opacity var(--motion-slower) var(--ease-out);
+}
+
+.pt-lat.is-fading {
+  opacity: 0;
+}
+
+.pt-lat-row {
+  display: grid;
+  grid-template-columns: var(--pt-gutter-w) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--pt-s3);
+}
+
+.pt-lat-track {
+  height: 3px;
+  background: var(--mv-surface-3);
+  border-radius: 2px;
+  position: relative;
+  overflow: hidden;
+}
+
+.pt-lat-fill {
+  height: 100%;
+  background: var(--pt-listening-signal);
+  border-radius: 2px;
+  transition: width var(--motion-slow) var(--ease-out);
+}
+
+/* The one red in the bar. It means "outside its budget", nothing else. */
+.pt-lat-fill.is-breach {
+  background: var(--mv-danger);
+}
+
+.pt-lat-status {
+  font-family: var(--pt-face-mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--mv-faint);
+  min-width: 4ch;
+  text-align: right;
+}
+
+.pt-lat-status.is-breach {
+  color: var(--mv-danger);
+}
+
+/* The user surface's version of the same bar: shape only, no numbers. */
+.pt-lat--plain .pt-lat-row {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* ── Controls ───────────────────────────────────────────────────────────── */
+
+.pt-btn {
+  font-family: var(--font-sans);
+  font-size: var(--pt-type-size-label);
+  line-height: 1;
+  padding: var(--pt-s2) var(--pt-s3);
+  border-radius: 6px;
+  border: var(--pt-hair) solid var(--mv-border);
+  background: var(--mv-surface);
+  color: var(--mv-text);
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out),
+    transform var(--motion-fast) var(--ease-out);
+}
+
+.pt-btn:hover {
+  background: var(--mv-surface-2);
+  color: var(--mv-ink);
+}
+
+.pt-btn:active {
+  transform: scale(0.985);
+}
+
+.pt-btn--primary {
+  background: var(--mv-accent);
+  border-color: var(--mv-accent);
+  color: var(--mv-accent-contrast);
+}
+
+.pt-btn--primary:hover {
+  background: var(--mv-accent);
+  color: var(--mv-accent-contrast);
+}
+
+.pt-btn--ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--mv-muted);
+}
+
+.pt-btn--ghost:hover {
+  background: var(--mv-surface);
+}
+
+.pt-btn--danger {
+  background: transparent;
+  border-color: var(--mv-danger-border);
+  color: var(--mv-danger);
+}
+
+.pt-btn[aria-pressed="true"] {
+  background: var(--mv-surface-3);
+  color: var(--mv-ink);
+  border-color: var(--mv-border);
+}
+
+.pt-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.pt-btn--icon {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+/* A rail row is a full-width, left-aligned button. No centred lists. */
+.pt-rail-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: var(--pt-s2);
+  width: 100%;
+  padding: var(--pt-s1) var(--pt-s4);
+  background: none;
+  border: none;
+  border-left: 2px solid transparent;
+  font-family: var(--pt-face-mono);
+  font-size: 12px;
+  color: var(--mv-muted);
+  cursor: pointer;
+  text-align: left;
+}
+
+.pt-rail-row:hover {
+  color: var(--mv-ink);
+  background: var(--mv-surface);
+}
+
+.pt-rail-row[aria-pressed="true"],
+.pt-rail-row[aria-current="true"] {
+  color: var(--pt-listening-signal);
+  border-left-color: var(--pt-listening-signal);
+}
+
+.pt-rail-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.pt-rail-group .pt-lbl {
+  padding: 0 var(--pt-s4);
+}
+
+.pt-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--pt-s1);
+  font-family: var(--pt-face-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  padding: 3px 7px;
+  border-radius: 3px;
+  border: var(--pt-hair) solid var(--mv-border);
+  color: var(--mv-muted);
+  background: var(--mv-surface);
+  white-space: nowrap;
+}
+
+.pt-chip--signal {
+  border-color: var(--pt-listening-signal);
+  color: var(--pt-listening-signal);
+  background: transparent;
+}
+
+.pt-chip--danger {
+  border-color: var(--mv-danger-border);
+  color: var(--mv-danger);
+  background: var(--mv-danger-soft);
+}
+
+.pt-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 1px;
+  background: var(--mv-faint);
+  flex: 0 0 auto;
+}
+
+.pt-dot--live {
+  background: var(--pt-listening-signal);
+}
+
+.pt-dot--down {
+  background: var(--mv-danger);
+}
+
+.pt-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--pt-s1);
+  max-width: 340px;
+  text-align: left;
+}
+
+.pt-field > label {
+  font-family: var(--pt-face-mono);
+  font-size: 10px;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--mv-muted);
+}
+
+.pt-field input,
+.pt-field select,
+.pt-field textarea,
+.pt-input {
+  font-family: var(--font-sans);
+  font-size: var(--pt-type-size-label);
+  padding: var(--pt-s2) var(--pt-s3);
+  border-radius: 6px;
+  border: var(--pt-hair) solid var(--mv-border);
+  background: var(--mv-ground);
+  color: var(--mv-ink);
+  width: 100%;
+}
+
+.pt-field input:focus,
+.pt-field select:focus,
+.pt-field textarea:focus,
+.pt-input:focus {
+  outline: none;
+  border-color: var(--mv-accent);
+  box-shadow: 0 0 0 3px var(--mv-accent-soft);
+}
+
+.pt-field .pt-hint {
+  font-size: 11px;
+  color: var(--mv-faint);
+}
+
+/* ── Panels, sections, modals ───────────────────────────────────────────── */
+
+.pt-panel {
+  border: var(--pt-hair) solid var(--mv-border);
+  border-radius: 8px;
+  background: var(--mv-surface);
+  padding: var(--pt-s4);
+  text-align: left;
+}
+
+.pt-section {
+  border-top: var(--pt-hair) solid var(--mv-border);
+  padding-top: var(--pt-s4);
+  text-align: left;
+}
+
+.pt-section:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+.pt-kv {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--pt-s2) var(--pt-s3);
+  align-items: baseline;
+}
+
+.pt-kv dt,
+.pt-kv .pt-k {
+  font-family: var(--pt-face-mono);
+  font-size: 11px;
+  color: var(--mv-muted);
+  margin: 0;
+}
+
+.pt-kv dd,
+.pt-kv .pt-v {
+  font-family: var(--pt-face-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--mv-ink);
+  margin: 0;
+  text-align: right;
+}
+
+.pt-scrim {
+  position: fixed;
+  inset: 0;
+  background: var(--mv-ground);
+  opacity: 0.82;
+  z-index: 40;
+}
+
+.pt-sheet {
+  position: fixed;
+  z-index: 41;
+  top: var(--pt-s6);
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(760px, calc(100vw - var(--pt-s6) * 2));
+  max-height: calc(100vh - var(--pt-s6) * 2);
+  overflow-y: auto;
+  background: var(--mv-ground);
+  border: var(--pt-hair) solid var(--mv-border);
+  border-radius: 10px;
+  padding: var(--pt-s5);
+  text-align: left;
+  animation: pt-arrive var(--motion-slow) var(--ease-out) both;
+}
+
+.pt-sheet--drawer {
+  left: auto;
+  right: var(--pt-s5);
+  transform: none;
+  width: min(420px, calc(100vw - var(--pt-s5) * 2));
+}
+
+.pt-sheet-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--pt-s3);
+  margin-bottom: var(--pt-s4);
+}
+
+.pt-h2 {
+  font-family: var(--font-sans);
+  font-size: var(--pt-type-size-head);
+  font-weight: 600;
+  color: var(--mv-ink);
+  margin: 0;
+}
+
+.pt-h3 {
+  font-family: var(--font-sans);
+  font-size: var(--pt-type-size-sub);
+  font-weight: 500;
+  color: var(--mv-ink);
+  margin: 0 0 var(--pt-s2);
+}
+
+.pt-note {
+  font-size: 12px;
+  color: var(--mv-faint);
+  margin: 0;
+}
+
+.pt-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--pt-s3);
+  padding: var(--pt-s2) var(--pt-s4);
+  border: var(--pt-hair) solid var(--mv-danger-border);
+  background: var(--mv-danger-soft);
+  color: var(--mv-danger);
+  border-radius: 6px;
+  font-size: var(--pt-type-size-label);
+}
+
+/* ── Developer surfaces: frame log, budgets, receipt source ─────────────── */
+
+.pt-log {
+  font-family: var(--pt-face-mono);
+  font-size: 11px;
+  border-top: var(--pt-hair) solid var(--mv-border);
+}
+
+.pt-log-row {
+  display: grid;
+  grid-template-columns: 2px 78px 18px minmax(0, 132px) minmax(0, 1fr);
+  gap: var(--pt-s2);
+  align-items: center;
+  height: 26px;
+  border-bottom: var(--pt-hair) solid var(--mv-border-soft);
+  background: none;
+  border-left: none;
+  border-right: none;
+  border-top: none;
+  width: 100%;
+  padding: 0;
+  color: var(--mv-muted);
+  cursor: pointer;
+  text-align: left;
+}
+
+.pt-log-row:hover {
+  background: var(--mv-surface);
+}
+
+.pt-log-row[aria-pressed="true"] {
+  background: var(--mv-surface-2);
+  color: var(--mv-ink);
+}
+
+.pt-log-bar {
+  height: 100%;
+  background: transparent;
+}
+
+.pt-log-row[aria-pressed="true"] .pt-log-bar {
+  background: var(--pt-listening-signal);
+}
+
+.pt-log-name {
+  color: var(--mv-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pt-log-payload {
+  color: var(--mv-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pt-pre {
+  font-family: var(--pt-face-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--mv-text);
+  background: var(--mv-surface);
+  border: var(--pt-hair) solid var(--mv-border);
+  border-radius: 6px;
+  padding: var(--pt-s3);
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre;
+}
+
+/* ── Theme toggle (ported from AgentWorth packages/ui/ThemeToggle.tsx) ──── */
+
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: var(--pt-hair) solid var(--mv-border);
+  border-radius: 7px;
+  background: var(--mv-surface);
+}
+
+.theme-toggle button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--mv-muted);
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+
+.theme-toggle button:hover {
+  color: var(--mv-ink);
+}
+
+.theme-toggle button[aria-pressed="true"] {
+  background: var(--mv-surface-3);
+  color: var(--mv-ink);
+}
+
+.pt-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ── Reduced motion ─────────────────────────────────────────────────────── */
+
+/* AppleMotion's contract: distance goes to zero, the crossfade stays, and a
+   cut stays a cut. --mv-rise and --stagger-step are already zeroed by
+   tokens.css; these rules kill the remaining travel and the receipt's
+   deliberate 60ms lag. */
+@media (prefers-reduced-motion: reduce) {
+  .pt-arrive,
+  .pt-sheet {
+    animation-duration: var(--pt-motion-reducedMotion-crossfade);
+    animation-name: pt-fade;
+  }
+
+  .pt-arrive--receipt {
+    animation-delay: 0ms;
+  }
+
+  .pt-lat-fill,
+  .pt-said,
+  .pt-btn {
+    transition-duration: var(--pt-motion-reducedMotion-crossfade);
+    transition-property: opacity, color, background;
+  }
+}
+
+@keyframes pt-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
