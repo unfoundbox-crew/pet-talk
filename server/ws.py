@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import collections
 import importlib
 import importlib.util
 from dataclasses import dataclass, field
@@ -30,6 +31,10 @@ router = APIRouter()
 
 EYES_MODULE = "server.eyes"
 MAX_PCM_BYTES = 32 * 1024 * 1024
+#: Barged turn ids remembered at once. Bounded so a socket that barges all
+#: night cannot grow the set without end; the newest ids are the ones that
+#: matter, because only a turn that has not started yet can still be racing.
+MAX_BARGED_IDS = 64
 
 
 @dataclass
@@ -41,6 +46,14 @@ class Session:
     turn_tasks: dict[str, asyncio.Task] = field(default_factory=dict)
     active_tasks: set[asyncio.Task] = field(default_factory=set)
     turn_persona: dict[str, Persona] = field(default_factory=dict)
+    #: Turn ids a barge has killed. A barge can arrive before the turn task
+    #: exists; the turn checks this set before its first await and gives up.
+    barged: set[str] = field(default_factory=set)
+    #: Tasks the last barge actually cancelled — the honest receipt.
+    last_barge_cancelled: int = 0
+    _barged_order: collections.deque = field(
+        default_factory=lambda: collections.deque(maxlen=MAX_BARGED_IDS)
+    )
     turn_id: str = field(default_factory=new_turn_id)
     chunks: list[bytes] = field(default_factory=list)
 
@@ -48,6 +61,28 @@ class Session:
         self.active_tasks.add(task)
         task.add_done_callback(self.active_tasks.discard)
         return task
+
+    def mark_barged(self, turn_id: str) -> None:
+        """Remember a killed turn id, bounded to ``MAX_BARGED_IDS``."""
+        if turn_id in self.barged:
+            return
+        if len(self._barged_order) == self._barged_order.maxlen:
+            self.barged.discard(self._barged_order[0])
+        self._barged_order.append(turn_id)
+        self.barged.add(turn_id)
+
+    def start_turn(self, turn_id: str, coro_factory) -> asyncio.Task:
+        """Create a turn task and register it SYNCHRONOUSLY.
+
+        Registration used to happen inside the turn coroutine, after an
+        await — so a barge arriving in that window found ``turn_tasks``
+        empty and was lost. Registering here, in the same tick as
+        ``create_task``, closes that window; ``barged`` closes the rest of
+        it (the barge that beats the coroutine's first line).
+        """
+        task = asyncio.create_task(coro_factory(), name=f"turn:{turn_id}")
+        self.turn_tasks[turn_id] = task
+        return self.track(task)
 
     async def barge(self, ref: Optional[str] = None, exclude: Optional[str] = None) -> int:
         """Kill playback: cancel the live turn, then flush. Returns dropped.
@@ -62,10 +97,16 @@ class Session:
             targets.append(self.turn_tasks.pop(ref))
         else:
             for tid in [t for t in self.turn_tasks if t != exclude]:
+                self.mark_barged(tid)
                 targets.append(self.turn_tasks.pop(tid))
+        if ref and ref != exclude:
+            # Mark the id even when no task is registered yet: a turn whose
+            # task has not reached its first line still has to die.
+            self.mark_barged(ref)
         for task in targets:
             if not task.done():
                 task.cancel()
+        self.last_barge_cancelled = len(targets)
         dropped = await self.queue.flush()
         log.info(
             "barge ref=%s exclude=%s cancelled=%d dropped=%d",
@@ -169,21 +210,20 @@ async def _on_user_stop(session: Session, msg: dict[str, Any]) -> None:
     await session.supersede(turn_id)
     # Fire and forget: STT runs inside the task, so the reader loop stays free
     # for a mid-turn barge.
-    session.track(
-        asyncio.create_task(
-            handle_turn_task(
-                session.ws,
-                turn_id,
-                None,
-                session.queue,
-                session.turn_tasks,
-                active_persona=persona,
-                on_cancel=session.cancel_others,
-                audio=audio,
-                sample_rate=sample_rate,
-            ),
-            name=f"turn:{turn_id}",
-        )
+    session.start_turn(
+        turn_id,
+        lambda: handle_turn_task(
+            session.ws,
+            turn_id,
+            None,
+            session.queue,
+            session.turn_tasks,
+            active_persona=persona,
+            on_cancel=session.cancel_others,
+            audio=audio,
+            sample_rate=sample_rate,
+            barged=session.barged,
+        ),
     )
 
 
@@ -198,19 +238,18 @@ async def _on_user_text(session: Session, msg: dict[str, Any]) -> None:
     session.turn_persona[turn_id] = persona
     await session.supersede(turn_id)
     await safe_send_json(session.ws, frame("transcript.user", turn_id, text=text))
-    session.track(
-        asyncio.create_task(
-            handle_turn_task(
-                session.ws,
-                turn_id,
-                text,
-                session.queue,
-                session.turn_tasks,
-                active_persona=persona,
-                on_cancel=session.cancel_others,
-            ),
-            name=f"turn:{turn_id}",
-        )
+    session.start_turn(
+        turn_id,
+        lambda: handle_turn_task(
+            session.ws,
+            turn_id,
+            text,
+            session.queue,
+            session.turn_tasks,
+            active_persona=persona,
+            on_cancel=session.cancel_others,
+            barged=session.barged,
+        ),
     )
 
 

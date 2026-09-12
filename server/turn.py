@@ -247,16 +247,36 @@ async def handle_turn_task(
     on_cancel: Optional[BargeFn] = None,
     audio: Optional[bytes] = None,
     sample_rate: int = 16000,
+    barged: Optional[set] = None,
 ) -> None:
     """Run one turn as a cancellable task so barge can kill it mid-flight.
 
     Providers are snapshotted once, here, and used for the whole turn: a
     ``POST /settings`` landing halfway cannot swap TTS out from under the
     sentence being spoken.
+
+    ``barged`` is the socket's set of turn ids a barge has already killed. A
+    barge that lands between ``create_task`` and this coroutine's first line
+    has no task to cancel, so it marks the id instead — checked here before
+    any await, and again before the pipeline starts, so such a turn never
+    speaks. Cancellation alone cannot cover it: there is nothing running yet
+    to cancel.
     """
+    if barged is not None and turn_id in barged:
+        barged.discard(turn_id)
+        log_ = TurnLog(path=TURNS_PATH)
+        log_.start(turn_id, {})
+        log_.end(path="interrupted", chars=0, sentences=0)
+        await safe_send_json(ws, frame("agent.done", turn_id, path="interrupted"))
+        return
     providers = providers or await runtime.snapshot_under_lock()
     log_ = TurnLog(path=TURNS_PATH)
     log_.start(turn_id, providers.class_names())
+    if barged is not None and turn_id in barged:
+        # A barge landed while we were waiting on the swap lock.
+        log_.end(path="interrupted", chars=0, sentences=0)
+        await safe_send_json(ws, frame("agent.done", turn_id, path="interrupted"))
+        return
     task = asyncio.ensure_future(
         _turn_pipeline(
             ws,
@@ -286,3 +306,5 @@ async def handle_turn_task(
         await send_error(ws, turn_id, reason, str(e))
     finally:
         turn_tasks.pop(turn_id, None)
+        if barged is not None:
+            barged.discard(turn_id)

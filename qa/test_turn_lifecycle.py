@@ -242,6 +242,97 @@ class TestBargeCancelsInFlightTurn(unittest.IsolatedAsyncioTestCase):
         print(f"    buffer ahead: high_water={queue.high_water}, spoken={len(spoken)}")
 
 
+class TestBargeBeforeTheTurnRegisters(unittest.IsolatedAsyncioTestCase):
+    """A barge that lands before the turn task registers must still kill it.
+
+    Registration used to happen inside the turn coroutine, after an await, so
+    a barge in that window found ``turn_tasks`` empty, cancelled nothing, and
+    the turn went on speaking after the ack.
+    """
+
+    async def _session(self, providers):
+        from server import ws as ws_module
+
+        session = ws_module.Session(ws=fake_ws())
+        self._patched = ws_module
+        self._old_snapshot = ws_module.runtime.snapshot_under_lock
+
+        async def _snapshot():
+            return providers
+
+        ws_module.runtime.snapshot_under_lock = _snapshot
+        self.addCleanup(
+            setattr, ws_module.runtime, "snapshot_under_lock", self._old_snapshot
+        )
+        return session
+
+    async def test_barge_with_no_yield_between_cancels_the_turn(self):
+        from server import ws as ws_module
+
+        providers = ProviderSet(
+            stt=StubSTT(),
+            llm=FastLLM(["First answer sentence.", "Second answer sentence."]),
+            tts=SlowTTS(delay_s=0.3),
+        )
+        session = await self._session(providers)
+        turn_id = "t-race-1"
+
+        # No await between the two handlers beyond what the handlers do
+        # themselves: this is exactly the reader loop's tightest window.
+        await ws_module._on_user_text(
+            session, {"type": "user.text", "turn_id": turn_id, "text": "research this"}
+        )
+        await ws_module._on_barge(session, {"type": "barge", "turn_id": turn_id})
+
+        self.assertEqual(
+            session.last_barge_cancelled,
+            1,
+            "barge cancelled nothing — the turn task was not registered in time",
+        )
+        ack_index = max(
+            i for i, f in enumerate(sent_frames(session.ws))
+            if f.get("type") == "state.listening" and "barged_turn" in f
+        )
+        # Let anything still running have its chance to misbehave.
+        await asyncio.sleep(0.05)
+        await session.shutdown()
+        after_ack = sent_frames(session.ws)[ack_index + 1:]
+        self.assertEqual(
+            [f for f in after_ack if f.get("type") == "agent.sentence"],
+            [],
+            f"a barged turn spoke after the ack: {[f.get('type') for f in after_ack]}",
+        )
+
+    async def test_a_barge_marked_id_never_speaks_even_with_no_task(self):
+        """The other half: ``barged`` catches the turn whose task has not run."""
+        providers = ProviderSet(
+            stt=StubSTT(),
+            llm=FastLLM(["Should never be spoken."]),
+            tts=SlowTTS(delay_s=0.01),
+        )
+        ws = fake_ws()
+        turn_tasks: dict = {}
+        barged = {"t-race-2"}
+        await handle_turn_task(
+            ws,
+            "t-race-2",
+            "research this",
+            SpeakQueue(),
+            turn_tasks,
+            active_persona=TEST_PERSONA,
+            providers=providers,
+            barged=barged,
+        )
+        types = [f.get("type") for f in sent_frames(ws)]
+        self.assertNotIn("agent.sentence", types, types)
+        self.assertIn("agent.done", types, types)
+        self.assertEqual(
+            [f.get("path") for f in sent_frames(ws) if f.get("type") == "agent.done"],
+            ["interrupted"],
+        )
+        self.assertNotIn("t-race-2", barged, "barged id was not cleared after the turn")
+
+
 class TestSpeakQueueMechanics(unittest.IsolatedAsyncioTestCase):
     async def test_flush_counts_queued_and_inflight(self):
         q = SpeakQueue()
