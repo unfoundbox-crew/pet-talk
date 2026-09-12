@@ -548,6 +548,85 @@ class TestEyesContextReachesTheTurnPrompt(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("EYES CONTEXT", second_prompt)
         self.assertNotIn("INVOICE 42", second_prompt)
 
+    async def test_a_control_turn_consumes_the_context_it_does_not_use(self):
+        """One attachment, exactly one turn — even when that turn is a control.
+
+        The drain used to sit AFTER the control and empty-transcript returns,
+        so "status" or a blank transcript left the OCR text in the queue and a
+        LATER, unrelated turn picked it up. The picture the user attached would
+        have reached a question asked minutes afterwards.
+        """
+        from server.persona import Persona
+        from server.speak_queue import SpeakQueue
+        from server.turn import handle_turn
+
+        eyes_module._provider = EyesProvider(
+            cfg(), engine=StubEngine(text="INVOICE 42 TOTAL 9.00")
+        )
+        await handle_attach(None, attach_frame(), None, send=Collector())
+
+        llm, providers = self._capturing_llm_and_providers()
+        persona = Persona(
+            name="default", voice="af_heart", speed=1.0, stalls=["One moment."],
+            tone="Plain.",
+        )
+        ws = self._fake_ws()
+
+        # 1. A control turn. It builds no prompt at all, so the context cannot
+        #    reach the model here — and must not survive to the next turn.
+        await handle_turn(
+            ws, "t-ctl", "status", SpeakQueue(),
+            active_persona=persona, providers=providers,
+        )
+        self.assertEqual(len(llm.seen), 0, "a control turn called the LLM")
+
+        # 2. An empty transcript. Same contract.
+        await handle_turn(
+            ws, "t-empty", "   ", SpeakQueue(),
+            active_persona=persona, providers=providers,
+        )
+        self.assertEqual(len(llm.seen), 0, "an empty transcript called the LLM")
+
+        # 3. A real turn, later. The OCR text is gone.
+        await handle_turn(
+            ws, "t-real", "anything else", SpeakQueue(),
+            active_persona=persona, providers=providers,
+        )
+        self.assertEqual(len(llm.seen), 1)
+        prompt = llm.seen[0][0]["content"]
+        self.assertNotIn("INVOICE 42", prompt,
+                         "the OCR text leaked into a later, unrelated turn")
+        from server.persona_runtime import OCR_FENCE_OPEN
+
+        self.assertNotIn(OCR_FENCE_OPEN, prompt)
+
+    async def test_a_barge_before_the_turn_starts_clears_the_queue(self):
+        """A discarded turn discards its context, with a named reason.
+
+        ``handle_turn_task`` returns before the pipeline when a barge already
+        marked the id. Nothing drained the queue on that path, so the next turn
+        inherited an attachment the user had already abandoned.
+        """
+        from server.speak_queue import SpeakQueue
+        from server.turn import handle_turn_task
+
+        eyes_module._provider = EyesProvider(
+            cfg(), engine=StubEngine(text="INVOICE 42 TOTAL 9.00")
+        )
+        await handle_attach(None, attach_frame(), None, send=Collector())
+        self.assertTrue(eyes_module.get_provider()._pending_context,
+                        "fixture failed: nothing was queued to lose")
+
+        ws = self._fake_ws()
+        await handle_turn_task(
+            ws, "t-barged", "what does it say", SpeakQueue(), {},
+            barged={"t-barged"},
+        )
+        self.assertEqual(
+            eyes_module.get_provider().take_context(), [],
+            "a barged turn left its OCR context for the next turn to inherit",
+        )
+
     @unittest.skipUnless(REAL_ENGINE, "SKIP: PET_TALK_REAL_ENGINE!=1 — this shells the real zrv CLI")
     async def test_real_zrv_attach_then_turn_reaches_the_stub_llm_prompt(self):
         """Real zrv OCRs the PDF fixture; the LLM stays stub (turn budget)."""
