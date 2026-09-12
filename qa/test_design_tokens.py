@@ -54,16 +54,11 @@ KNOWN_UNMIGRATED_HEX_SWIFT = {
     os.path.join(ROOT, "cli", "hotkey", "hud_window.swift"),
     os.path.join(ROOT, "cli", "hotkey", "main.swift"),
 }
-KNOWN_UNMIGRATED_HEX_TSX = {
-    os.path.join(ROOT, "web", "src", "App.tsx"),
-    os.path.join(ROOT, "web", "src", "components", "TelemetryHud.tsx"),
-    os.path.join(ROOT, "web", "src", "components", "EyesAttach.tsx"),
-    os.path.join(ROOT, "web", "src", "components", "PersonaStudio.tsx"),
-    os.path.join(ROOT, "web", "src", "components", "MemoryDrawer.tsx"),
-    os.path.join(ROOT, "web", "src", "components", "AcousticOrb.tsx"),
-    os.path.join(ROOT, "web", "src", "components", "PromptComposer.tsx"),
-    os.path.join(ROOT, "web", "src", "components", "SettingsModal.tsx"),
-}
+# Emptied 2026-09-12 by the UI rebuild (item 5): every web/src/**/*.tsx file
+# listed here now takes its colour from tokens.css / tokens.pet-talk.css through
+# web/src/styles/app.css. The set stays as an empty set rather than being
+# deleted, so re-listing a file is a visible, deliberate act.
+KNOWN_UNMIGRATED_HEX_TSX: set = set()
 
 
 def _load_tokens():

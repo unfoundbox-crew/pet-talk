@@ -47,9 +47,12 @@
 /* ── App frame ──────────────────────────────────────────────────────────── */
 
 .pt-app {
-  min-height: 100vh;
+  /* The page itself never scrolls: the header is fixed height and every
+     region below it scrolls inside its own box. */
+  height: 100vh;
+  overflow: hidden;
   display: grid;
-  grid-template-rows: var(--pt-header-h) 1fr;
+  grid-template-rows: var(--pt-header-h) minmax(0, 1fr);
   background: var(--mv-ground);
   color: var(--mv-text);
   font-family: var(--font-sans);
@@ -85,6 +88,7 @@
   display: grid;
   grid-template-columns: var(--pt-rail-w) minmax(0, 1fr);
   min-height: 0;
+  overflow: hidden;
   align-items: stretch;
 }
 

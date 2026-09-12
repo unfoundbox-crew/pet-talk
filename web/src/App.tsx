@@ -1156,20 +1156,16 @@ export default function App() {
             queueLength={buffer.sentences.length}
             bufferedCount={aheadCount}
             lastReceipt={lastReceipt}
-          />
+          >
+            <TelemetryHud
+              state={state}
+              metrics={metrics}
+              queueLength={aheadCount}
+              connected={connected}
+            />
+          </DeveloperRail>
         ) : null}
       </div>
-
-      {developer ? (
-        <div style={{ position: "fixed", right: "var(--pt-s5)", bottom: "var(--pt-s5)" }}>
-          <TelemetryHud
-            state={state}
-            metrics={metrics}
-            queueLength={aheadCount}
-            connected={connected}
-          />
-        </div>
-      ) : null}
 
       {showStudio ? (
         <PersonaStudio

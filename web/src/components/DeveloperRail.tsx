@@ -8,7 +8,7 @@
  * greps the user render for `agent.`, `ms`, `stall` and the persona name.
  */
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import type { ReceiptFrame } from "./ReceiptChip";
 import { STALL_BUDGET_MS, FIRST_AUDIO_BUDGET_MS, type TurnTiming } from "../latency";
 import { segmentsFor } from "../latency";
@@ -51,6 +51,7 @@ function pretty(payload: unknown): string {
 }
 
 export function DeveloperRail({
+  children,
   frames,
   timing,
   personaName,
@@ -59,6 +60,8 @@ export function DeveloperRail({
   bufferedCount,
   lastReceipt,
 }: {
+  /** The telemetry HUD, mounted inside the rail rather than floating over it. */
+  children?: ReactNode;
   frames: LoggedFrame[];
   timing: TurnTiming;
   personaName: string;
@@ -73,6 +76,8 @@ export function DeveloperRail({
 
   return (
     <aside className="pt-rail pt-rail--right" data-testid="developer-rail">
+      {children ? <section className="pt-section">{children}</section> : null}
+
       <section className="pt-section">
         <p className="pt-lbl">budgets this turn</p>
         <div className="pt-kv">
