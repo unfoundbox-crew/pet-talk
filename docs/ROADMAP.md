@@ -1,118 +1,89 @@
-# Pet-Talk — Master Roadmap & Evolution Plan
-
-This roadmap tracks the completed milestones and forward-looking evolution of **Pet-Talk** from an initial voice loop prototype into a sovereign ambient agent companion.
-
+---
+title: pet-talk roadmap
+product: pet-talk
+version: 1.0.0
+status: living
+updated: 2026-09-12
+horizon: 2026-Q4
 ---
 
-## 1. Wave Status Matrix
+## Now (this week)
 
-| Wave | Theme | Focus | Status |
-| :--- | :--- | :--- | :--- |
-| **Wave 1** | The Foundation | Full-duplex WebSocket loop, personas (Donna, Zuck), deterministic humanizer, QA test harness. | **SHIPPED** |
-| **Wave 2** | Ambient Presence | Native Carbon hotkey (`Option + Tab`), MacBook Notch Dynamic Island HUD, sub-2ms earcons, universal dictation matrix, sub-second latency, kill switch & pause mode. | **SHIPPED** |
-| **Wave 3** | Audio Streaming & Sovereign Edge | WebRTC / Opus duplex streaming, local on-device small LLMs (MLX/Ollama), acoustic echo cancellation (AEC), voice activity classification. | **UP NEXT** |
-| **Wave 4** | Autonomous Brain & Multimodal Context | Long-term episodic memory (`agentworth` indexing), OS-level screen grounding via Accessibility AXTree, multi-agent pet delegation, proactive ambient nudges. | **PLANNED** |
+- [ ] Measure real-engine latency (real STT/LLM/TTS, not stub) — why it matters: every number in `docs/SPEC.md` §9.1 is stub-only, so we don't know actual stall/barge/turn timing — done when: `qa/latency.py` runs against `STT_PROVIDER=deepgram LLM_PROVIDER=<real> TTS_PROVIDER=kokoro` and the numbers land in SPEC.md replacing "NOT MEASURED".
+- [ ] Ship cockpit token UX — why it matters: a first-run web user has no confirmed path to find and paste the generated `.qa-scratch/studio.token` value — done when: `web/src/components/SettingsModal.tsx` has a visible "connect" flow that surfaces the token source, verified by opening the cockpit fresh with no `localStorage` entry.
+- [ ] Prove the per-turn queue buffers ≥4-5 sentences under sustained real TTS — why it matters: gate 3 in `docs/SPEC.md` §9.2 is only partially exercised by `StubLLM`'s hardcoded 3 sentences — done when: a `qa/test_turn_lifecycle.py` fixture streams an unbounded answer against real or slow-TTS timing and asserts no gap past the 4th sentence.
+- [ ] Prove `PET_TALK_AX=1` grounding live — why it matters: `server/grounding.py` shells out to `pet-talk-hotkey ax`, which now exists in `main.swift` but has only been typechecked, and it needs the Accessibility permission — done when: one turn prompt carries a "Screen:" line on this Mac and qa holds a dated manual receipt.
+- [ ] Add PDF OCR test coverage — why it matters: `eyes.py`'s PDF path (`pdf_max_pages=5`) has zero fixture coverage — done when: `qa/test_eyes.py` includes a real PDF fixture exercising `task_for()` forcing `transcribe`.
 
----
+## Next (this month)
 
-## 2. Shipped Milestones (Waves 1 & 2 Receipts)
+- [ ] Land `cli/hotkey/build.sh` on the air lane — why it matters: `make build-hotkey` fails today with no script — done when: `make build-hotkey` succeeds via `ssh air` and produces `bin/pet-talk-hotkey`.
+- [ ] WebRTC/Opus duplex audio streaming — why it matters: current PCM16-over-WS has packetization overhead against the 400ms first-audio target — done when: a streaming STT session receives phonemes continuously without waiting for endpointing, measured against the target in `docs/SPEC.md`.
+- [ ] Acoustic echo cancellation for built-in speaker + open mic — why it matters: Donna's own speech can falsely re-trigger STT or cancel playback — done when: `kAudioUnitSubType_VoiceProcessingIO` is wired and a bleed test shows no false re-trigger.
+- [ ] Measure Kokoro real per-word timing, or document the estimate gap loudly in the cockpit UI — why it matters: any word-highlight UI on Kokoro audio is highlighting a guess (`estimated: true`) — done when: either Kokoro reports real timestamps or the cockpit visibly marks estimated words.
 
-### Wave 1: Core Voice Loop & Persona Architecture
-- **Full-Duplex WebSocket Server** (`server/app.py`):
-  - Async WebSocket protocol (`/ws`) supporting bidirectional audio frame streaming (`user.audio_chunk`, `agent.sentence`, `barge`).
-  - Two-tier worker lanes: FAST lane (instant stall audio playback) and WORKER lane (streaming sentence generation).
-- **Persona Instruction Specifications** (`personas/`):
-  - 12-field deterministic persona schemas (`donna.md`, `zuck.md`, `jarvis.md`).
-- **Humanizer Engine** (`humanizer/`):
-  - Deterministic fillers, conversational breath markers, and speech rate modulation.
-- **TDD Quality Harness** (`qa/`):
-  - Hermetic test suites guaranteeing SLA budgets (turn <= 800ms, stall <= 400ms, barge <= 100ms).
+## Later (this quarter)
 
-### Wave 2: Sensory Ambient Presence & High-Performance Hotkey
-- **Hardware Notch Dynamic Island HUD** (`cli/hotkey/hud_window.swift`):
-  - Physical camera notch envelope (`auxiliaryTopLeftArea` / `auxiliaryTopRightArea`), squircle curvature (r=20px), concave ear fillets (r=10px).
-  - Apple fluid spring physics ("The Drip" entrance, "Suction" retraction, 3-cycle error shake).
-  - Non-activating panel (`.nonactivatingPanel`, zero keyboard focus stealing from IDE or terminal).
-  - Live Acoustic Visualizer: Real-time RMS and Peak amplitude rendered dynamically without fake looping animations.
-  - Multi-line dynamic height expansion (60px -> 76px -> 96px -> 110px clamp) with semantic breadcrumb sanitization.
-- **Native macOS Global Hotkey** (`cli/hotkey/main.swift`):
-  - Carbon `RegisterEventHotKey` on keycode 48 (`kVK_Tab`) with modifier `0x0800` (`optionKey`).
-  - Zero Accessibility/TCC permission prompts required.
-  - Sub-2ms instant barge-in kill via Darwin `libproc` process scanning and `SIGKILL`.
-- **Smart Kill Switch & Pause/Sleep Mode**:
-  - Single-tap `Option + Tab` when active: cuts audio in <2ms, terminates `pet-talk-cli`, dismisses HUD capsule without restarting turn.
-  - Double-tap `Option + Tab` ($\le$ 350ms): toggles persistent Pause / Sleep Mode.
-  - Dedicated shortcut: `Option + Shift + Tab` for instant Pause / Resume toggle.
-  - CLI subcommands: `pet-talk-hotkey kill`, `pause`, `resume`, `toggle`, `status`.
-- **Sub-Second Voice Latency & Conversational Conciseness**:
-  - LLM default switched to Groq LPU (`groq/compound-mini`, TTFT ~210ms).
-  - Prompt verbosity clamped to <= 20 spoken words, 1–2 punchy sentences.
-  - `VoiceProseFormatter`: strips markdown asterisks, backticks, code fences, and bullet points.
-  - Pre-cached stall audio in RAM at startup (`_STALL_AUDIO_CACHE`) for 0ms synthesis overhead.
-  - Deterministic control fast-path (<50ms for "status", "stop", "who are you").
-- **Universal Dictation Matrix & Clean Prose**:
-  - Swappable STT providers: Deepgram Nova-3, Groq Whisper LPU, OpenAI Whisper, WhisperKit CoreML, MLX Whisper, SenseVoice fleet.
-  - `CleanProseFormatter`: strips fillers ("uh", "um"), cleans repeated stutters, formats code tokens (`app.py`, `git commit`).
-  - Wispr Flow style cursor paste injection (`Cmd+V` via `CGEvent`).
-- **Acoustic Earcon Engine** (`cli/hotkey/earcons.swift`):
-  - Pre-cached NSSound in RAM (<2ms latency): `Tink.aiff`, `Pop.aiff`, `Bottle.aiff`, `Basso.aiff`.
+- [ ] On-device small LLM (Apple MLX) — why it matters: removes network egress and per-token cost for the common case — done when: a quantized 3B-class model runs locally at >65 tok/s within 2.5GB unified memory and passes `qa/test_providers.py` as a provider.
+- [ ] Long-term episodic memory beyond the session-scoped ledger — why it matters: past decisions aren't grounded across days today — done when: a local store (SQLite or similar) indexes past turns and `grounding.py` can pull from it.
+- [ ] Multi-agent delegation from a turn (Donna dispatches a background subagent) — why it matters: long tasks currently block the voice loop — done when: a turn can spawn a background task and deliver a one-sentence spoken summary on completion without blocking new turns.
+- [ ] AX-based selected-text / terminal-buffer grounding beyond the current app/window/selection snapshot — why it matters: `pet-talk-hotkey ax` only returns a coarse snapshot — done when: grounding can pull a terminal pane's visible buffer or an editor's selection into the prompt automatically.
 
----
+## Not doing (and why)
 
-## 3. Wave 3: Audio Streaming & Sovereign Edge (Next Up)
+- HyperFrames or any third-party video framework — repo law (`~/code/CLAUDE.md`): video work runs on the MotionVector DocIR pipeline, never HyperFrames. pet-talk has no video surface, but this stays explicit so nobody adds one via a third-party framework.
+- A machine-wide kill switch — pet-talk's kill switch (`pet-talk-hotkey kill`) is process-scoped by design; a machine-wide switch is out of scope for a voice-loop daemon.
+- Hardcoded fleet hosts — provider base URLs come from env/settings only (`docs/SPEC.md` §5, §6.1 egress allowlist); a hardcoded fleet IP was already removed once (commit `16d923a`) and stays removed.
 
-### 3.1 WebRTC / Opus Audio Streaming Loop
-- **Problem**: Current audio capture buffers PCM16 in small chunks and sends WAV over WebSocket, creating slight turn-taking packetization overhead.
-- **Architecture**:
-  - Implement bidirectional Opus-encoded WebRTC audio channel or streaming raw PCM WebSockets.
-  - Server-side streaming STT: stream phonemes into STT session continuously without waiting for speech endpointing.
-- **Target SLA**: First synthesized audio phoneme within 400ms of user speech completion.
+## Shipped
 
-### 3.2 Acoustic Echo Cancellation (AEC) & Hardware Mic Decoupling
-- **Problem**: When Donna speaks through MacBook built-in speakers while the mic is open, acoustic bleed can falsely re-trigger STT or cancel playback.
-- **Architecture**:
-  - Native macOS AudioUnit Voice-Processing I/O (`kAudioUnitSubType_VoiceProcessingIO`) with built-in Darwin hardware AEC.
-  - Software spectral subtraction fallback when external Bluetooth headphones (AirPods) or external mics are used.
+| Date | Item | Commit |
+| --- | --- | --- |
+| 2026-09-12 | Studio token wired through CLI client and web cockpit | `97cdd69` |
+| 2026-09-12 | Studio token sent on WS handshake, never printed in the URL log line | `9e79546` |
+| 2026-09-12 | Per-turn queue, cancellable synth, named route failure, safe delete | `962acda` |
+| 2026-09-12 | Barge lifecycle test against the real `Session`, not an inline copy | `6ad873b` |
+| 2026-09-12 | Bounded stall cache, quantised client speed, dropped per-turn persona leak | `391daa4` |
+| 2026-09-12 | Empty LLM stream surfaces `agent.error llm_no_sentences` instead of a fake-green turn | `ceae019` |
+| 2026-09-12 | Barge arriving before turn task registers is no longer lost | `1d6382a` |
+| 2026-09-12 | Studio token required on every mutating route; egress allowlist on `base_url` | `b20133c` |
+| 2026-09-12 | `/settings` redaction matches contract; hardcoded fleet IP dropped from SenseVoice default | `16d923a` |
+| 2026-09-12 | Settings hot-swap supplies a key correctly; fail-closed swap confirmed as intended | `74cfce1` |
+| 2026-09-12 | TECH-SPEC/TECH-DESIGN/SPEC merged into one contract, synced to current code | `5b71112` |
+| 2026-09-12 | Async turn loop, real speak queue, `app.py` split into modules (lane merge) | `2e03367` |
+| 2026-09-12 | Speech pipeline split out of `turn.py` | `92d4b79` |
+| 2026-09-12 | Base URL / model env chains fixed, `LITELLM_BASE_URL` takes precedence | `0c6f1c0` |
+| 2026-09-12 | AX grounding honours the 300ms budget, `swallowed()` unbroken | `14207f9` |
+| 2026-09-12 | Bounded QA runner kills the whole process group on timeout | `a29476a` |
+| 2026-09-12 | `providers/llm.py` rebuilt after a duplicated module body | `88d99ab` |
+| 2026-09-12 | Agent worktrees ignored in git | `5b83aee` |
+| 2026-09-12 | Eyes suite added to the QA gate | `eabae29` |
+| 2026-09-12 | Providers package, fail-closed factories, `word_times` (lane merge) | `b9dc4ec` |
+| 2026-09-12 | Providers unreachable-host test uses a closed port, no fleet IP | `3a2f8aa` |
+| 2026-09-12 | No fleet host in tree; LiteLLM base URL from `LITELLM_BASE_URL` | `f47aa80` |
+| 2026-09-12 | Blocking host-specific reachability probe dropped; connect timeout maps to `provider_unreachable` | `3cd5c44` |
+| 2026-09-12 | Built binaries untracked, `Makefile` with `qa`/`build` targets added | `67e6ffe` |
+| 2026-09-12 | `say.sh`/`serve.sh` bounded, silent-capable, no absolute-path surprises | `ddfbe3d` |
+| 2026-09-12 | QA fan-rule + silent audit for hotkey/HUD/earcons suites | `cb57f00` |
+| 2026-09-12 | Hermetic turn-lifecycle gates | `7ee8bea` |
+| 2026-09-12 | Real-engine suite gated, `afplay` test silenced, hardcoded `/tmp` paths dropped | `c09dcd3` |
+| 2026-09-12 | Providers package, fail-closed factories (lane merge) | `697650d` |
+| 2026-09-12 | Event loop unblocked, barge made real, `app.py` split | `25ce0ac` |
+| 2026-09-12 | `redacted_repr` import hoisted to `stt.py` module top | `79f74d5` |
+| 2026-09-12 | QA gate rewritten as an honest, bounded, silent-capable runner | `9bfbcd6` |
+| 2026-09-12 | Runtime/settings/frames/grounding/queue modules added | `65b32bd` |
+| 2026-09-12 | `qa/test_providers.py` added for lane-B fixes | `d0eabf5` |
+| 2026-09-12 | Providers split into a package, hardcoded secrets stripped, `stream()` NameError fixed | `6ffa291` |
+| 2026-09-12 | Zero-vision eyes lane merged | `c22b5bb` |
+| 2026-09-12 | Attach affordance + eyes transcript blocks in the cockpit | `652bf74` |
+| 2026-09-12 | Eyes lane: `server/eyes.py` + hermetic gates | `56a7b58` |
+| earlier (Wave 1) | Full-duplex WS loop, personas, deterministic humanizer, QA harness | pre-`844a685` |
+| earlier (Wave 2) | Native Carbon hotkey, notch HUD, earcons, universal dictation matrix | pre-`844a685` |
 
-### 3.3 On-Device Small Language Models (Apple Silicon Edge)
-- **Problem**: Cloud LLMs (Groq, Anthropic, OpenAI) require internet connectivity and incur network egress.
-- **Architecture**:
-  - Support on-device quantized LLM via Apple MLX (`mlx-lm`) or local Ollama / SpacePilot fleet proxy.
-  - Target model candidates: Llama 3.2 3B Instruct (4-bit), DeepSeek 1.5B Distill, Qwen 2.5 3B.
-  - Memory footprint: < 2.5GB Unified Memory on M-series chips with > 65 tokens/sec generation.
+## Decision log
 
----
-
-## 4. Wave 4: Autonomous Brain & Ambient Grounding (Long-Term)
-
-### 4.1 Long-Term Episodic Grounding (`agentworth` & SQLite Vault)
-- **Problem**: Conversation state is currently session-scoped. When Donna restarts or a turn finishes, past decisions are not persistently grounded across days.
-- **Architecture**:
-  - Local SQLite vector and session store indexing past turns, preferences, projects, and commits.
-  - Post-compaction grounding protocol integration: inject active project context (`git status`, active tasks, Doppler config) on cold wake.
-
-### 4.2 Zero-Vision OS Screen Grounding (Accessibility AXTree)
-- **Problem**: Donna cannot currently see what code or application Saurabh is looking at without burning heavy multimodal vision tokens.
-- **Architecture**:
-  - Query macOS Accessibility API (`AXUIElementCopyAttributeValue`) to extract focused window title, active file path, selected text, or Cursor terminal buffer in pure text (<5ms, 0 visual tokens).
-  - Ambient prompt context: *"Saurabh is currently editing `server/app.py:120` in Cursor and inspecting terminal pane 2"*.
-
-### 4.3 Multi-Agent Pet Fleet & Autonomous Delegation
-- **Problem**: Donna is currently a single conversational agent. Complex tasks (running long test suites, git refactoring) block the voice loop.
-- **Architecture**:
-  - Donna acts as the Chief of Staff dispatcher:
-    ```
-    "Donna, refactor the database queries in auth.py and let me know when tests pass."
-    ```
-  - Donna dispatches a background subagent (via AGY CLI or Herdr multiplexer) and displays a subtle `[Running]` breadcrumb in the physical camera notch.
-  - When the subagent finishes, Donna plays a soft chime and delivers a 1-sentence spoken summary: *"Tests are green on auth.py, commit is ready."*
-
----
-
-## 5. Architectural Non-Negotiables
-
-Across all future milestones, the following rules remain invariant:
-1. **Never steal focus**: The HUD window must remain `.nonactivatingPanel` and never disrupt active typing in editors or terminals.
-2. **Deterministic TDD verification**: No feature merges into `main` without automated tests in `qa/run_all.sh`.
-3. **Monochromatic terminal discipline**: No raw Mermaid blocks or heavy ornate Unicode box art that corrupts terminal rendering.
-4. **Sub-50ms barge-in guarantee**: The user must always be able to cut Donna off cleanly without latency.
+| Date | Decision | Alternatives rejected | Link |
+| --- | --- | --- | --- |
+| 2026-09-12 | One SPEC.md is the contract; TECH-SPEC.md and TECH-DESIGN.md become pointer stubs | Keeping three overlapping docs in sync by hand | `docs/SPEC.md`, commit `5b71112` |
+| 2026-09-12 | `describe` OCR task ships disabled by default (`EYES_DESCRIBE_ENGINE` unset) | Defaulting to `apple-fm` and eating a 100+s hang per screenshot | `docs/SPEC.md` §8 |
+| 2026-09-12 | Egress allowlist on every `*_base_url` in `POST /settings` | Trusting any host a client sends | `docs/SPEC.md` §6.1, commit `b20133c` |

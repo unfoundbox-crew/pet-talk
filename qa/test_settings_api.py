@@ -21,8 +21,12 @@ class TestSettingsApi(unittest.TestCase):
     def setUp(self):
         from fastapi.testclient import TestClient
         from server.app import app
+        from server.auth import STUDIO_TOKEN_HEADER, studio_token
 
-        self.client = TestClient(app)
+        # Mutating routes require the studio token (see server/auth.py and
+        # qa/test_security.py). A local client reads it from
+        # .qa-scratch/studio.token; in-process we ask for it directly.
+        self.client = TestClient(app, headers={STUDIO_TOKEN_HEADER: studio_token()})
 
     def test_get_settings(self):
         r = self.client.get("/settings")
@@ -39,8 +43,11 @@ class TestSettingsApi(unittest.TestCase):
         # Update settings to litellm and stub tts
         payload = {
             "llm_provider": "litellm",
-            "llm_base_url": "http://100.99.50.84:8000/v1",
+            "llm_base_url": "http://127.0.0.1:4000/v1",
             "llm_model": "claude-3-7-sonnet",
+            # Fail-closed: without a key the swap lands as UnavailableLLM with a
+            # named degraded reason, so the test supplies one explicitly.
+            "llm_api_key": "test-key-not-real",
             "tts_provider": "stub",
             "stt_provider": "stub",
         }

@@ -2,20 +2,21 @@
 
 **Document ID**: `SPEC-PET-TALK-004`  
 **Status**: `APPROVED / IMPLEMENTATION-ACTIVE`  
-**Author**: Donna (Chief of Staff & Digital Twin Brain)  
 **Date**: September 11, 2026  
+**Revised**: September 12, 2026 — measured notch width, a real spring, hand-over chord  
+**Verified against code**: September 12, 2026 (`cli/hotkey/hud_window.swift`, `cli/hotkey/main.swift`)  
 **Target Repository**: `unfoundbox-crew/pet-talk`  
 
 ---
 
 ## 1. Executive Summary & The Core Inversion
 
-Traditional desktop voice assistants render arbitrary floating windows that fight macOS system chrome. On modern Apple Silicon MacBooks (M1/M2/M3/M4 Pro & Max), the display features a physical hardware webcam notch ($220\text{px} \times 38\text{px}$).
+Traditional desktop voice assistants render arbitrary floating windows that fight macOS system chrome. On modern Apple Silicon MacBooks the display features a physical hardware webcam notch. Its size is **measured at runtime**, never assumed: `right.minX - left.maxX` of the screen's auxiliary top areas (220 pt on the machine this was verified on, 2026-09-12). A screen that reports no notch gets a 180 pt floating pill instead.
 
 Following the foundational rule of native macOS island engineering—**"Reflect, Don't Host"**—Donna turns the hardware notch from an obstruction into a **living physical anchor**:
 
 1. **Hardware-Software Fusion**: The top edge is flush with `screen.frame.maxY`, enveloping the camera lens module in pitch black (`#000000`), erasing the boundary between glass and display pixels.
-2. **Apple HIG Spring Motion**: Exact Apple physics (`stiffness: 220.0`, `damping: 21.0`, `mass: 1.0`). Interruptible, skippable, snappy.
+2. **Real spring motion**: `stiffness: 220`, `damping: 21`, `mass: 1` — declared once in `DesignTokens.swift`, read by `HUDTokens`, and actually integrated. Interruptible, skippable, snappy. Measured 2026-09-12: 225 ms to 99 % of travel (the 220 ms drip budget), 3.1 % overshoot, fully settled at 527 ms.
 3. **Acoustic Truth**: Replace fake CSS/CoreAnimation loops with **live acoustic energy levels (RMS / FFT)** driven by the physical microphone.
 4. **Zero Mock Code**: Native Swift, compiled via `swiftc -O` into `bin/pet-talk-hotkey`. Zero third-party baggage, zero Electron bloat, sub-50ms latency.
 
@@ -28,17 +29,17 @@ Following the foundational rule of native macOS island engineering—**"Reflect,
 |                            DYNAMIC ISLAND STATE MACHINE                           |
 +-----------------------------------------------------------------------------------+
 
-   [ 1. IDLE / NOTCH TUCKED ]   <--- (Escape or Turn Done)
+   [ 1. IDLE / NOTCH TUCKED ]   <--- (Escape = hard cut, or Turn Done)
          |
          +--- [Mouse Hover] --------> [ 2. HOVER PEEK ] (6px subtle gold shelf)
          |                                  |
-         | (Option + Tab)                   | (Click / Option+Tab)
+         | (Option+Tab)                     | (Click / Option+Tab)
          v                                  v
    [ 3. LISTENING ("The Drip") ] <----------+
          | (Height 38px -> 52px, Emerald Waveform, Live RMS bars)
          v
    [ 4. THINKING ("The Pulse") ]
-         | (220px width, SpacePilot Gold spinning orbit)
+         | (measured notch width, SpacePilot Gold spinning orbit)
          v
    [ 5. SPEAKING / DICTATION ("The Blossom") ]
          | (Expands to 440px x 60px, concave top ear fillets r=10px,
@@ -48,57 +49,119 @@ Following the foundational rule of native macOS island engineering—**"Reflect,
          | (Turn Complete)             | (Network / STT Error)
          v                             v
    [ 6. SUCTION RETRACTION ]     [ ERROR SHAKE ]
-     (Collapses up into notch)     (±3px horizontal shake, Basso chime)
+     (Springs up into the notch)   (±3pt horizontal shake, Basso chime)
+
+   Chords: Option+Tab = ask/kill · Option+Tab twice (<=400ms) = pause
+           Option+Shift+Tab = hand over · Escape = barge (hard cut)
 ```
 
 ---
 
-## 3. Apple Motion Design Language & Exact Tokens
+## 3. Motion: one spring, two drivers
 
-| Event | Mechanism | Tokens & Constraints |
+A `CASpringAnimation` cannot animate an `NSWindow` frame, and the HUD is a window.
+So the same three tokens drive two things:
+
+* **`HUDSpringDriver`** — a damped-spring integrator (semi-implicit Euler on
+  `a = (-k·x - c·v) / m`, 120 Hz) that reports normalized 0 → 1 progress, overshoot
+  included. The panel frame is lerped along it every step. This is what moves the
+  capsule.
+* **`HUDSpring.animation(...)`** — the one place a `CASpringAnimation` is built
+  (stiffness/damping/mass from the tokens, `initialVelocity: 0`). It fades the
+  capsule layer's opacity so content and geometry settle together.
+
+| Event | Mechanism | Tokens & constraints |
 | :--- | :--- | :--- |
-| **Drip Entrance** | Frame height $38\text{px} \rightarrow 52\text{px}$ | `stiffness: 220.0`, `damping: 21.0`, `mass: 1.0` ($220\text{ms}$) |
-| **Island Blossom** | Width $220\text{px} \rightarrow 440\text{px}$, Height $52\text{px} \rightarrow 60\text{px}$ | `CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)` ($240\text{ms}$) |
-| **State Transitions** | Indicator glyph & color morph | $160\text{ms}$ ease-out cubic |
-| **Suction Retraction** | Collapses upward back into physical notch | $180\text{ms}$ ease-in curve |
-| **Error Feedback** | 3-cycle horizontal micro-shake | $\pm 3\text{px}$ over $120\text{ms}$, `Basso.aiff` chime |
-| **Reduce Motion** | `NSWorkspace.accessibilityDisplayShouldReduceMotion` | Zero spatial travel; instant $80\text{ms}$ crossfade |
+| **Drip entrance** | Frame height notch → 52 pt, spring driver + opacity spring | `stiffness: 220`, `damping: 21`, `mass: 1`; measured 225 ms to 99 %, settles 527 ms |
+| **Island blossom** | Width measured-notch → 440 pt, height 52 → 60 pt | same spring, no separate curve |
+| **Suction retraction** | Collapses upward into the physical notch as it fades | same spring (`durationSleepRetract` 180 ms is the budget it lands inside) |
+| **Barge / Escape** | **Hard cut.** Zero animation, zero spring, panel gone on the same run-loop turn | budget 40 ms, measured as instant (no timer involved) |
+| **Error feedback** | `errorShakeCycles` horizontal micro-shakes, decaying | ±3 pt over 120 ms, `Basso.aiff` chime |
+| **Reduce Motion** | `NSWorkspace.accessibilityDisplayShouldReduceMotion` | **Zero spatial travel, time kept**: frame snaps, 80 ms crossfade |
+
+Every number above comes from `cli/hotkey/DesignTokens.swift` (generated from
+`design/tokens.pet-talk.json`) through `HUDTokens`, and every one of them can be
+overridden in `~/.pet-talk/config.yaml` — `motion.spring_stiffness`,
+`motion.spring_damping`, `motion.spring_mass`, `geometry.*`,
+`hotkey.double_tap_window_ms` — so a playground export applies with no rebuild.
 
 ---
 
 ## 4. Geometric Specification & Fillet Math
 
-### Notch Mode (`hasNotch == true`)
-* **Screen Alignment**: `origin.y = screen.frame.maxY - height`.
-* **Notch Core Width**: Exactly matches `right.minX - left.maxX` ($220\text{px}$).
-* **Bottom Corners**: Continuous squircle curvature ($r = 20\text{px}$).
-* **Top Concave Ear Fillets**:
-  $$\text{When } W > \text{notchWidth} + 20\text{px} \implies \text{Fillet Radius } r_{\text{ear}} = 10\text{px}$$
-  Quadratic curve sweeping seamlessly from the top screen bezel into the expanded island wings.
+### Notch mode (`hasNotch == true`)
+* **Resting width**: the measured notch, `right.minX - left.maxX`. No hardcoded
+  width exists in the source — a 14-inch, a 16-inch and a future model each get
+  their own.
+* **Screen alignment**: `origin.y = screen.frame.maxY - height`, centred on the
+  notch rect.
+* **Bottom corners**: continuous squircle, `radiusBottom` = 20 pt.
+* **Top concave ear fillets**: `earFilletRadius(forWidth:notchWidth:)` returns
+  `radiusEarFillet` (10 pt) only when
+  `width > notchWidth + earFilletThreshold` (24 pt), otherwise 0. At exactly
+  notch + 24 pt there are still no ears.
 
-### External Display Mode (`hasNotch == false`)
-* **Symmetrical Floating Pill**:
-  * Centered at `screen.visibleFrame.midX`.
-  * Positioned $12\text{px}$ below menu bar: `origin.y = screen.visibleFrame.maxY - height - 12.0`.
-  * Symmetrical continuous corner radius ($r = \text{height} / 2.0 = 22\text{px}$).
+### External display mode (`hasNotch == false`)
+* **Symmetrical floating pill**, `capsuleWidthRest` = **180 pt** (not the notch
+  width — there is no notch to match).
+  * Centred at `screen.visibleFrame.midX`.
+  * 12 pt below the menu bar: `origin.y = screen.visibleFrame.maxY - height - 12`.
+  * Corner radius `pillCornerRadius` = 22 pt.
 
 ---
 
-## 5. Subagent Fanout Work Breakdown
+## 4a. Gestures
 
-1. **Subagent 1 (`Notch Motion & Interaction Engineer`)**:
-   - Updates `cli/hotkey/hud_window.swift` with exact Apple spring parameters (`stiffness: 220`, `damping: 21`).
-   - Implements hover tracking area (`NSTrackingArea`) for subtle notch peek ($6\text{px}$).
-   - Implements 3-cycle error shake animation ($\pm 3\text{px}$ over $120\text{ms}$).
-   - Implements `Escape` key event monitor for instant $\le 50\text{ms}$ dismiss and barge-kill.
-   - Adds `NSWorkspace.accessibilityDisplayShouldReduceMotion` support.
+| Chord | Meaning | Notes |
+| :--- | :--- | :--- |
+| `Option+Tab` | Ask — start a turn | While a turn is live, a single press is the kill switch |
+| `Option+Tab` twice | Pause / resume (sleep mode) | Within `hotkey.double_tap_window_ms` = 400 ms. **The only pause gesture.** |
+| `Option+Shift+Tab` | **Hand over** to the agent | Was pause until 2026-09-12 |
+| `Escape` | Barge — kill audio, hard-cut the HUD | ≤ 50 ms budget, no animation at all |
 
-2. **Subagent 2 (`Live Acoustic Telemetry Engineer`)**:
-   - Replaces fake looping `CABasicAnimation` bars in `HUDIndicatorView` with **live mic RMS energy levels**.
-   - Accepts real-time normalized audio energy values ($0.0 \dots 1.0$) from the audio capture stream and drives bar heights dynamically.
+Hand-over is emitted the way a wake turn is emitted: the daemon spawns
+`pet-talk-cli handover` (it holds no socket of its own). The CLI turns that into
+one WS frame — the contract for the server lane:
 
-3. **Subagent 3 (`QA Gatekeeper & Verification Lead`)**:
-   - Updates `qa/test_hud.py` to assert new motion tokens, notch specs, and error shake.
-   - Validates clean compilation via `swiftc -O`.
-   - Runs `qa/run_all.sh` asserting all 12 QA gates pass `RESULT: OK`.
-   - Restarts hotkey daemon and captures operational telemetry.
+```json
+{"type": "user.handover", "turn_id": "<uuid4>", "source": "hotkey"}
+```
+
+A CLI that does not know the subcommand exits non-zero; the daemon logs
+`handover_emit_failed` with the exit status and shakes the capsule. It never
+silently succeeds.
+
+---
+
+## 4b. Headless verification
+
+The HUD is never shown to prove it works:
+
+* `pet-talk-hotkey --self-test` (requires `PET_TALK_HEADLESS=1`) exercises the
+  spring integrator (settles, starts at rest, lands exactly on target, overshoots,
+  stays bounded, lands inside the drip budget) and the geometry math (measured
+  width, fallback pill, ear-fillet threshold, height stepping, top-edge anchoring),
+  then asserts no window became visible.
+* `pet-talk-hotkey --dump-state` prints one JSON line: state machine, capsule
+  geometry, spring constants in force, chord map, and the hand-over event shape.
+* `PET_TALK_HEADLESS=1` routes every show path through
+  `HUDController.orderFrontUnlessHeadless()`, so a QA run can never pop the
+  capsule onto the screen someone is working on. The visual `test-hud` /
+  `test-breadcrumbs` sequences are opt-in behind `PET_TALK_HUD_VISUAL=1`.
+
+---
+
+## 5. Where the code is
+
+| Concern | Symbol |
+| :--- | :--- |
+| Spring tokens + config overrides | `HUDTokens` (`hud_window.swift`), defaults from `DesignTokens.swift` |
+| The one `CASpringAnimation` | `HUDSpring.animation(keyPath:from:to:)` |
+| Window-frame spring | `HUDSpringDriver`, `HUDController.springGeometry(...)` |
+| Measured notch | `NotchManager.currentNotch()`, `HUDCapsuleView.measuredNotchWidth()` |
+| Capsule width | `HUDCapsuleView.capsuleWidth` = measured ?? `fallbackCapsuleWidth` |
+| Ear fillets | `HUDCapsuleView.earFilletRadius(forWidth:notchWidth:)` |
+| Hard cut | `HUDController.dismiss(hardCut: true)` |
+| Chords | `HotkeyConfig.hotKeyModifier` / `handoverHotKeyModifier`, `HotkeyListener.handleHotKeyTrigger()` / `handleHandoverHotKeyTrigger()` / `emitHandover()` |
+| Headless guard | `HUDController.isHeadless`, `orderFrontUnlessHeadless()` |
+| Tests | `qa/test_hud.py`, `qa/test_hotkey.py` (both headless) |

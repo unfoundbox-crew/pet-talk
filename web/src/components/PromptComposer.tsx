@@ -1,11 +1,13 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { float32ToBase64Pcm16 } from "../ws";
+import { float32ToBase64Pcm16, studioTokenHeader } from "../ws";
 
 interface PromptComposerProps {
   onSend: (text: string) => void;
   disabled?: boolean;
   connected?: boolean;
   serverUrl?: string;
+  /** Fired on a 401 from POST /transcribe — App shows the shared banner. */
+  onAuthError?: () => void;
   t: Record<string, string>;
 }
 
@@ -14,6 +16,7 @@ export const PromptComposer: React.FC<PromptComposerProps> = ({
   disabled = false,
   connected = true,
   serverUrl,
+  onAuthError,
   t,
 }) => {
   const [text, setText] = useState("");
@@ -165,6 +168,7 @@ export const PromptComposer: React.FC<PromptComposerProps> = ({
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          ...studioTokenHeader(),
         },
         body: JSON.stringify({
           pcm_b64: pcmB64,
@@ -172,6 +176,12 @@ export const PromptComposer: React.FC<PromptComposerProps> = ({
           clean_prose: cleanProse,
         }),
       });
+
+      if (resp.status === 401) {
+        setErrorMessage("studio token missing or wrong");
+        onAuthError?.();
+        return;
+      }
 
       const data = await resp.json();
       if (resp.ok && data.ok && data.text) {

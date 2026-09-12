@@ -36,6 +36,25 @@ public enum EarconTrigger: String, CaseIterable {
 public class EarconEngine {
     public static let shared = EarconEngine()
 
+    /// Optional sink for the "skipped earcon" log line (wired to the daemon's own
+    /// logger by main.swift). Falls back to stderr when unset, e.g. in CLI test paths.
+    public var logSink: ((String) -> Void)?
+
+    /// PET_TALK_SILENT=1 mutes every earcon at the source: the daemon must never
+    /// play audio in that mode, no matter what the on-disk config says.
+    public static var isSilentModeEnv: Bool {
+        return ProcessInfo.processInfo.environment["PET_TALK_SILENT"] == "1"
+    }
+
+    private func logSkippedForSilentMode(_ trigger: EarconTrigger) {
+        let line = "[earcons] skip \(trigger.rawValue): PET_TALK_SILENT=1"
+        if let sink = logSink {
+            sink(line)
+        } else {
+            fputs(line + "\n", stderr)
+        }
+    }
+
     public var isEnabled: Bool = true
     public var volume: Float = 0.70 {
         didSet {
@@ -136,6 +155,12 @@ public class EarconEngine {
     public func prewarm() {
         // AudioServicesCreateSystemSoundID already loads into RAM.
         // Quick no-op dispatch ensures CoreAudio client Mach port is mapped for all sounds.
+        // Silent mode must produce zero audio, prewarm included.
+        guard !EarconEngine.isSilentModeEnv else {
+            let line = "[earcons] skip prewarm: PET_TALK_SILENT=1"
+            if let sink = logSink { sink(line) } else { fputs(line + "\n", stderr) }
+            return
+        }
         for sid in soundIDs.values {
             AudioServicesPlaySystemSound(sid)
         }
@@ -143,6 +168,10 @@ public class EarconEngine {
 
     @discardableResult
     public func play(_ trigger: EarconTrigger) -> (played: Bool, latencyMs: Double, path: String) {
+        guard !EarconEngine.isSilentModeEnv else {
+            logSkippedForSilentMode(trigger)
+            return (false, 0.0, soundPaths[trigger] ?? "")
+        }
         guard isEnabled && soundPack != "none" && volume > 0.0 else {
             return (false, 0.0, soundPaths[trigger] ?? "")
         }

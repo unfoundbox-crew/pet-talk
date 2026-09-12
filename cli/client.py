@@ -8,6 +8,7 @@ Supports:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import select
@@ -24,15 +25,92 @@ from .audio import AudioPlayer, AudioRecorder, EnergyVAD, calculate_rms_and_peak
 
 try:
     from websockets.asyncio.client import connect as ws_connect
-    from websockets.exceptions import ConnectionClosed
+    from websockets.exceptions import ConnectionClosed, InvalidStatus
 except ImportError:
     # websockets may also use older path in some environments
     try:
         from websockets import connect as ws_connect  # type: ignore
         from websockets.exceptions import ConnectionClosed  # type: ignore
+        try:
+            from websockets.exceptions import InvalidStatus  # type: ignore
+        except ImportError:
+            InvalidStatus = Exception  # type: ignore
     except ImportError:
         ws_connect = None  # type: ignore
         ConnectionClosed = Exception  # type: ignore
+        InvalidStatus = Exception  # type: ignore
+
+
+#: Header carrying the studio token (server/auth.py's STUDIO_TOKEN_HEADER).
+STUDIO_TOKEN_HEADER = "X-Studio-Token"
+#: WS close code the server sends when the handshake token is missing/wrong.
+WS_UNAUTHORIZED_CLOSE_CODE = 4401
+
+
+def resolve_studio_token() -> str:
+    """Same order as ``server/auth.py``: env STUDIO_TOKEN -> STUDIO_TOKEN_FILE
+    -> the file the server generates at ``<repo>/.qa-scratch/studio.token``.
+
+    The repo root is found from ``__file__`` (this module lives at
+    ``<repo>/cli/client.py``), not from the current working directory, so
+    the CLI finds the right token regardless of where it's invoked from.
+    """
+    env_token = (os.environ.get("STUDIO_TOKEN") or "").strip()
+    if env_token:
+        return env_token
+
+    token_file = (os.environ.get("STUDIO_TOKEN_FILE") or "").strip()
+    if token_file:
+        try:
+            with open(token_file, encoding="utf-8") as f:
+                token = f.read().strip()
+            if token:
+                return token
+        except OSError:
+            pass
+
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    generated_path = os.path.join(repo_root, ".qa-scratch", "studio.token")
+    try:
+        with open(generated_path, encoding="utf-8") as f:
+            token = f.read().strip()
+        if token:
+            return token
+    except OSError:
+        pass
+
+    return ""
+
+
+def _ws_url_with_token(ws_url: str, token: str) -> str:
+    """``?token=`` fallback for a ``websockets`` build with no header param."""
+    if not token:
+        return ws_url
+    sep = "&" if "?" in ws_url else "?"
+    return f"{ws_url}{sep}token={token}"
+
+
+def _ws_connect_kwargs(token: str) -> dict:
+    """Header kwarg name moved across ``websockets`` releases.
+
+    v14+ uses ``additional_headers``; older releases used ``extra_headers``.
+    Introspect ``ws_connect`` so we send the header on whichever is
+    installed, and fall back to the ``?token=`` query form when neither
+    parameter exists (older websockets, or a callable that hides its
+    signature) — the server accepts both, see server/auth.py.
+    """
+    if not token or ws_connect is None:
+        return {}
+    try:
+        params = inspect.signature(ws_connect).parameters
+    except (TypeError, ValueError):
+        return {}
+    header = {STUDIO_TOKEN_HEADER: token}
+    if "additional_headers" in params:
+        return {"additional_headers": header}
+    if "extra_headers" in params:
+        return {"extra_headers": header}
+    return {}
 
 
 class TerminalInput:
@@ -126,10 +204,38 @@ class PetTalkClient:
         return tid
 
     async def connect(self) -> None:
-        """Establish WebSocket connection to daemon."""
+        """Establish WebSocket connection to daemon.
+
+        Sends the studio token (server/auth.py) as a header when the
+        installed ``websockets`` supports it, else falls back to
+        ``?token=`` on the URL — the server accepts either form.
+        """
         if ws_connect is None:
             raise RuntimeError("websockets library is required: pip install websockets")
-        self._ws = await ws_connect(self.ws_url, max_size=8 * 1024 * 1024)
+        token = resolve_studio_token()
+        kwargs = _ws_connect_kwargs(token)
+        url = self.ws_url if kwargs else _ws_url_with_token(self.ws_url, token)
+        auth_error = RuntimeError(
+            "studio token missing or wrong — set STUDIO_TOKEN (or "
+            "STUDIO_TOKEN_FILE) to the value in .qa-scratch/studio.token"
+        )
+        try:
+            self._ws = await ws_connect(url, max_size=8 * 1024 * 1024, **kwargs)
+        except InvalidStatus as e:
+            # A close() called before accept() (server/ws.py's auth check)
+            # surfaces here as the handshake's rejected HTTP status, not as
+            # a close frame — measured: uvicorn answers 403, but treat any
+            # 401/403 at the handshake as the same "no/bad token" case.
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if status in (401, 403):
+                raise auth_error from e
+            raise
+        except ConnectionClosed as e:
+            rcvd = getattr(e, "rcvd", None)
+            code = rcvd.code if rcvd is not None else None
+            if code == WS_UNAUTHORIZED_CLOSE_CODE:
+                raise auth_error from e
+            raise
         self.player.start()
 
     async def close(self) -> None:
@@ -222,6 +328,14 @@ class PetTalkClient:
             first = await self.recv_frame()
             if not first or first.get("type") != "state.idle":
                 self._log(f"Warning: unexpected initial frame: {first}")
+
+            if getattr(self, "handover", False):
+                # Hand-over chord: tell the server the next turn is delegated work.
+                await self.send_frame({
+                    "type": "user.handover",
+                    "turn_id": uuid.uuid4().hex,
+                    "source": "hotkey",
+                })
 
             # Start recording
             await self.start_recording_turn()
@@ -442,7 +556,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "mode",
         nargs="?",
         default="interactive",
-        choices=["interactive", "once", "tui"],
+        choices=["interactive", "once", "tui", "handover"],
         help="Execution mode: 'interactive' (default TUI) or 'once' (hotkey one-shot)",
     )
     parser.add_argument(
@@ -496,7 +610,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         quiet=args.quiet,
     )
 
-    is_once = args.mode == "once" or args.hotkey_flag
+    is_once = args.mode in ("once", "handover") or args.hotkey_flag
+    client.handover = args.mode == "handover"
 
     def _sig_handler(sig, frame):
         client.player.kill_playback()

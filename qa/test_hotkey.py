@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
-"""qa/test_hotkey.py — TDD test suite for Pet-Talk Native macOS Hotkey Listener.
+"""qa/test_hotkey.py — QA suite for the native macOS hotkey listener.
 
-Verifies:
-1. Swift source compiles cleanly via native `swiftc` without warnings.
-2. Carbon `RegisterEventHotKey` registration with keycode 48 (kVK_Tab) and
-   modifier 0x0800 (optionKey) without requiring Accessibility/TCC prompts.
-3. Sub-50ms instant barge-in kill latency on active audio playback.
-4. Daemon lifecycle management: start, status, stop, and PID tracking.
+Fan rule: this file never runs `swiftc -O` to build a binary — heavy builds
+happen on `ssh air` (see cli/hotkey/build.sh, `make build-hotkey`). Tests
+that need the compiled listener require a prebuilt binary at
+$PET_TALK_HOTKEY_BIN (default: bin/pet-talk-hotkey) and SKIP with a clear
+reason when it is absent.
+
+Silent/safety rule: this file never starts the real daemon, never plays
+audio through afplay, and never SIGKILLs a real playback process — those
+are exactly the things a QA gate must not do to a developer's machine.
+Registration is a single stateless subprocess call (`--check-registration`),
+which is safe to run; daemon lifecycle and barge/afplay behavior are
+verified manually, not by this automated suite.
 """
 from __future__ import annotations
 
@@ -15,56 +21,63 @@ import os
 import shutil
 import subprocess
 import sys
-import time
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SWIFT_SRCS = sorted(glob.glob(os.path.join(ROOT, "cli", "hotkey", "*.swift")))
-BIN_PATH = os.path.join(ROOT, "bin", "pet-talk-hotkey")
-PID_FILE = "/tmp/pet-talk-hotkey.pid"
+BIN_PATH = os.environ.get("PET_TALK_HOTKEY_BIN") or os.path.join(ROOT, "bin", "pet-talk-hotkey")
+HAVE_BIN = os.path.isfile(BIN_PATH) and os.access(BIN_PATH, os.X_OK)
 
 
-class TestHotkeyCompilation(unittest.TestCase):
-    """Verify Swift compilation of native Carbon hotkey listener."""
+# Headless: PET_TALK_HEADLESS=1 keeps every panel off screen while the state
+# machine, springs and geometry still run (Saurabh, 2026-09-12).
+HEADLESS_ENV = dict(os.environ, PET_TALK_HEADLESS="1", PET_TALK_SILENT="1")
 
-    def test_swiftc_compiler_available(self):
-        swiftc = shutil.which("swiftc")
-        self.assertIsNotNone(swiftc, "swiftc compiler must be available on macOS")
 
-    def test_clean_compilation(self):
-        for src in SWIFT_SRCS:
-            self.assertTrue(os.path.exists(src), f"Source file missing: {src}")
-
-        os.makedirs(os.path.dirname(BIN_PATH), exist_ok=True)
-        cmd = ["swiftc", "-O"] + SWIFT_SRCS + ["-o", BIN_PATH]
-        res = subprocess.run(cmd, capture_output=True, text=True)
-
-        self.assertEqual(
-            res.returncode,
-            0,
-            f"Compilation failed with code {res.returncode}:\nStdout: {res.stdout}\nStderr: {res.stderr}",
+def _skip_if_no_bin():
+    if not HAVE_BIN:
+        raise unittest.SkipTest(
+            "SKIP: no prebuilt hotkey binary at %s — build it on `ssh air` via "
+            "`cli/hotkey/build.sh bin/` (or `make build-hotkey`), never here "
+            "(fan rule); set PET_TALK_HOTKEY_BIN to point at it" % BIN_PATH
         )
-        self.assertTrue(os.path.exists(BIN_PATH), f"Compiled binary missing at {BIN_PATH}")
-        self.assertTrue(os.access(BIN_PATH, os.X_OK), "Binary must be executable")
 
-        # Verify Mach-O binary
-        file_check = subprocess.run(["file", BIN_PATH], capture_output=True, text=True)
-        self.assertIn("Mach-O 64-bit", file_check.stdout)
+
+class TestSwiftTypecheck(unittest.TestCase):
+    """Cheap syntax/type check only — never a full `-O` build (fan rule)."""
+
+    def test_typecheck_only(self):
+        if sys.platform != "darwin":
+            raise unittest.SkipTest(
+                "SKIP: not macOS — these sources import AppKit/Carbon, so "
+                "swiftc -typecheck fails on any other platform even when "
+                "swiftc itself is installed (e.g. Linux CI runners)"
+            )
+        swiftc = shutil.which("swiftc")
+        if not swiftc:
+            raise unittest.SkipTest("SKIP: swiftc not available on this host")
+        if not SWIFT_SRCS:
+            raise unittest.SkipTest("SKIP: no cli/hotkey/*.swift sources present yet")
+        res = subprocess.run(["swiftc", "-typecheck"] + SWIFT_SRCS,
+                              capture_output=True, text=True, timeout=60)
+        self.assertEqual(res.returncode, 0,
+                         f"swiftc -typecheck failed:\nStdout: {res.stdout}\nStderr: {res.stderr}")
 
 
 class TestCarbonHotkeyRegistration(unittest.TestCase):
-    """Verify Carbon API registration and configuration."""
+    """Stateless registration check — spawns and exits, no persistent daemon."""
 
     @classmethod
     def setUpClass(cls):
-        if not os.path.exists(BIN_PATH):
-            subprocess.run(["swiftc", "-O"] + SWIFT_SRCS + ["-o", BIN_PATH], check=True)
+        _skip_if_no_bin()
 
     def test_keycode_and_modifier_registration(self):
         res = subprocess.run(
             [BIN_PATH, "--check-registration"],
             capture_output=True,
             text=True,
+            timeout=15,
+            env=HEADLESS_ENV,
         )
         self.assertEqual(res.returncode, 0, f"Registration failed:\n{res.stderr}\n{res.stdout}")
         self.assertIn("48 (kVK_Tab)", res.stdout)
@@ -72,173 +85,217 @@ class TestCarbonHotkeyRegistration(unittest.TestCase):
         self.assertIn("PASS: Carbon RegisterEventHotKey succeeded", res.stdout)
 
 
-class TestBargeInLatency(unittest.TestCase):
-    """Verify instant barge-in kill latency is within the 50ms budget."""
+class TestChordMapping(unittest.TestCase):
+    """Option+Shift+Tab is hand-over; pause is reachable ONLY by a double-tap of
+    Option+Tab inside 400 ms. Static source checks — no daemon, no audio."""
+
+    MAIN_SRC = os.path.join(ROOT, "cli", "hotkey", "main.swift")
 
     @classmethod
     def setUpClass(cls):
-        if not os.path.exists(BIN_PATH):
-            subprocess.run(["swiftc", "-O", SWIFT_SRC, "-o", BIN_PATH], check=True)
+        if not os.path.exists(cls.MAIN_SRC):
+            raise unittest.SkipTest(f"SKIP: {cls.MAIN_SRC} not present yet")
+        with open(cls.MAIN_SRC, "r", encoding="utf-8") as f:
+            cls.src = f.read()
+
+    def test_option_shift_tab_is_handover_not_pause(self):
+        self.assertTrue("handoverHotKeyModifier" in self.src,
+                        "Option+Shift+Tab must be declared as the hand-over chord")
+        self.assertTrue("UInt32(optionKey | shiftKey)" in self.src, "missing: UInt32(optionKey | shiftKey)")
+        leftovers = [ln.strip() for ln in self.src.splitlines() if "pauseHotKeyModifier" in ln]
+        self.assertEqual(leftovers, [], "Option+Shift+Tab must no longer be a pause chord")
+        self.assertTrue("handleHandoverHotKeyTrigger" in self.src, "missing: handleHandoverHotKeyTrigger")
+
+    def test_handover_trigger_emits_a_handover_event_and_never_pauses(self):
+        idx = self.src.find("func handleHandoverHotKeyTrigger")
+        self.assertNotEqual(idx, -1)
+        block = self.src[idx:idx + 600]
+        self.assertNotIn("togglePause", block,
+                         "the hand-over chord must never toggle pause")
+        self.assertIn("emitHandover", block)
+        emit_idx = self.src.find("func emitHandover")
+        self.assertNotEqual(emit_idx, -1, "a named hand-over emitter must exist")
+        emit = self.src[emit_idx:emit_idx + 1800]
+        self.assertIn('"handover"', emit,
+                      "hand-over must be emitted to pet-talk-cli the way a wake turn is")
+
+    def test_pause_is_reachable_only_from_the_double_tap_path(self):
+        import re
+        callers = []
+        for m in re.finditer(r"togglePause\(\)", self.src):
+            # find the enclosing `func <name>` above this call
+            head = self.src[:m.start()]
+            fidx = head.rfind("func ")
+            name = self.src[fidx:fidx + 80].split("(")[0].replace("func ", "").strip()
+            callers.append(name)
+        allowed = {"handleHotKeyTrigger", "togglePause", "startListening", "doToggle"}
+        for name in callers:
+            self.assertIn(name, allowed,
+                          f"togglePause() called from unexpected {name}() — pause must be "
+                          "reachable only via the Option+Tab double-tap (and the explicit "
+                          "pause/resume/toggle subcommands and SIGUSR1)")
+        self.assertIn("handleHotKeyTrigger", callers,
+                      "the double-tap path must still reach togglePause()")
+
+    def test_double_tap_window_is_400ms_from_a_token(self):
+        idx = self.src.find("func handleHotKeyTrigger")
+        block = self.src[idx:idx + 900]
+        self.assertIn("HUDTokens.doubleTapWindowMs", block,
+                      "the double-tap window must read the 400ms token, not a literal")
+        leftovers = [ln.strip() for ln in self.src.splitlines() if "350.0" in ln]
+        self.assertEqual(leftovers, [], "the old 350ms double-tap window must be gone")
+
+    def test_help_text_names_the_new_gestures(self):
+        self.assertTrue("Hand-over" in self.src, "missing: Hand-over")
+        self.assertTrue("Double-tap Option+Tab" in self.src, "missing: Double-tap Option+Tab")
+        leftovers = [ln.strip() for ln in self.src.splitlines()
+                     if "Option+Shift+Tab or double-tap to wake" in ln]
+        self.assertEqual(leftovers, [],
+                         "paused breadcrumb must no longer advertise Option+Shift+Tab as wake")
+
+
+class TestDumpStateChords(unittest.TestCase):
+    """`--dump-state` reports the live chord map: one JSON line, no daemon."""
+
+    @classmethod
+    def setUpClass(cls):
+        _skip_if_no_bin()
+        res = subprocess.run([BIN_PATH, "--dump-state"], capture_output=True,
+                             text=True, timeout=15, env=HEADLESS_ENV)
+        # A present binary whose --dump-state fails is a real failure, never a skip.
+        if res.returncode != 0:
+            raise AssertionError(f"--dump-state failed (rc={res.returncode}):\n{res.stderr}\n{res.stdout}")
+        import json
+        cls.state = json.loads(res.stdout)
+
+    def test_chords(self):
+        c = self.state.get("chords", {})
+        self.assertEqual(c.get("optionTab"), "ask")
+        self.assertEqual(c.get("optionShiftTab"), "handover")
+        self.assertEqual(c.get("optionTabDoubleTap"), "pause")
+        self.assertEqual(c.get("doubleTapWindowMs"), 400.0)
+
+    def test_handover_event_shape_is_reported(self):
+        ev = self.state.get("handoverEvent")
+        self.assertIsInstance(ev, dict, "the hand-over event shape must be machine-readable")
+        self.assertEqual(ev.get("type"), "user.handover")
+        self.assertIn("turn_id", ev.get("fields", []))
+        self.assertEqual(ev.get("transport"), "pet-talk-cli handover")
+
+
+class TestAXForceCastsAreConditional(unittest.TestCase):
+    """FINDING 9: `ax` must never crash the daemon when the AX API hands back
+    something that isn't an AXUIElement — `focusedRef as! AXUIElement` and
+    `windowRef as! AXUIElement` must be conditional (`as?`) casts that emit
+    `{"ok":false,"reason":"ax_unavailable"}` on failure instead of trapping.
+
+    A real subprocess run of `ax` is the primary check: on a box without AX
+    trust granted to this process (true in CI and in this worktree — verified:
+    it returns ax_permission_denied before ever reaching the casts), it proves
+    the function still runs to completion and prints valid JSON with no crash.
+    Forcing the AX API to hand back a non-AXUIElement type requires driving a
+    real front app with AX trust granted, which isn't available headless —
+    so the cast sites themselves are also checked directly in source, which the
+    finding allows when a runtime trigger for that exact branch is impossible."""
+
+    @classmethod
+    def setUpClass(cls):
+        _skip_if_no_bin()
+        with open(os.path.join(ROOT, "cli", "hotkey", "main.swift"), "r", encoding="utf-8") as f:
+            cls.src = f.read()
+
+    def test_ax_subcommand_runs_to_completion_and_emits_valid_json(self):
+        res = subprocess.run([BIN_PATH, "ax"], capture_output=True, text=True,
+                              timeout=15, env=HEADLESS_ENV)
+        self.assertEqual(res.returncode, 0, f"`ax` must exit 0 even on failure "
+                          f"(fails closed with a named reason):\n{res.stderr}\n{res.stdout}")
+        import json
+        lines = [ln for ln in res.stdout.splitlines() if ln.strip()]
+        self.assertEqual(len(lines), 1, "`ax` must print exactly one JSON line")
+        payload = json.loads(lines[0])
+        self.assertIn("ok", payload)
+        if payload["ok"] is False:
+            self.assertIn("reason", payload, "a failed `ax` call must name its reason")
+
+    def test_no_bare_force_cast_of_focused_or_window_ref(self):
+        self.assertNotIn("focusedRef as! AXUIElement", self.src,
+                          "focusedRef must not be force-cast")
+        self.assertNotIn("windowRef as! AXUIElement", self.src,
+                          "windowRef must not be force-cast")
+
+    def test_focused_element_cast_is_conditional_and_fails_closed(self):
+        idx = self.src.find("kAXFocusedUIElementAttribute")
+        block = self.src[idx:idx + 400]
+        self.assertIn("asAXUIElement(focusedRef)", block,
+                      "the focused-element cast must go through the CFTypeID-checked helper")
+        self.assertIn('\\"reason\\":\\"ax_unavailable\\"', block,
+                      "a failed focused-element cast must emit the ax_unavailable reason")
+
+    def test_focused_window_cast_is_conditional_and_fails_closed(self):
+        idx = self.src.find("kAXFocusedWindowAttribute")
+        block = self.src[idx:idx + 400]
+        self.assertIn("asAXUIElement(windowRef)", block,
+                      "the focused-window cast must go through the CFTypeID-checked helper")
+        self.assertIn('\\"reason\\":\\"ax_unavailable\\"', block,
+                      "a failed focused-window cast must emit the ax_unavailable reason")
+
+
+class TestRegistrationVerifiesBothChords(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        _skip_if_no_bin()
+
+    def test_registration_reports_handover_chord(self):
+        res = subprocess.run([BIN_PATH, "--check-registration"],
+                             capture_output=True, text=True, timeout=15, env=HEADLESS_ENV)
+        self.assertEqual(res.returncode, 0, f"Registration failed:\n{res.stderr}\n{res.stdout}")
+        self.assertIn("0XA00", res.stdout.upper(),
+                      "must report the Option+Shift+Tab (0xA00) hand-over chord")
+        self.assertIn("handover", res.stdout.lower())
+
+
+class TestBargeInLatency(unittest.TestCase):
+    """Disabled by design: a QA test must never start real afplay playback
+    or SIGKILL it (night rule, COMMON.md). Verify manually with:
+      afplay bake-deepgram_0.wav &
+      bin/pet-talk-hotkey --barge-benchmark
+    """
 
     def test_afplay_kill_under_50ms(self):
-        wav_file = os.path.join(ROOT, "bake-deepgram_0.wav")
-        afplay_proc = None
-        if os.path.exists(wav_file):
-            afplay_proc = subprocess.Popen(
-                ["afplay", wav_file],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            time.sleep(0.02)  # ensure afplay is actively running
-
-        try:
-            res = subprocess.run(
-                [BIN_PATH, "--barge-benchmark"],
-                capture_output=True,
-                text=True,
-            )
-            self.assertEqual(res.returncode, 0, f"Barge benchmark failed:\n{res.stdout}")
-            self.assertIn("PASS: Barge-in kill under 50ms budget", res.stdout)
-        finally:
-            if afplay_proc and afplay_proc.poll() is None:
-                afplay_proc.kill()
+        raise unittest.SkipTest(
+            "SKIP: disabled — this would start real afplay playback and "
+            "SIGKILL it, which a QA test must never do; verify manually "
+            "via `bin/pet-talk-hotkey --barge-benchmark` against a playing "
+            "bake-deepgram_0.wav"
+        )
 
 
 class TestDaemonLifecycle(unittest.TestCase):
-    """Verify daemon start, status, and stop lifecycle."""
-
-    @classmethod
-    def setUpClass(cls):
-        res = subprocess.run([BIN_PATH, "status"], capture_output=True, text=True)
-        cls._was_running = (res.returncode == 0)
-        if not os.path.exists(BIN_PATH):
-            subprocess.run(["swiftc", "-O"] + SWIFT_SRCS + ["-o", BIN_PATH], check=True)
-
-    @classmethod
-    def tearDownClass(cls):
-        if getattr(cls, "_was_running", False):
-            subprocess.run([BIN_PATH, "start"], capture_output=True)
-
-    def setUp(self):
-        # Guarantee clean state before each test
-        subprocess.run([BIN_PATH, "stop"], capture_output=True)
-
-    def tearDown(self):
-        # Clean up any leftover daemon from individual test
-        subprocess.run([BIN_PATH, "stop"], capture_output=True)
+    """Disabled by design: a QA test must never start the real hotkey daemon."""
 
     def test_lifecycle_transitions(self):
-        # 1. Initially stopped
-        res_initial = subprocess.run([BIN_PATH, "status"], capture_output=True, text=True)
-        self.assertNotEqual(res_initial.returncode, 0)
-        self.assertIn("stopped", res_initial.stdout)
-
-        # 2. Start daemon
-        res_start = subprocess.run([BIN_PATH, "start"], capture_output=True, text=True)
-        self.assertEqual(res_start.returncode, 0)
-        self.assertIn("daemon started", res_start.stdout)
-
-        # 3. Status is running with PID
-        res_status = subprocess.run([BIN_PATH, "status"], capture_output=True, text=True)
-        self.assertEqual(res_status.returncode, 0)
-        self.assertIn("running", res_status.stdout)
-
-        # Verify PID file exists and matches live PID
-        self.assertTrue(os.path.exists(PID_FILE))
-        with open(PID_FILE, "r") as f:
-            pid = int(f.read().strip())
-        self.assertGreater(pid, 0)
-        # Check process is alive
-        try:
-            os.kill(pid, 0)
-            is_alive = True
-        except OSError:
-            is_alive = False
-        self.assertTrue(is_alive, f"Daemon process {pid} should be active")
-
-        # 4. Stop daemon
-        res_stop = subprocess.run([BIN_PATH, "stop"], capture_output=True, text=True)
-        self.assertEqual(res_stop.returncode, 0)
-        self.assertIn("stopped", res_stop.stdout)
-
-        # 5. Status is stopped
-        res_final = subprocess.run([BIN_PATH, "status"], capture_output=True, text=True)
-        self.assertNotEqual(res_final.returncode, 0)
-        self.assertIn("stopped", res_final.stdout)
+        raise unittest.SkipTest(
+            "SKIP: disabled — start/stop of the real daemon is not exercised "
+            "by the automated QA gate; verify manually with "
+            "`bin/pet-talk-hotkey start|status|stop`"
+        )
 
 
 class TestKillSwitchAndPause(unittest.TestCase):
-    """Verify kill switch, pause mode, resume, and toggle CLI commands."""
-
-    @classmethod
-    def setUpClass(cls):
-        if not os.path.exists(BIN_PATH):
-            subprocess.run(["swiftc", "-O"] + SWIFT_SRCS + ["-o", BIN_PATH], check=True)
-
-    def setUp(self):
-        # Guarantee clean state
-        subprocess.run([BIN_PATH, "stop"], capture_output=True)
-        subprocess.run([BIN_PATH, "resume"], capture_output=True)
-
-    def tearDown(self):
-        subprocess.run([BIN_PATH, "stop"], capture_output=True)
-        subprocess.run([BIN_PATH, "resume"], capture_output=True)
+    """Disabled by design: kill/pause/resume/toggle all start the real daemon."""
 
     def test_kill_switch_command(self):
-        res = subprocess.run([BIN_PATH, "kill"], capture_output=True, text=True)
-        self.assertEqual(res.returncode, 0)
-        self.assertIn("Instant kill switch executed", res.stdout)
+        raise unittest.SkipTest(
+            "SKIP: disabled — exercises the real daemon; verify manually "
+            "with `bin/pet-talk-hotkey kill`"
+        )
 
     def test_pause_resume_toggle_lifecycle(self):
-        # 1. Start daemon
-        res_start = subprocess.run([BIN_PATH, "start"], capture_output=True, text=True)
-        self.assertEqual(res_start.returncode, 0)
-        time.sleep(0.15)
-
-        # 2. Check initial status is [ACTIVE]
-        res_active = subprocess.run([BIN_PATH, "status"], capture_output=True, text=True)
-        self.assertEqual(res_active.returncode, 0)
-        self.assertIn("[ACTIVE]", res_active.stdout)
-
-        # 3. Pause Donna
-        res_pause = subprocess.run([BIN_PATH, "pause"], capture_output=True, text=True)
-        self.assertEqual(res_pause.returncode, 0)
-        self.assertIn("paused", res_pause.stdout.lower())
-        time.sleep(0.15)
-
-        # 4. Status reflects [PAUSED / SLEEP MODE]
-        res_paused = subprocess.run([BIN_PATH, "status"], capture_output=True, text=True)
-        self.assertEqual(res_paused.returncode, 0)
-        self.assertIn("[PAUSED", res_paused.stdout)
-
-        # 5. Resume Donna
-        res_resume = subprocess.run([BIN_PATH, "resume"], capture_output=True, text=True)
-        self.assertEqual(res_resume.returncode, 0)
-        self.assertIn("resumed", res_resume.stdout.lower())
-        time.sleep(0.15)
-
-        # 6. Status reflects [ACTIVE] again
-        res_resumed = subprocess.run([BIN_PATH, "status"], capture_output=True, text=True)
-        self.assertEqual(res_resumed.returncode, 0)
-        self.assertIn("[ACTIVE]", res_resumed.stdout)
-
-        # 7. Toggle into Pause
-        res_toggle1 = subprocess.run([BIN_PATH, "toggle"], capture_output=True, text=True)
-        self.assertEqual(res_toggle1.returncode, 0)
-        time.sleep(0.15)
-
-        res_tog_paused = subprocess.run([BIN_PATH, "status"], capture_output=True, text=True)
-        self.assertIn("[PAUSED", res_tog_paused.stdout)
-
-        # 8. Toggle back into Active
-        res_toggle2 = subprocess.run([BIN_PATH, "toggle"], capture_output=True, text=True)
-        self.assertEqual(res_toggle2.returncode, 0)
-        time.sleep(0.15)
-
-        res_tog_active = subprocess.run([BIN_PATH, "status"], capture_output=True, text=True)
-        self.assertIn("[ACTIVE]", res_tog_active.stdout)
+        raise unittest.SkipTest(
+            "SKIP: disabled — exercises the real daemon; verify manually "
+            "with `bin/pet-talk-hotkey start|pause|resume|toggle|status`"
+        )
 
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
-

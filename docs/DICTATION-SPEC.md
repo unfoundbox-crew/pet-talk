@@ -5,7 +5,7 @@
 The Pet-Talk Universal Dictation Matrix provides a pluggable, low-latency Speech-to-Text (STT) layer designed to decouple audio transcription from duplex voice conversations and hotkey prompt dictation.
 
 The architecture comprises two coupled layers:
-1. **Universal STT Router (`server/providers.py`)**: A provider resolution matrix routing between Cloud Flagships, Apple Silicon hardware acceleration, Sovereign Fleet nodes, and local zero-cost test stubs.
+1. **Universal STT Router (`server/providers/stt.py`, factory in the same package)**: A provider resolution matrix routing between Cloud Flagships, Apple Silicon hardware acceleration, Sovereign Fleet nodes, and local zero-cost test stubs.
 2. **Clean Prose Engine (`server/dictation.py`)**: A deterministic text normalizer inspired by Wispr Flow that converts raw spoken audio transcripts into publication-grade prompts and code syntax.
 
 ```

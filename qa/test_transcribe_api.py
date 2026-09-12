@@ -29,12 +29,16 @@ if ROOT not in sys.path:
 from fastapi.testclient import TestClient
 from server import app as server_module
 from server.app import app
+from server.auth import STUDIO_TOKEN_HEADER, studio_token
 from server.providers import ProviderError, StubSTT
+
+# POST /transcribe and the WS handshake require the studio token.
+AUTH = {STUDIO_TOKEN_HEADER: studio_token()}
 
 
 class TestTranscribeApi(unittest.TestCase):
     def setUp(self):
-        self.client = TestClient(app)
+        self.client = TestClient(app, headers=AUTH)
         self.old_stt = server_module.stt
         server_module.stt = StubSTT()
         # 320ms PCM16 mono @16kHz fixture
@@ -43,6 +47,12 @@ class TestTranscribeApi(unittest.TestCase):
 
     def tearDown(self):
         server_module.stt = self.old_stt
+
+    def test_transcribe_without_token_is_refused(self):
+        anon = TestClient(app)
+        r = anon.post("/transcribe", json={"pcm_b64": self.pcm_b64})
+        self.assertEqual(r.status_code, 401)
+        self.assertEqual(r.json().get("reason"), "unauthorized")
 
     def test_transcribe_valid_audio(self):
         r = self.client.post("/transcribe", json={"pcm_b64": self.pcm_b64, "sample_rate": 16000})

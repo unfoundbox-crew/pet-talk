@@ -15,15 +15,19 @@ import array
 import asyncio
 import math
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
+
+SCRATCH = os.environ.get("PET_TALK_SCRATCH") or os.path.join(ROOT, ".qa-scratch")
 
 from cli.audio import (
     AudioPlayer,
@@ -34,6 +38,7 @@ from cli.audio import (
     find_recorder,
     pcm16_to_base64,
 )
+from cli import client as client_mod
 from cli.client import PetTalkClient
 
 
@@ -112,6 +117,8 @@ class TestAudioProcessing(unittest.TestCase):
         self.assertFalse(vad.speech_started, "Speech should not be marked started on silence timeout")
 
     def test_find_recorder_detection(self):
+        if not any(shutil.which(b) for b in ("sox", "rec", "ffmpeg")):
+            self.skipTest("SKIP: no sox/rec/ffmpeg on this host — find_recorder has nothing to find")
         cmd = find_recorder()
         self.assertIsInstance(cmd, list)
         self.assertGreater(len(cmd), 0)
@@ -129,6 +136,8 @@ class TestAudioPlaybackAndBarge(unittest.IsolatedAsyncioTestCase):
         await player.stop()
 
     async def test_afplay_barge_kill_under_50ms(self):
+        if os.environ.get("PET_TALK_SILENT") == "1":
+            self.skipTest("SKIP: PET_TALK_SILENT=1 — this spawns real afplay playback")
         player = AudioPlayer()
         player.start()
 
@@ -157,8 +166,95 @@ class TestAudioPlaybackAndBarge(unittest.IsolatedAsyncioTestCase):
         await player.stop()
 
 
+class TestStudioTokenResolution(unittest.TestCase):
+    """Hermetic: cli.client resolves the studio token the same way as
+    server/auth.py (env STUDIO_TOKEN -> STUDIO_TOKEN_FILE -> the file the
+    server generates at <repo>/.qa-scratch/studio.token). No live server."""
+
+    def setUp(self):
+        self._saved_env = {
+            k: os.environ.get(k) for k in ("STUDIO_TOKEN", "STUDIO_TOKEN_FILE")
+        }
+        os.environ.pop("STUDIO_TOKEN", None)
+        os.environ.pop("STUDIO_TOKEN_FILE", None)
+
+    def tearDown(self):
+        for k, v in self._saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_env_var_wins(self):
+        os.environ["STUDIO_TOKEN"] = "from-env"
+        self.assertEqual(client_mod.resolve_studio_token(), "from-env")
+
+    def test_token_file_env_used_when_set_token_absent(self):
+        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".token") as f:
+            f.write("from-file\n")
+            path = f.name
+        try:
+            os.environ["STUDIO_TOKEN_FILE"] = path
+            self.assertEqual(client_mod.resolve_studio_token(), "from-file")
+        finally:
+            os.remove(path)
+
+    def test_falls_back_to_generated_repo_file(self):
+        # No env set: resolve_studio_token should read the same
+        # <repo>/.qa-scratch/studio.token the server writes (server/auth.py
+        # TOKEN_PATH). This asserts the two paths actually agree, not just
+        # that resolution returns *something*.
+        generated_path = os.path.join(ROOT, ".qa-scratch", "studio.token")
+        if not os.path.exists(generated_path):
+            self.skipTest("no generated token file at .qa-scratch/studio.token")
+        with open(generated_path, encoding="utf-8") as f:
+            expected = f.read().strip()
+        self.assertEqual(client_mod.resolve_studio_token(), expected)
+
+    def test_ws_connect_kwargs_prefers_additional_headers(self):
+        # websockets >= 14 exposes additional_headers; assert we actually
+        # target the parameter the installed version accepts rather than
+        # guessing a name and silently sending nothing.
+        kwargs = client_mod._ws_connect_kwargs("tok123")
+        self.assertTrue(kwargs, "expected a header kwarg for this websockets version")
+        header_dict = next(iter(kwargs.values()))
+        self.assertEqual(header_dict[client_mod.STUDIO_TOKEN_HEADER], "tok123")
+
+    def test_ws_url_with_token_appends_query_param(self):
+        self.assertEqual(
+            client_mod._ws_url_with_token("ws://127.0.0.1:8089/ws", "tok123"),
+            "ws://127.0.0.1:8089/ws?token=tok123",
+        )
+        self.assertEqual(
+            client_mod._ws_url_with_token("ws://127.0.0.1:8089/ws?x=1", "tok123"),
+            "ws://127.0.0.1:8089/ws?x=1&token=tok123",
+        )
+
+    def test_connect_reports_clear_error_on_unauthorized_handshake(self):
+        # Simulate the handshake rejection server/ws.py produces when the
+        # token is missing/wrong (measured: uvicorn answers HTTP 403 for a
+        # close() called before accept()) — no live server needed.
+        class _FakeResponse:
+            status_code = 403
+
+        async def _raise_invalid_status(*_args, **_kwargs):
+            raise client_mod.InvalidStatus(_FakeResponse())
+
+        client = PetTalkClient(ws_url="ws://127.0.0.1:8089/ws", quiet=True)
+        with mock.patch.object(client_mod, "ws_connect", side_effect=_raise_invalid_status):
+            with self.assertRaises(RuntimeError) as ctx:
+                asyncio.run(client.connect())
+        self.assertIn("STUDIO_TOKEN", str(ctx.exception))
+
+
 class TestLiveWsClient(unittest.IsolatedAsyncioTestCase):
-    """Test PetTalkClient connection, frames, and barge against live server."""
+    """Test PetTalkClient connection, frames, and barge against live server.
+
+    No token handling here on purpose: PetTalkClient.connect() resolves the
+    studio token itself (client_mod.resolve_studio_token, same order as
+    server/auth.py), so a live server started with the token this repo's
+    .qa-scratch/studio.token already carries authenticates transparently.
+    """
 
     PORT = os.environ.get("LIVE_WS_PORT", "8089")
     WS_URL = os.environ.get("LIVE_WS_URL", f"ws://127.0.0.1:{PORT}/ws")
@@ -206,7 +302,7 @@ class TestLiveWsClient(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(m1.get("turn_id"), turn_id)
 
             # Send audio chunk (use real speech fixture if available so real STT transcribes words)
-            receipt_path = "/tmp/donna_ws_verified.wav"
+            receipt_path = os.path.join(SCRATCH, "donna_ws_verified.wav")
             sample_rate = 16000
             if os.path.exists(receipt_path):
                 import wave

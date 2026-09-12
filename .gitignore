@@ -19,7 +19,17 @@ __pycache__/
 .venv/
 venv/
 
+# built binaries — never committed; build on ssh air (fan rule), see Makefile
+bin/*
+!bin/.gitkeep
+
+# QA scratch (receipts, fixtures written by tests) — never committed
+.qa-scratch/
+
 # OS + editor
 .DS_Store
 *.swp
 .env
+
+# agent worktrees
+.claude/worktrees/

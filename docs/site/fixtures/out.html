@@ -1,0 +1,611 @@
+<title>Fixture Product — Living Docs</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --font-sans: "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+
+  --mv-ground: #ffffff;
+  --mv-surface: #f4f4f5;
+  --mv-surface-2: #efeff1;
+  --mv-surface-3: #e4e4e7;
+  --mv-border: #e4e4e7;
+  --mv-border-soft: #ececee;
+  --mv-ink: #111113;
+  --mv-text: #3f3f46;
+  --mv-muted: #52525b;
+  --mv-faint: #a1a1aa;
+  --mv-accent: #7c6bb3;
+  --mv-accent-soft: rgba(124, 107, 179, 0.08);
+  --mv-accent-border: rgba(124, 107, 179, 0.28);
+  --mv-accent-contrast: #ffffff;
+
+  --mv-rise: 10px;
+  --motion-fast: 120ms;
+  --motion-base: 160ms;
+  --motion-slow: 220ms;
+  --motion-slower: 300ms;
+  --motion-exit: 120ms;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --motion-enter-scale: 0.98;
+  --stagger-step: 40ms;
+
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --mv-ground: #000000;
+    --mv-surface: #18181b;
+    --mv-surface-2: #1d1d20;
+    --mv-surface-3: #27272a;
+    --mv-border: #2a2a2d;
+    --mv-border-soft: #1c1c1f;
+    --mv-ink: #ffffff;
+    --mv-text: #d4d4d8;
+    --mv-muted: #a1a1aa;
+    --mv-faint: #52525b;
+    --mv-accent: #a396d6;
+    --mv-accent-soft: rgba(163, 150, 214, 0.1);
+    --mv-accent-border: rgba(163, 150, 214, 0.3);
+    --mv-accent-contrast: #0d0d0f;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --mv-ground: #000000;
+  --mv-surface: #18181b;
+  --mv-surface-2: #1d1d20;
+  --mv-surface-3: #27272a;
+  --mv-border: #2a2a2d;
+  --mv-border-soft: #1c1c1f;
+  --mv-ink: #ffffff;
+  --mv-text: #d4d4d8;
+  --mv-muted: #a1a1aa;
+  --mv-faint: #52525b;
+  --mv-accent: #a396d6;
+  --mv-accent-soft: rgba(163, 150, 214, 0.1);
+  --mv-accent-border: rgba(163, 150, 214, 0.3);
+  --mv-accent-contrast: #0d0d0f;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --mv-rise: 0px;
+    --motion-enter-scale: 1;
+    --stagger-step: 0ms;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+
+body {
+  margin: 0;
+  background: var(--mv-ground);
+  color: var(--mv-text);
+  font-family: var(--font-sans);
+  font-size: 17px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection { background: var(--mv-accent-soft); }
+
+:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--mv-accent-soft), 0 0 0 1px var(--mv-accent-border);
+  border-radius: 4px;
+}
+
+.bg-grid {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image:
+    linear-gradient(to right, var(--mv-border-soft) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--mv-border-soft) 1px, transparent 1px);
+  background-size: 64px 64px;
+  opacity: 0.5;
+  -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 0%, transparent 70%);
+  mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 0%, transparent 70%);
+}
+
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  background: var(--mv-ink);
+  color: var(--mv-ground);
+  padding: 10px 16px;
+  z-index: 100;
+  border-radius: 0 0 8px 0;
+}
+.skip-link:focus { left: 0; }
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px clamp(16px, 4vw, 40px);
+  border-bottom: 0.5px solid var(--mv-border);
+  background: var(--mv-ground);
+}
+.wordmark {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  color: var(--mv-ink);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.wordmark .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--mv-accent);
+  display: inline-block;
+  flex: none;
+}
+.wordmark .sub { color: var(--mv-faint); font-weight: 400; }
+
+.badges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--mv-faint);
+}
+.badge {
+  border: 0.5px solid var(--mv-border);
+  border-radius: 6px;
+  padding: 2px 8px;
+  color: var(--mv-muted);
+  white-space: nowrap;
+}
+.badge.status-living { color: var(--mv-accent); border-color: var(--mv-accent-border); background: var(--mv-accent-soft); }
+.badges a { color: var(--mv-muted); text-decoration: none; border-bottom: 0.5px dotted var(--mv-faint); }
+.badges a:hover { color: var(--mv-ink); }
+
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border: 0.5px solid var(--mv-border);
+  border-radius: 8px;
+  background: var(--mv-surface);
+  flex: none;
+}
+.theme-toggle button {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--mv-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.03em;
+  padding: 5px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+.theme-toggle button:hover { color: var(--mv-ink); }
+.theme-toggle button[aria-pressed="true"] {
+  background: var(--mv-surface-3);
+  color: var(--mv-ink);
+}
+
+.layout {
+  display: flex;
+  align-items: flex-start;
+  max-width: 1280px;
+  margin-inline: auto;
+}
+
+.sidenav {
+  position: sticky;
+  top: 53px;
+  align-self: flex-start;
+  width: 240px;
+  flex: none;
+  max-height: calc(100vh - 53px);
+  overflow-y: auto;
+  padding: 28px 18px 40px clamp(16px, 3vw, 32px);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+.sidenav .navgroup { margin-bottom: 24px; }
+.sidenav .navgroup .eyebrow {
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--mv-faint);
+  margin-bottom: 8px;
+  display: block;
+}
+.sidenav ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.sidenav a {
+  display: block;
+  color: var(--mv-muted);
+  text-decoration: none;
+  padding: 5px 8px;
+  border-radius: 6px;
+  line-height: 1.4;
+  transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+.sidenav a:hover { color: var(--mv-ink); background: var(--mv-surface); }
+.sidenav a.active { color: var(--mv-ink); background: var(--mv-surface-2); }
+
+main.content {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 8px clamp(16px, 4vw, 56px) 80px;
+  max-width: 900px;
+}
+
+.doc-lede {
+  padding: 28px 0 8px;
+  border-bottom: 0.5px solid var(--mv-border);
+  margin-bottom: 8px;
+}
+.doc-lede h2.doctitle {
+  font-size: clamp(1.6rem, 1.3rem + 1vw, 2.1rem);
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  color: var(--mv-ink);
+  margin: 0 0 6px;
+}
+.doc-lede .doc-meta {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--mv-faint);
+}
+
+.doc-body h2 {
+  font-size: clamp(1.35rem, 1.15rem + 0.7vw, 1.7rem);
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+  font-weight: 700;
+  color: var(--mv-ink);
+  margin: 44px 0 16px;
+  padding-top: 20px;
+  border-top: 0.5px solid var(--mv-border);
+  scroll-margin-top: 70px;
+}
+.doc-body > .doc-section:first-of-type h2 { border-top: none; padding-top: 0; margin-top: 20px; }
+.doc-body h3 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--mv-ink);
+  margin: 26px 0 10px;
+  scroll-margin-top: 70px;
+}
+.doc-body p {
+  font-size: 1rem;
+  line-height: 1.7;
+  color: var(--mv-text);
+  margin: 0 0 16px;
+}
+.doc-body strong { color: var(--mv-ink); font-weight: 600; }
+.doc-body em { color: var(--mv-text); }
+.doc-body a { color: var(--mv-accent); text-decoration: none; border-bottom: 0.5px solid var(--mv-accent-border); }
+.doc-body a:hover { border-bottom-color: var(--mv-accent); }
+.doc-body code {
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+  background: var(--mv-surface);
+  border: 0.5px solid var(--mv-border);
+  border-radius: 4px;
+  padding: 1px 5px;
+  color: var(--mv-text);
+}
+.doc-body ul, .doc-body ol {
+  margin: 0 0 16px;
+  padding-left: 1.4em;
+  color: var(--mv-text);
+  font-size: 1rem;
+  line-height: 1.7;
+}
+.doc-body li { margin: 4px 0; }
+.doc-body li > ul, .doc-body li > ol { margin: 4px 0 4px; }
+.doc-body ul.task-list { list-style: none; padding-left: 0.2em; }
+.doc-body ul.task-list li { display: flex; align-items: baseline; gap: 8px; }
+.doc-body ul.task-list input[type="checkbox"] { margin: 0 0 0 2px; accent-color: var(--mv-accent); flex: none; }
+.doc-body blockquote {
+  margin: 0 0 16px;
+  padding: 4px 0 4px 16px;
+  border-left: 2px solid var(--mv-accent-border);
+  color: var(--mv-muted);
+}
+.doc-body blockquote p:last-child { margin-bottom: 0; }
+
+.scroll-wrap { overflow-x: auto; max-width: 100%; margin: 0 0 20px; }
+.scroll-wrap table {
+  border-collapse: collapse;
+  width: 100%;
+  min-width: 480px;
+  font-size: 0.9rem;
+}
+.scroll-wrap th, .scroll-wrap td {
+  border: 0.5px solid var(--mv-border);
+  padding: 8px 12px;
+  text-align: left;
+  vertical-align: top;
+  color: var(--mv-text);
+}
+.scroll-wrap th {
+  background: var(--mv-surface);
+  color: var(--mv-ink);
+  font-weight: 600;
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+.scroll-wrap td.align-center, .scroll-wrap th.align-center { text-align: center; }
+.scroll-wrap td.align-right, .scroll-wrap th.align-right { text-align: right; }
+
+.codeblock-wrap { overflow-x: auto; max-width: 100%; margin: 0 0 20px; border: 0.5px solid var(--mv-border); border-radius: 10px; background: var(--mv-surface); }
+.codeblock-wrap pre { margin: 0; padding: 16px 18px; }
+.codeblock-wrap code {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  line-height: 1.6;
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--mv-text);
+  white-space: pre;
+}
+.codeblock-wrap .lang-tag {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--mv-faint);
+  padding: 8px 18px 0;
+}
+
+pre.mermaid { margin: 0 0 20px; background: var(--mv-surface); border: 0.5px solid var(--mv-border); border-radius: 10px; padding: 16px; overflow-x: auto; }
+
+.footer { padding: 40px clamp(16px, 4vw, 56px) 64px; border-top: 0.5px solid var(--mv-border); }
+.footer p {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--mv-faint);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 6px;
+  flex-wrap: wrap;
+}
+.footer .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--mv-accent); display: inline-block; flex: none; }
+.footer code { font-family: var(--font-mono); }
+
+@media (max-width: 900px) {
+  .layout { flex-direction: column; }
+  .sidenav { position: static; width: auto; max-height: none; overflow-y: visible; padding: 16px clamp(16px, 4vw, 40px) 0; }
+  main.content { max-width: none; }
+}
+@media (max-width: 640px) {
+  .topbar { flex-wrap: wrap; }
+}
+</style>
+
+<div class="bg-grid" aria-hidden="true"></div>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <span class="wordmark"><span class="dot"></span>Fixture Product <span class="sub">/ Living Docs</span></span>
+  <div class="badges">
+    <span class="badge">v1.0.0</span>
+    <span class="badge status-living">living</span>
+    <span class="badge">updated 2026-09-12</span>
+    <span class="badge"><a href="https://github.com/unfoundbox-crew/pet-talk/commit/abc1234" target="_blank" rel="noopener">abc1234</a></span>
+  </div>
+  <div class="theme-toggle" role="group" aria-label="Theme">
+    <button type="button" data-theme-choice="system" aria-pressed="true">System</button>
+    <button type="button" data-theme-choice="light" aria-pressed="false">Light</button>
+    <button type="button" data-theme-choice="dark" aria-pressed="false">Dark</button>
+  </div>
+</header>
+
+<div class="layout">
+  <nav class="sidenav" aria-label="Document sections">
+    <div class="navgroup">
+      <span class="eyebrow">Architecture</span>
+      <ul>
+        <li><a href="#purpose">Purpose</a></li>
+        <li><a href="#system-diagram">System diagram</a></li>
+        <li><a href="#components">Components</a></li>
+        <li><a href="#interfaces">Interfaces</a></li>
+        <li><a href="#data-state">Data &amp; state</a></li>
+        <li><a href="#cross-product-edges">Cross-product edges</a></li>
+        <li><a href="#invariants">Invariants</a></li>
+        <li><a href="#known-gaps">Known gaps</a></li>
+        <li><a href="#changelog">Changelog</a></li>
+      </ul>
+    </div>
+    <div class="navgroup">
+      <span class="eyebrow">Roadmap</span>
+      <ul>
+        <li><a href="#now-this-week">Now (this week)</a></li>
+        <li><a href="#next-this-month">Next (this month)</a></li>
+        <li><a href="#later-this-quarter">Later (this quarter)</a></li>
+        <li><a href="#not-doing-and-why">Not doing (and why)</a></li>
+        <li><a href="#shipped">Shipped</a></li>
+        <li><a href="#decision-log">Decision log</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <main class="content" id="main">
+    <section class="doc-lede" id="architecture">
+      <h2 class="doctitle">Fixture Product Architecture</h2>
+      <div class="doc-meta">docs/ARCHITECTURE.md &middot; v1.0.0 &middot; living &middot; updated 2026-09-12</div>
+    </section>
+    <div class="doc-body">
+<div class="doc-section" id="purpose">
+<h2>Purpose</h2>
+<p>Fixture product exercises every markdown construct the renderer supports. It is not a real product. It is used only to test <code>docs/site/build.py</code>.</p>
+</div>
+<div class="doc-section" id="system-diagram">
+<h2>System diagram</h2>
+<pre class="mermaid">flowchart LR
+  Client --&gt;|WS /ws| Server
+  Server --&gt;|reads| Config[(config.json)]
+  Server --&gt;|calls| Ext[External API]</pre>
+<div class="codeblock-wrap"><pre><code>+--------+   ws   +--------+   calls   +-----------+
+| Client | -----&gt; | Server | --------&gt; | External  |
++--------+        +--------+           | API       |
+                       |                +-----------+
+                       v
+                  +----------+
+                  | config   |
+                  | .json    |
+                  +----------+</code></pre></div>
+</div>
+<div class="doc-section" id="components">
+<h2>Components</h2>
+<div class="scroll-wrap"><table><thead><tr><th>Component</th><th class="align-center">File/dir</th><th>Job</th><th class="align-right">Interface</th></tr></thead><tbody><tr><td>Server</td><td class="align-center"><code>server/app.py</code></td><td>Runs the WS loop</td><td class="align-right"><code>/ws</code></td></tr><tr><td>Config loader</td><td class="align-center"><code>server/config.py</code></td><td>Loads <code>config.json</code></td><td class="align-right">none</td></tr></tbody></table></div>
+</div>
+<div class="doc-section" id="interfaces">
+<h2>Interfaces</h2>
+<div class="scroll-wrap"><table><thead><tr><th>Name</th><th>Shape</th><th>Consumer</th></tr></thead><tbody><tr><td><code>/ws</code></td><td>WebSocket, JSON frames <code>{type, data}</code></td><td>web client</td></tr><tr><td><code>--verbose</code></td><td>CLI flag, boolean</td><td>operators</td></tr></tbody></table></div>
+<p>Some inline code like <code>server/app.py</code> and a <a href="https://example.com/repo" target="_blank" rel="noopener">link to the repo</a> plus <strong>bold</strong> and <em>italic</em> text and a nested reference: see <code>config.json</code>.</p>
+</div>
+<div class="doc-section" id="data-state">
+<h2>Data &amp; state</h2>
+<ul><li>Session state: kept in memory, never persisted.</li><li>Nested list example:<ul><li>sub-item one</li><li>sub-item two<ul><li>sub-sub-item</li></ul></li></ul></li><li>Config: read from <code>config.json</code> at startup.</li></ul>
+</div>
+<div class="doc-section" id="cross-product-edges">
+<h2>Cross-product edges</h2>
+<div class="scroll-wrap"><table><thead><tr><th>Other product</th><th>Direction</th><th>Mechanism</th><th>Contract file</th></tr></thead><tbody><tr><td>none</td><td>n/a</td><td>n/a</td><td>n/a</td></tr></tbody></table></div>
+</div>
+<div class="doc-section" id="invariants">
+<h2>Invariants</h2>
+<ol><li>The server never blocks the event loop for more than 50ms — enforced by <code>qa/test_latency.py</code>.</li><li>Config is read-only at runtime — unenforced.</li></ol>
+</div>
+<div class="doc-section" id="known-gaps">
+<h2>Known gaps</h2>
+<ul><li>No retry logic on the external API call (2026-09-01).</li><li>No task list yet:<ul class="task-list"><li><input type="checkbox" disabled><span>add retry logic — why it matters — done when: three consecutive failures trigger backoff</span></li><li><input type="checkbox" disabled checked><span>write this fixture — why it matters — done when: build.py renders it</span></li></ul></li></ul>
+<blockquote><p>This is a blockquote note: fixture content only, not a real architectural claim.</p></blockquote>
+</div>
+<div class="doc-section" id="changelog">
+<h2>Changelog</h2>
+<div class="scroll-wrap"><table><thead><tr><th>Version</th><th>Date</th><th>Change</th><th>Commit</th></tr></thead><tbody><tr><td>1.0.0</td><td>2026-09-12</td><td>Initial fixture</td><td>abc1234</td></tr></tbody></table></div>
+</div>
+    </div>
+
+    <section class="doc-lede" id="roadmap">
+      <h2 class="doctitle">Fixture Product Roadmap</h2>
+      <div class="doc-meta">docs/ROADMAP.md &middot; v1.0.0 &middot; living &middot; horizon 2026-Q4</div>
+    </section>
+    <div class="doc-body">
+<div class="doc-section" id="now-this-week">
+<h2>Now (this week)</h2>
+<ul class="task-list"><li><input type="checkbox" disabled><span>ship the fixture renderer — proves build.py handles every construct — done when: fixtures/out.html builds clean</span></li><li><input type="checkbox" disabled checked><span>write the fixture docs — needed before the renderer can be tested — done when: this file exists</span></li></ul>
+</div>
+<div class="doc-section" id="next-this-month">
+<h2>Next (this month)</h2>
+<ul class="task-list"><li><input type="checkbox" disabled><span>add a second fixture repo — catches renderer assumptions specific to one repo — done when: two repos build without code changes</span></li></ul>
+</div>
+<div class="doc-section" id="later-this-quarter">
+<h2>Later (this quarter)</h2>
+<ul class="task-list"><li><input type="checkbox" disabled><span>add a visual regression check — catches silent CSS breakage — done when: a screenshot diff runs in CI</span></li></ul>
+</div>
+<div class="doc-section" id="not-doing-and-why">
+<h2>Not doing (and why)</h2>
+<ul><li>Not building a live-reload dev server: the artifact is a static publish target, not a dev tool.</li></ul>
+</div>
+<div class="doc-section" id="shipped">
+<h2>Shipped</h2>
+<div class="scroll-wrap"><table><thead><tr><th>Date</th><th>Item</th><th>Commit/PR</th></tr></thead><tbody><tr><td>2026-09-10</td><td>Format contract written</td><td>DOCS-FORMAT.md</td></tr></tbody></table></div>
+</div>
+<div class="doc-section" id="decision-log">
+<h2>Decision log</h2>
+<div class="scroll-wrap"><table><thead><tr><th>Date</th><th>Decision</th><th>Alternatives rejected</th><th>Link</th></tr></thead><tbody><tr><td>2026-09-12</td><td>Use a stdlib-only markdown converter</td><td>PyYAML + python-markdown (adds a pip dependency)</td><td>docs/site/build.py</td></tr></tbody></table></div>
+</div>
+    </div>
+  </main>
+</div>
+
+<footer class="footer">
+  <p><span class="dot"></span>Source: docs/ARCHITECTURE.md, docs/ROADMAP.md at <code>abc1234</code>. Rebuild: <code>python3 docs/site/build.py --arch docs/ARCHITECTURE.md --roadmap docs/ROADMAP.md --out docs/site/index.html --product-name "Fixture Product" --repo-url "https://github.com/unfoundbox-crew/pet-talk"</code></p>
+</footer>
+
+<script>
+(function () {
+  var root = document.documentElement;
+  var STORAGE_KEY = "docs-site-theme";
+  var buttons = document.querySelectorAll("[data-theme-choice]");
+
+  function apply(choice) {
+    if (choice === "light" || choice === "dark") {
+      root.setAttribute("data-theme", choice);
+    } else {
+      root.removeAttribute("data-theme");
+    }
+    buttons.forEach(function (btn) {
+      btn.setAttribute("aria-pressed", String(btn.getAttribute("data-theme-choice") === choice));
+    });
+  }
+
+  var stored = "system";
+  try {
+    stored = localStorage.getItem(STORAGE_KEY) || "system";
+  } catch (e) {}
+  apply(stored);
+
+  buttons.forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var choice = btn.getAttribute("data-theme-choice");
+      apply(choice);
+      try {
+        localStorage.setItem(STORAGE_KEY, choice);
+      } catch (e) {}
+    });
+  });
+
+  var navLinks = document.querySelectorAll(".sidenav a");
+  var sections = [];
+  navLinks.forEach(function (a) {
+    var id = a.getAttribute("href").slice(1);
+    var el = document.getElementById(id);
+    if (el) sections.push({ id: id, el: el, link: a });
+  });
+
+  function setActive() {
+    var y = window.scrollY + 90;
+    var current = null;
+    sections.forEach(function (s) {
+      if (s.el.offsetTop <= y) current = s;
+    });
+    navLinks.forEach(function (a) { a.classList.remove("active"); });
+    if (current) current.link.classList.add("active");
+  }
+  if (sections.length) {
+    setActive();
+    window.addEventListener("scroll", setActive, { passive: true });
+  }
+})();
+</script>

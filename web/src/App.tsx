@@ -2,11 +2,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AgentState,
   PersonaId,
+  ScreenGrounding,
   ServerFrame,
   WS_URL,
+  fileToAttachment,
   float32ToBase64Pcm16,
+  newAttachRef,
   newTurnId,
   socket,
+  studioTokenHeader,
 } from "./ws";
 import en from "./i18n/en.json";
 import hi from "./i18n/hi.json";
@@ -16,6 +20,9 @@ import { PersonaData, PersonaStudio } from "./components/PersonaStudio";
 import { MemoryDrawer, MemoryTurn } from "./components/MemoryDrawer";
 import { ActiveProviders, RuntimeSettings, SettingsModal } from "./components/SettingsModal";
 import { PromptComposer } from "./components/PromptComposer";
+import { EyesAttachDock, EyesBlock, EyesEntry, ScreenGroundingLine } from "./components/EyesAttach";
+import { ReceiptChip, ReceiptFrame, asReceiptFrame } from "./components/ReceiptChip";
+import { ChunkPlayer } from "./audio/ChunkPlayer";
 
 type Strings = typeof en;
 const STRINGS: Record<"en" | "hi", Strings> = { en, hi };
@@ -53,10 +60,18 @@ const DEFAULT_PERSONAS: PersonaData[] = [
 
 interface TranscriptLine {
   id: string;
-  who: "user" | "agent";
+  who: "user" | "agent" | "eyes";
   text: string;
   audio_url?: string;
   time: string;
+  /** Set when who === "eyes": key into the eyes entry map. */
+  eyesRef?: string;
+  /** The proof under a spoken claim about work. See ReceiptChip. */
+  receipt?: ReceiptFrame;
+}
+
+function clockNow(): string {
+  return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
 interface QueuedSentence {
@@ -84,6 +99,9 @@ export default function App() {
 
   // Core Connection & State
   const [connected, setConnected] = useState(false);
+  // Set on a 401 from a mutating fetch, or a WS close 4401 — shown as a
+  // banner instead of a silent retry (server/auth.py requires the token).
+  const [authError, setAuthError] = useState(false);
   const [state, setState] = useState<AgentState>("idle");
   const [activeSentence, setActiveSentence] = useState<string>("");
 
@@ -111,7 +129,9 @@ export default function App() {
   const [settings, setSettings] = useState<RuntimeSettings>({
     stt_provider: "stub",
     llm_provider: "stub",
-    llm_base_url: "http://100.99.50.84:8000/v1",
+    // No hardcoded fleet address — the real default comes from
+    // GET /settings (settings.llm_base_url) once it loads.
+    llm_base_url: "",
     llm_model: "claude-3-7-sonnet",
     tts_provider: "stub",
     kokoro_base_url: "http://127.0.0.1:8088",
@@ -122,6 +142,9 @@ export default function App() {
     llm: "StubLLM",
     tts: "StubTTS",
   });
+  // secrets_set[field] from GET/POST /settings: whether the server holds a
+  // live credential for that field. The server never returns the value.
+  const [secretsSet, setSecretsSet] = useState<Record<string, boolean>>({});
 
   // Telemetry Waterfall
   const [metrics, setMetrics] = useState<LatencyMetrics>({
@@ -139,6 +162,11 @@ export default function App() {
   const [memoryTurns, setMemoryTurns] = useState<MemoryTurn[]>([]);
   const [lines, setLines] = useState<TranscriptLine[]>([]);
 
+  // Eyes lane (WAVE3 §1): one entry per attachment, keyed by ref.
+  const [eyesMap, setEyesMap] = useState<Record<string, EyesEntry>>({});
+  const [eyesNotice, setEyesNotice] = useState("");
+  const [screenGround, setScreenGround] = useState<ScreenGrounding | null>(null);
+
   // Refs for audio and streaming
   const turnRef = useRef<string>(newTurnId());
   const turnStartTimeRef = useRef<number>(0);
@@ -146,6 +174,19 @@ export default function App() {
   const queueRef = useRef<QueuedSentence[]>([]);
   const playingRef = useRef(false);
   const prefetchRef = useRef<HTMLAudioElement | null>(null);
+  // Chunked TTS playback (SPEC 4.2.1). Lazily created — no AudioContext is
+  // made until the first agent.chunk actually arrives. This is a separate
+  // context from the mic capture one: the mic context is 16kHz and torn down
+  // every talk session, wrong lifetime and wrong rate for TTS playback.
+  const chunkPlayerRef = useRef<ChunkPlayer | null>(null);
+  const getChunkPlayer = useCallback((): ChunkPlayer => {
+    if (!chunkPlayerRef.current) {
+      chunkPlayerRef.current = new ChunkPlayer({
+        onError: (reason, detail) => console.warn(`[pet-talk] chunk player: ${reason} ${detail}`),
+      });
+    }
+    return chunkPlayerRef.current;
+  }, []);
   const micRef = useRef<{
     stream: MediaStream;
     ctx: AudioContext;
@@ -183,6 +224,87 @@ export default function App() {
       },
     ]);
   }, []);
+
+  /**
+   * Attach proof to the claim it proves.
+   *
+   * A receipt lands after the sentence it backs, so it patches the newest
+   * agent line whose text is that claim. If the claim never reached the
+   * transcript (a receipt for a line spoken before this socket opened), the
+   * receipt speaks for itself on its own line rather than being dropped —
+   * an unshown receipt is the failure mode this whole lane exists to stop.
+   */
+  const attachReceipt = useCallback((receipt: ReceiptFrame) => {
+    setLines((prev) => {
+      for (let i = prev.length - 1; i >= 0; i -= 1) {
+        const line = prev[i];
+        if (line.who === "agent" && !line.receipt && line.text === receipt.claim) {
+          const next = [...prev];
+          next[i] = { ...line, receipt };
+          return next;
+        }
+      }
+      return [
+        ...prev,
+        {
+          id: `receipt-${receipt.turn_id}-${prev.length}`,
+          who: "agent",
+          text: receipt.claim,
+          time: clockNow(),
+          receipt,
+        },
+      ];
+    });
+  }, []);
+
+  const patchEyes = useCallback((ref: string, patch: Partial<EyesEntry>) => {
+    setEyesMap((prev) => (prev[ref] ? { ...prev, [ref]: { ...prev[ref], ...patch } } : prev));
+  }, []);
+
+  /** Read the file locally, show it in the transcript, then send user.attach. */
+  const handleAttach = useCallback(
+    async (file: File | Blob, hint?: "screenshot") => {
+      setEyesNotice("");
+      const ref = newAttachRef();
+      try {
+        const att = await fileToAttachment(file, ref, hint);
+        setEyesMap((prev) => ({
+          ...prev,
+          [ref]: {
+            ref,
+            kind: att.kind,
+            filename: att.filename,
+            bytes: att.bytes,
+            status: "sent",
+            time: clockNow(),
+          },
+        }));
+        setLines((prev) => [
+          ...prev,
+          {
+            id: `eyes-${ref}`,
+            who: "eyes",
+            text: "",
+            time: clockNow(),
+            eyesRef: ref,
+          },
+        ]);
+        socket.send({
+          type: "user.attach",
+          turn_id: turnRef.current,
+          ref,
+          kind: att.kind,
+          mime: att.mime,
+          b64: att.b64,
+          filename: att.filename,
+        });
+      } catch (e) {
+        // Same reason vocabulary as the server, so one UI covers both.
+        setEyesNotice((e as Error)?.message || "eyes_bad_kind");
+      }
+    },
+    [],
+  );
 
   // --- Playback queue: play sentence N while prefetching N+1 ---
   const pumpQueue = useCallback(() => {
@@ -230,6 +352,7 @@ export default function App() {
       el.removeAttribute("src");
       el.load();
     }
+    chunkPlayerRef.current?.stop();
   }, []);
 
   const handleBarge = useCallback(() => {
@@ -390,9 +513,22 @@ export default function App() {
     socket.connect(WS_URL);
     setConnected(true);
 
+    const offAuth = socket.onAuthError(() => {
+      setConnected(false);
+      setAuthError(true);
+    });
+
     const off = socket.onFrame((frame: ServerFrame) => {
       const now = performance.now();
       const elapsed = turnStartTimeRef.current > 0 ? Math.round(now - turnStartTimeRef.current) : 0;
+
+      // Receipts are handled before the audio frame switch: a receipt plays
+      // nothing and owns its own shape, so it stays out of ws.ts's union.
+      const receipt = asReceiptFrame(frame);
+      if (receipt) {
+        attachReceipt(receipt);
+        return;
+      }
 
       switch (frame.type) {
         case "state.idle":
@@ -400,9 +536,14 @@ export default function App() {
           break;
         case "state.listening":
           setState("listening");
+          // Entering listening (fresh turn or post-barge) stops any chunked
+          // playback still in flight — the same law as killPlayback below.
+          chunkPlayerRef.current?.stop();
           break;
         case "state.thinking":
           setState("thinking");
+          // Optional AX grounding (lane C). Absent on most builds; ignore then.
+          setScreenGround(frame.screen ?? null);
           break;
         case "state.speaking":
           setState("speaking");
@@ -439,7 +580,11 @@ export default function App() {
             ttsMs: 180,
             provenance: "flown",
           }));
-          if (!mutedRef.current) {
+          // Chunked sentences already played via agent.chunk (ChunkPlayer) as
+          // they arrived — enqueuing audio_url here too would play the whole
+          // sentence a second time. The transcript line above still lands
+          // either way; only the playback enqueue is skipped.
+          if (!mutedRef.current && !frame.chunked) {
             queueRef.current.push({
               index: frame.index ?? frame.seq ?? 0,
               text: frame.text,
@@ -449,6 +594,19 @@ export default function App() {
             setQueueLength(queueRef.current.length);
             pumpQueue();
           }
+          break;
+        case "agent.chunk":
+          if (!mutedRef.current) {
+            void getChunkPlayer().enqueue({
+              seq: frame.seq,
+              chunk_no: frame.chunk_no,
+              audio_b64: frame.audio_b64,
+              final: frame.final,
+            });
+          }
+          break;
+        case "handover.received":
+          pushLine("agent", `Handover received from ${frame.source}.`);
           break;
         case "agent.done":
           setMetrics((m) => ({
@@ -465,17 +623,43 @@ export default function App() {
             })
             .catch(() => {});
           break;
+        case "eyes.received":
+          patchEyes(frame.ref, {
+            status: "received",
+            task: frame.task,
+            kind: frame.kind ?? "image",
+            bytes: frame.bytes,
+          });
+          break;
+        case "eyes.text":
+          patchEyes(frame.ref, {
+            status: "text",
+            text: frame.text,
+            truncated: Boolean(frame.truncated),
+            task: frame.task,
+            engine: frame.engine,
+            source: frame.source,
+          });
+          break;
         case "agent.error":
           console.warn("[pet-talk] Agent error frame:", frame.reason);
+          if (frame.ref) {
+            patchEyes(frame.ref, {
+              status: "error",
+              reason: frame.reason,
+              detail: frame.detail,
+            });
+          }
           break;
       }
     });
 
     return () => {
       off();
+      offAuth();
       socket.close();
     };
-  }, [pushLine, pumpQueue]);
+  }, [pushLine, pumpQueue, patchEyes, attachReceipt, getChunkPlayer]);
 
   // --- Fetch Voices, Personas, and Memory Ledger on load ---
   useEffect(() => {
@@ -526,6 +710,7 @@ export default function App() {
       .then((d) => {
         if (d && d.settings) setSettings(d.settings);
         if (d && d.active) setActiveProviders(d.active);
+        if (d && d.secrets_set) setSecretsSet(d.secrets_set);
       })
       .catch(() => {});
   }, [currentPersona]);
@@ -537,13 +722,18 @@ export default function App() {
     const base = httpBaseFromWs(WS_URL);
     const res = await fetch(`${base}/settings`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...studioTokenHeader() },
       body: JSON.stringify(newSettings),
     });
+    if (res.status === 401) {
+      setAuthError(true);
+      return;
+    }
     if (res.ok) {
       const data = await res.json();
       if (data.settings) setSettings(data.settings);
       if (data.active) setActiveProviders(data.active);
+      if (data.secrets_set) setSecretsSet(data.secrets_set);
     }
   };
 
@@ -563,9 +753,13 @@ export default function App() {
     const base = httpBaseFromWs(WS_URL);
     const res = await fetch(`${base}/personas`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...studioTokenHeader() },
       body: JSON.stringify(personaData),
     });
+    if (res.status === 401) {
+      setAuthError(true);
+      return;
+    }
     if (res.ok) {
       const refreshed = await fetch(`${base}/personas`).then((r) => r.json());
       setPersonas(refreshed);
@@ -576,7 +770,14 @@ export default function App() {
   // Handle Delete Persona
   const handleDeletePersona = async (name: string) => {
     const base = httpBaseFromWs(WS_URL);
-    const res = await fetch(`${base}/personas/${name}`, { method: "DELETE" });
+    const res = await fetch(`${base}/personas/${name}`, {
+      method: "DELETE",
+      headers: { ...studioTokenHeader() },
+    });
+    if (res.status === 401) {
+      setAuthError(true);
+      return;
+    }
     if (res.ok) {
       const refreshed = await fetch(`${base}/personas`).then((r) => r.json());
       setPersonas(refreshed);
@@ -587,7 +788,14 @@ export default function App() {
   // Clear Memory
   const handleClearMemory = async () => {
     const base = httpBaseFromWs(WS_URL);
-    const res = await fetch(`${base}/ledger`, { method: "DELETE" });
+    const res = await fetch(`${base}/ledger`, {
+      method: "DELETE",
+      headers: { ...studioTokenHeader() },
+    });
+    if (res.status === 401) {
+      setAuthError(true);
+      return;
+    }
     if (res.ok) {
       setMemoryTurns([]);
     }
@@ -649,6 +857,44 @@ export default function App() {
         padding: "1.5rem 1rem",
       }}
     >
+      {authError && (
+        <div
+          role="alert"
+          style={{
+            width: "100%",
+            maxWidth: 720,
+            background: "rgba(255, 61, 0, 0.15)",
+            border: "1px solid #ff3d00",
+            color: "#ff3d00",
+            borderRadius: "10px",
+            padding: "0.6rem 1rem",
+            marginBottom: "0.75rem",
+            fontSize: "0.8rem",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: "0.75rem",
+          }}
+        >
+          <span>studio token missing or wrong — set it in Settings to reconnect.</span>
+          <button
+            type="button"
+            onClick={() => setShowSettings(true)}
+            style={{
+              background: "none",
+              border: "1px solid #ff3d00",
+              color: "#ff3d00",
+              borderRadius: "6px",
+              padding: "0.2rem 0.6rem",
+              fontSize: "0.75rem",
+              cursor: "pointer",
+              flexShrink: 0,
+            }}
+          >
+            Open Settings
+          </button>
+        </div>
+      )}
       {/* Top App Bar */}
       <header
         style={{
@@ -983,6 +1229,11 @@ export default function App() {
             </span>
           </div>
 
+          <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", marginBottom: "0.85rem" }}>
+            <ScreenGroundingLine screen={screenGround} />
+            <EyesAttachDock onAttach={handleAttach} disabled={!connected} notice={eyesNotice} />
+          </div>
+
           <div
             data-testid="transcript"
             style={{
@@ -998,7 +1249,12 @@ export default function App() {
                 Hold spacebar to talk. Transcripts and sentence audio will stream live here.
               </div>
             ) : (
-              lines.map((line) => (
+              lines.map((line) =>
+                line.who === "eyes" ? (
+                  eyesMap[line.eyesRef ?? ""] ? (
+                    <EyesBlock key={line.id} entry={eyesMap[line.eyesRef as string]} />
+                  ) : null
+                ) : (
                 <div
                   key={line.id}
                   style={{
@@ -1027,6 +1283,8 @@ export default function App() {
                     <span style={{ color: "#636c84" }}>{line.time}</span>
                   </div>
                   <div style={{ color: "#f1f3f9", lineHeight: 1.4 }}>{line.text}</div>
+                  {/* Proof under the spoken line. Never a mascot here. */}
+                  {line.receipt ? <ReceiptChip receipt={line.receipt} /> : null}
                   {line.audio_url && (
                     <div style={{ marginTop: "0.35rem" }}>
                       <button
@@ -1050,7 +1308,8 @@ export default function App() {
                     </div>
                   )}
                 </div>
-              ))
+                ),
+              )
             )}
           </div>
         </section>
@@ -1061,6 +1320,7 @@ export default function App() {
           disabled={!connected}
           connected={connected}
           serverUrl={httpBaseFromWs(WS_URL)}
+          onAuthError={() => setAuthError(true)}
           t={t}
         />
       </main>
@@ -1080,7 +1340,13 @@ export default function App() {
         onClose={() => setShowSettings(false)}
         settings={settings}
         activeProviders={activeProviders}
+        secretsSet={secretsSet}
         onApplySettings={handleApplySettings}
+        onTokenSaved={() => {
+          setAuthError(false);
+          socket.connect(WS_URL);
+          setConnected(true);
+        }}
         t={t}
       />
 

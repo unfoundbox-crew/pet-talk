@@ -1,88 +1,228 @@
 #!/usr/bin/env bash
-# qa/run_all.sh — pet-talk v0.2 QA gate runner (TECH-SPEC sections 6-7).
-# Runs protocol tests + persona/i18n tests + latency budget + say.sh smoke.
-# Appended (QA2): humanizer backchannel contract (sec 8.3) + sec-8.4 budget re-assert.
-# Exit 0 iff nothing FAILed (SKIPs are honest, not failures). Daemon-dependent
-# steps skip gracefully with a SKIP message when 127.0.0.1:8088 refuses.
+# qa/run_all.sh — pet-talk QA gate runner (TECH-SPEC sections 6-9).
+#
+# Honest, bounded, silent-capable, cannot hang:
+#   - Suites are discovered from ONE ordered array below; "i/N" numbering is
+#     computed from that array's length, never hand-typed.
+#   - Every step runs under a bounded timeout (perl alarm — macOS has no
+#     `timeout` binary). Default 120s; override per-suite, see TIMEOUT
+#     OVERRIDES below.
+#   - Steps that need a daemon probe the port with a 1s connect and SKIP
+#     with the reason when it refuses — never hang waiting for one.
+#   - Steps that produce sound SKIP under PET_TALK_SILENT=1, printed reason.
+#   - qa/test_real_engine_e2e.py and qa/test_voice_analyzer.py run only
+#     under PET_TALK_REAL_ENGINE=1, else SKIP (so the pass count is honest).
+#   - A final summary table reports PASS/FAIL/SKIP counts and every SKIP
+#     reason. Exit non-zero iff any suite FAILed.
+#
+# Usage:
+#   bash qa/run_all.sh              # full gate
+#   PET_TALK_SILENT=1 bash qa/run_all.sh    # no sound, no daemons started
+#   PET_TALK_REAL_ENGINE=1 bash qa/run_all.sh   # also run the real-engine suites
+#   bash qa/run_all.sh --list       # print suites and exit, run nothing
 set -u
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PORT="${PORT:-8088}"
+cd "$ROOT" || exit 1
+
+APP_PORT="${APP_PORT:-8089}"
+TTS_PORT="${PORT:-8088}"
+DEFAULT_TIMEOUT="${QA_DEFAULT_TIMEOUT:-120}"
+SILENT="${PET_TALK_SILENT:-0}"
+REAL_ENGINE="${PET_TALK_REAL_ENGINE:-0}"
+
+# ---------------------------------------------------------------------------
+# Suite table: "label|path|kind|flags"
+#   kind:  unit  = python3 <path> -v   (stdlib unittest, verbose)
+#          main  = python3 <path>      (script has its own main(), no -v)
+#          shell = bash <path> <args>
+#   flags: comma-separated, any of:
+#          SILENT     - SKIP entirely when PET_TALK_SILENT=1 (produces sound
+#                       or starts a daemon that could)
+#          REAL       - SKIP entirely unless PET_TALK_REAL_ENGINE=1
+#          OPTIONAL   - SKIP (not FAIL) if the file doesn't exist yet
+#                       (another lane creates it concurrently)
+#          PORT:<n>   - SKIP unless 127.0.0.1:<n> accepts a 1s connection
+# ---------------------------------------------------------------------------
+SUITES=(
+  "protocol frames|qa/test_protocol.py|unit|"
+  "design tokens (AgentWorth vendor + pet-talk layer)|qa/test_design_tokens.py|unit|"
+  "personas + voices + i18n|qa/test_persona.py|unit|"
+  "persona studio API & persistence|qa/test_persona_api.py|unit|"
+  "runtime tire switching & settings API|qa/test_settings_api.py|unit|"
+  "transcribe REST API & WS user.text turn frames|qa/test_transcribe_api.py|unit|"
+  "universal dictation matrix & clean prose|qa/test_dictation_matrix.py|unit|"
+  "hippocampus memory ledger|qa/test_memory.py|unit|"
+  "humanizer backchannel contract|qa/test_humanizer_gates.py|unit|"
+  "provider ABCs & factories|qa/test_providers.py|unit|"
+  "no-vendor-lock-in capability matrix (STT/LLM/TTS/VAD/eyes)|qa/test_capability_matrix.py|unit|"
+  "chunked TTS wire path & warm stall cache|qa/test_tts_chunking.py|unit|"
+  "turn lifecycle|qa/test_turn_lifecycle.py|unit|OPTIONAL"
+  "studio token + egress allowlist (exfiltration refused)|qa/test_security.py|unit|OPTIONAL"
+  "zero-vision eyes lane (attach, OCR, named errors)|qa/test_eyes.py|unit|"
+  "hand-over chord frame (user.handover)|qa/test_handover.py|unit|"
+  "terminal CLI client|qa/test_cli_client.py|unit|"
+  "native macOS global hotkey listener|qa/test_hotkey.py|unit|SILENT"
+  "floating glass capsule HUD|qa/test_hud.py|unit|"
+  "acoustic earcons & config engine|qa/test_earcons.py|unit|SILENT"
+  "WebSocket resilience & bounded audio LRU|qa/test_socket_resilience.py|unit|"
+  "Smallest.ai Lightning TTS & OpenAI reasoning tyres|qa/test_new_tyres.py|unit|"
+  "voice forensics & latency analyzer|qa/test_voice_analyzer.py|unit|REAL"
+  "real engine e2e (Kokoro/STT/LLM)|qa/test_real_engine_e2e.py|unit|REAL"
+  "archie receipts, freshness law & chip rules|qa/test_receipts.py|unit|"
+  "latency budget vs qa/budgets.json|qa/latency.py|main|"
+  "say.sh smoke (one sentence)|say.sh|shell|SILENT,PORT:${TTS_PORT}"
+  "live WS turn (needs server on :${APP_PORT})|qa/live_ws_turn.py|unit|PORT:${APP_PORT}"
+)
+N=${#SUITES[@]}
+
+# ---------------------------------------------------------------------------
+# --list: print the suite table and exit, run nothing.
+# ---------------------------------------------------------------------------
+if [ "${1:-}" = "--list" ]; then
+  i=0
+  for entry in "${SUITES[@]}"; do
+    i=$((i + 1))
+    IFS='|' read -r label path kind flags <<< "$entry"
+    printf '%2d/%-2d  %-55s %-6s %s\n' "$i" "$N" "$label" "$kind" "$path"
+  done
+  exit 0
+fi
+
+port_open() { # host port -> 0 if a connection succeeds within 1s
+  python3 -c "
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.settimeout(1.0)
+try:
+    s.connect(('$1', $2))
+    sys.exit(0)
+except OSError:
+    sys.exit(1)
+finally:
+    s.close()
+" 2>/dev/null
+}
+
+run_bounded() { # timeout_s cmd... -> runs cmd in its own process group under a hard wall-clock alarm
+  # On timeout the WHOLE group is killed (TERM, then KILL after 2s), so a suite
+  # that forked a server or an OCR subprocess cannot leave orphans behind.
+  # Exit status 124 on timeout, else the command's own status.
+  local t="$1"; shift
+  perl -e '
+    use POSIX qw(setsid);
+    my $t = shift;
+    my $pid = fork();
+    die "fork: $!" unless defined $pid;
+    if ($pid == 0) { setsid(); exec @ARGV or die "exec: $!"; }
+    local $SIG{ALRM} = sub {
+      kill "TERM", -$pid; select(undef, undef, undef, 2);
+      kill "KILL", -$pid; waitpid($pid, 0); exit 124;
+    };
+    alarm $t;
+    waitpid($pid, 0);
+    my $st = $?;
+    exit(($st & 127) ? 128 + ($st & 127) : $st >> 8);
+  ' "$t" "$@"
+}
+
+timeout_for() { # path -> per-suite override via env, else DEFAULT_TIMEOUT
+  local base key override
+  base="$(basename "$1")"
+  base="${base%.py}"
+  base="${base%.sh}"
+  key="$(echo "$base" | tr '[:lower:].-' '[:upper:]__')_TIMEOUT"
+  override="${!key:-}"
+  echo "${override:-$DEFAULT_TIMEOUT}"
+}
+
+NAMES=()
+STATUSES=()
+REASONS=()
 FAIL=0
+i=0
 
-say() { printf '%s\n' "== $1"; }
+for entry in "${SUITES[@]}"; do
+  i=$((i + 1))
+  IFS='|' read -r label path kind flags <<< "$entry"
+  printf '== %d/%d %s (%s)\n' "$i" "$N" "$label" "$path"
 
-say "1/4 protocol frames (stdlib unittest)"
-if python3 "$ROOT/qa/test_protocol.py" -v; then :; else FAIL=1; fi
+  skip_reason=""
 
-say "2/4 personas + voices + i18n (stdlib unittest)"
-if python3 "$ROOT/qa/test_persona.py" -v; then :; else FAIL=1; fi
+  if [[ ",$flags," == *",OPTIONAL,"* ]] && [ ! -f "$ROOT/$path" ]; then
+    skip_reason="$path not created yet (another lane owns it)"
+  fi
 
-say "2b/4 persona studio API & persistence (stdlib unittest)"
-if python3 "$ROOT/qa/test_persona_api.py" -v; then :; else FAIL=1; fi
+  if [ -z "$skip_reason" ] && [[ ",$flags," == *",SILENT,"* ]] && [ "$SILENT" = "1" ]; then
+    skip_reason="PET_TALK_SILENT=1 — this suite produces sound or starts an audio-capable daemon"
+  fi
 
-say "2b2/4 runtime tire switching & settings API (stdlib unittest)"
-if python3 "$ROOT/qa/test_settings_api.py" -v; then :; else FAIL=1; fi
+  if [ -z "$skip_reason" ] && [[ ",$flags," == *",REAL,"* ]] && [ "$REAL_ENGINE" != "1" ]; then
+    skip_reason="PET_TALK_REAL_ENGINE!=1 — this suite hits the real STT/LLM/TTS stack; set the flag to run it"
+  fi
 
-say "2b3/4 transcribe REST API & WS user.text turn frames (stdlib unittest)"
-if python3 "$ROOT/qa/test_transcribe_api.py" -v; then :; else FAIL=1; fi
+  if [ -z "$skip_reason" ]; then
+    port_flag="$(grep -oE 'PORT:[0-9]+' <<< "$flags" || true)"
+    if [ -n "$port_flag" ]; then
+      port="${port_flag#PORT:}"
+      if ! port_open 127.0.0.1 "$port"; then
+        skip_reason="127.0.0.1:$port refused (daemon not running)"
+      fi
+    fi
+  fi
 
-say "2b4/4 universal dictation matrix & clean prose (stdlib unittest)"
-if python3 "$ROOT/qa/test_dictation_matrix.py" -v; then :; else FAIL=1; fi
+  if [ -n "$skip_reason" ]; then
+    echo "SKIP  $label — $skip_reason"
+    NAMES+=("$label"); STATUSES+=("SKIP"); REASONS+=("$skip_reason")
+    continue
+  fi
 
-say "2c/4 hippocampus memory ledger (stdlib unittest)"
-if python3 "$ROOT/qa/test_memory.py" -v; then :; else FAIL=1; fi
+  t="$(timeout_for "$path")"
+  case "$kind" in
+    unit)  run_bounded "$t" python3 "$ROOT/$path" -v ;;
+    main)  run_bounded "$t" python3 "$ROOT/$path" ;;
+    shell) run_bounded "$t" bash "$ROOT/$path" "QA smoke: pet-talk speaks." ;;
+    *) echo "FAIL  unknown suite kind: $kind"; rc=1 ;;
+  esac
+  rc=$?
 
-say "3/4 latency budget (honest stub until backend exists)"
-if python3 "$ROOT/qa/latency.py"; then :; else FAIL=1; fi
-
-say "4/4 say.sh smoke (one sentence; daemon optional)"
-if python3 -c "import socket,sys; s=socket.socket(); s.settimeout(1.0); s.connect(('127.0.0.1', $PORT))" 2>/dev/null; then
-  if bash "$ROOT/say.sh" "QA smoke: pet-talk speaks."; then
-    echo "PASS  say.sh smoke — one sentence synthesized and played"
+  if [ "$rc" -eq 0 ]; then
+    echo "PASS  $label"
+    NAMES+=("$label"); STATUSES+=("PASS"); REASONS+=("")
+  elif [ "$rc" -eq 142 ] || [ "$rc" -eq 124 ]; then
+    echo "FAIL  $label — TIMEOUT after ${t}s"
+    NAMES+=("$label"); STATUSES+=("FAIL"); REASONS+=("TIMEOUT after ${t}s")
+    FAIL=1
   else
-    echo "FAIL  say.sh smoke — daemon answered but synth/play failed"
+    echo "FAIL  $label — exit $rc"
+    NAMES+=("$label"); STATUSES+=("FAIL"); REASONS+=("exit $rc")
     FAIL=1
   fi
+done
+
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+PASS_N=0; FAIL_N=0; SKIP_N=0
+for s in "${STATUSES[@]}"; do
+  case "$s" in
+    PASS) PASS_N=$((PASS_N + 1)) ;;
+    FAIL) FAIL_N=$((FAIL_N + 1)) ;;
+    SKIP) SKIP_N=$((SKIP_N + 1)) ;;
+  esac
+done
+
+echo ""
+echo "== summary =========================================================="
+printf '%-3s  %-55s %s\n' "St" "suite" "reason"
+for idx in "${!NAMES[@]}"; do
+  printf '%-3s  %-55s %s\n' "${STATUSES[$idx]}" "${NAMES[$idx]}" "${REASONS[$idx]}"
+done
+echo "----------------------------------------------------------------------"
+echo "PASS=$PASS_N  FAIL=$FAIL_N  SKIP=$SKIP_N  (total=$N)"
+if [ "$FAIL" -eq 0 ]; then
+  echo "RESULT: OK (passes + honest SKIP only)"
 else
-  echo "SKIP  say.sh smoke — 127.0.0.1:$PORT refused (daemon not running; start ./serve.sh to prove it)"
+  echo "RESULT: FAIL"
 fi
-
-say "5/6 humanizer backchannel contract (stdlib unittest; SKIPs conformance until humanizer/ lands)"
-if python3 "$ROOT/qa/test_humanizer_gates.py" -v; then :; else FAIL=1; fi
-
-say "6/6 latency sec-8.4 budgets (asserted inside latency.py; drift fails loudly)"
-# Checked as part of 3/6 above — this section re-asserts the 8.4 constants
-# standalone so a sec-6 pass can never mask a sec-8.4 drift.
-if python3 -c "import sys; sys.path.insert(0, '$ROOT/qa'); import latency; sys.exit(0 if latency.check_budgets() else 1)"; then :; else FAIL=1; fi
-
-say "7/7 live WS turn (needs server on :8089 + websockets; SKIP when absent)"
-APP_PORT="${APP_PORT:-8089}"
-if python3 -c "import socket; s=socket.socket(); s.settimeout(1.0); s.connect(('127.0.0.1', int('$APP_PORT')))" 2>/dev/null; then
-  if python3 "$ROOT/qa/live_ws_turn.py" -v; then :; else FAIL=1; fi
-else
-  echo "SKIP  live WS turn — 127.0.0.1:$APP_PORT refused (boot \`python3 -m uvicorn server.app:app --port $APP_PORT\` from pet-talk/ to prove it)"
-fi
-
-say "8/9 terminal CLI client (audio recording, playback, barge-in <=50ms, WS client)"
-if python3 "$ROOT/qa/test_cli_client.py" -v; then :; else FAIL=1; fi
-
-say "9/10 native macOS global hotkey listener (Carbon Option+Tab, sub-50ms barge kill, daemon lifecycle)"
-if python3 "$ROOT/qa/test_hotkey.py" -v; then :; else FAIL=1; fi
-
-say "10/11 floating glass capsule HUD (NSPanel, Obsidian Zinc, kinetic glyphs, nonactivating)"
-if python3 "$ROOT/qa/test_hud.py" -v; then :; else FAIL=1; fi
-
-say "11/12 acoustic earcons & config engine (sub-2ms CoreAudio/NSSound pre-cached in RAM, sound packs)"
-if python3 "$ROOT/qa/test_earcons.py" -v; then :; else FAIL=1; fi
-
-say "12/13 WebSocket resilience & bounded audio LRU (zero task leaks, dead socket safety)"
-if python3 "$ROOT/qa/test_socket_resilience.py" -v; then :; else FAIL=1; fi
-
-say "13/13 Smallest.ai Lightning TTS & OpenAI reasoning tyres (stdlib unittest)"
-if python3 "$ROOT/qa/test_new_tyres.py" -v; then :; else FAIL=1; fi
-
-say "summary"
-if [ "$FAIL" -eq 0 ]; then echo "RESULT: OK (passes + honest SKIP/NOT-MEASURED only)"; else echo "RESULT: FAIL"; fi
 exit "$FAIL"
-
-
