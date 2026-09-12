@@ -28,7 +28,7 @@ TURNS_PATH = os.path.join(SERVER_DIR, "turns.jsonl")
 LEDGER_PATH = os.path.join(SERVER_DIR, "ledger.jsonl")
 
 SERVICE_NAME = "pet-talk-duplex"
-SERVICE_VERSION = "0.2"
+SERVICE_VERSION = "0.3.0"
 
 # Field names holding a credential. Redacted by ``/settings``.
 SECRET_HINTS = ("key", "token", "secret", "password")
