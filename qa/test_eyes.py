@@ -522,9 +522,22 @@ class TestEyesContextReachesTheTurnPrompt(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(llm.seen), 1)
         first_prompt = llm.seen[0][0]["content"]
-        self.assertIn(
-            "[eyes:att-1:screenshot|transcribe] INVOICE 42 TOTAL 9.00", first_prompt
+        # The OCR text reaches the prompt, but FENCED and escaped: the `[` of
+        # our own tag is escaped too, because inside the fence nothing can be
+        # told apart from what the picture said (server/persona_runtime.py).
+        from server.persona_runtime import (
+            OCR_FENCE_CLOSE,
+            OCR_FENCE_OPEN,
+            OCR_PREAMBLE,
         )
+
+        self.assertIn(OCR_PREAMBLE, first_prompt)
+        body = first_prompt[
+            first_prompt.index(OCR_FENCE_OPEN) : first_prompt.index(OCR_FENCE_CLOSE)
+        ]
+        self.assertIn("eyes:att-1:screenshot|transcribe", body)
+        self.assertIn("INVOICE 42 TOTAL 9.00", body)
+        self.assertEqual(first_prompt.count("INVOICE 42 TOTAL 9.00"), 1)
 
         await handle_turn(
             ws, "t-eyes-2", "anything else", SpeakQueue(),
