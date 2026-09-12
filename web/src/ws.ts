@@ -52,6 +52,15 @@ function wsUrlWithToken(url: string): string {
 
 export type AgentState = "idle" | "listening" | "thinking" | "speaking";
 
+/** One word's span in a sentence's audio. `estimated` is false only where the
+ * backend returned real timing — see SPEC 5.2. */
+export interface WordTime {
+  word: string;
+  start_ms: number;
+  end_ms: number;
+  estimated: boolean;
+}
+
 export type PersonaId = string;
 
 // ---- Eyes (WAVE3 §1 / TECH-DESIGN Phase 4) ----
@@ -123,7 +132,32 @@ export type ClientFrame =
 // ---- Frames: server -> client ----
 export type ServerFrame =
   | { type: "agent.stall"; turn_id: string; phrase_id: string; text?: string; audio_url?: string }
-  | { type: "agent.sentence"; turn_id: string; index?: number; seq?: number; text: string; audio_url: string }
+  | {
+      type: "agent.sentence";
+      turn_id: string;
+      index?: number;
+      seq?: number;
+      text: string;
+      audio_url: string;
+      // Chunked TTS (SPEC 4.2.1). Optional so a server on the previous
+      // contract still type-checks: `chunked` absent means whole-sentence.
+      stream_url?: string | null;
+      chunked?: boolean;
+      word_times?: WordTime[];
+      estimated?: boolean;
+    }
+  | {
+      // One synthesis chunk, sent BEFORE the agent.sentence it belongs to.
+      // `audio_b64` is a complete WAV file, playable on arrival; `url` serves
+      // the same bytes. Exactly one chunk carries `final: true`.
+      type: "agent.chunk";
+      turn_id: string;
+      seq: number;
+      chunk_no: number;
+      audio_b64: string;
+      url?: string;
+      final: boolean;
+    }
   | { type: "agent.done"; turn_id: string; path?: string; sentences?: number }
   | { type: "agent.error"; turn_id: string; reason: string; detail?: string; ref?: string }
   | { type: "state.idle"; turn_id: string }

@@ -347,128 +347,96 @@ Source of truth: `qa/budgets.json`.
 | `llm_ms` | 800 |
 | `tts_ms` | 200 |
 
-### 9.1 MEASURED (2026-09-12, real providers, real speech, live WS loop)
+### 9.1 MEASURED (2026-09-12c, real providers, real speech, live WS loop, chunked TTS)
 
-**A real end-to-end turn is measured for the first time.** Yesterday's pass
-recorded component numbers and NOT MEASURED for everything turn-level. Two
-things blocked it, and both were bugs in our own tree rather than facts about
-the providers:
+**Read the machine note before any number below.** Three other P0 lanes were
+building and testing on this same MacBook throughout this pass. Load average hit
+186 at the worst point and sat at 16-20 during the runs recorded here, against a
+load of roughly 2 for the 2026-09-12b pass. Every turn-level number here is a
+**ceiling, not this stack's capability**, and the two regressions against 12b
+(`stt_ms`, `stall_ms`) are machine load rather than code — the stage receipt
+below proves where the time went. A clean re-measure on a quiet machine is owed.
 
-1. **`qa/latency.py` sent 320 samples of silence.** Fine against stub STT,
-   which answers regardless; against a real tyre it transcribes to nothing and
-   the turn ends in `empty_transcript`, so every turn-level number it printed
-   was the error path. Fixed: both live-turn scripts now send real speech from
-   `qa/fixtures/weather_turn.wav` through one resolver (`qa/fixture_audio.py`),
-   with the RIFF header stripped and the true `sample_rate` sent.
-2. **"`LLM_PROVIDER=groq`'s default model cannot stream text" was the wrong
-   diagnosis.** `groq/compound-mini` *can* emit `content`; it was never given
-   room to. A reasoning model spends its token ceiling on `reasoning` deltas
-   first, and at the ordinary 120-token ceiling it finishes with
-   `finish_reason: "length"` having spoken nothing — reproduced on
-   `openai/gpt-oss-20b` and `qwen/qwen3.6-27b` too. Fixed in
-   `_build_payload` (ceiling floored at 400 for the reasoning family,
-   `reasoning_effort: "low"` for gpt-oss), and `_sentence_stream` now raises
-   `llm_no_content` instead of returning an empty generator, so a provider
-   that cannot speak can never again look healthy.
+**What this pass changed.** `tts_ms` was failing structurally: every backend
+returned one complete WAV per sentence, so nothing could arrive before the whole
+sentence was synthesized, and at Kokoro's RTF any sentence past ~9 words was
+over budget by construction. Chunked synthesis (§4.2.1) fixes the shape rather
+than the provider: the sentence is split at clause boundaries, each clause is
+synthesized and sent as it is produced, and what has to fit inside 200ms is one
+clause. And the cold first turn no longer pays a stall synth — `warm_stall_cache`
+pre-synthesizes the persona's stalls at startup.
 
-Chosen defaults, all three swapped on measurement:
+**Component-level** — direct provider calls. The TTS sentence is 13 words (the
+earlier brief called it 12; it is 13 by plain `split()`).
 
-| tyre | default | why |
-|---|---|---|
-| STT | `faster-whisper` (`tiny.en`, tuned) | the only tyre inside 150ms from this machine |
-| LLM | `litellm` @ `gpt-oss-120b-groq` | the house proxy route, and inside 800ms |
-| TTS | `kokoro-local` (in-process Kokoro-82M) | 5x the daemon, and the closest to 200ms |
+| Component | p50 (ms) | p95 (ms) | Budget (ms) | Result |
+|---|---|---|---|---|
+| `tts_ms` — first playable audio of a sentence (chunk 0, kokoro-local, N=9) | **127.3** | 246.1 | 200 | **PASS** at p50, p95 clips |
+| the same sentence whole (`PET_TALK_TTS_CHUNKS=0`, N=9) | 303.1 | 548.1 | 200 | **FAIL** |
+| `stt_ms` (faster-whisper tiny.en, local, N=5) | 164.1 | 285.6 | 150 | **FAIL** — was 143.4 on the quiet machine |
+| `llm_ms` first content delta | — | — | 800 | **NOT MEASURED** this pass; unchanged from 12b (512.4 / 805.4) |
+
+`tts_ms` now measures **the first playable audio of a sentence**, because that
+is what a listener waits on. Chunk 0 is the only chunk racing a budget: once it
+is playing, every later chunk only has to arrive before the queued audio runs
+out, and at an RTF of ~0.06 that is never close.
+
+**The first chunk cannot usefully be made smaller.** Measured, same run:
+
+| words in chunk 0 | first-chunk p50 (ms) | p95 (ms) | whole-sentence total (ms) |
+|---|---|---|---|
+| 6 | 249.8 | 675.0 | 583.7 |
+| **4 (the default)** | **127.3** | **246.1** | **409.5** |
+| 3 | 136.7 | 213.0 | 573.8 |
+| 2 | 204.1 | 389.8 | 950.3 |
+
+There is a floor of roughly 110ms of fixed per-call overhead. Below four words a
+shorter chunk buys no latency and costs an extra chunk, which is why the default
+is 4 and not 2. The `PET_TALK_REAL_ENGINE=1` gated test in
+`qa/test_tts_chunking.py` re-measured first-chunk p50 at 174.4ms (N=5) during a
+busier moment and still passed the budget.
 
 **Turn-level** — live WS through the real FastAPI loop, `APP_PORT=8089 python3
 qa/latency.py` run three times at N=5 turns, median of the three runs:
 
 | Metric | p50 (ms) | p95 (ms) | Budget (ms) | Result |
 |---|---|---|---|---|
-| `stall_ms` | 245.5 | 291.1 | 400 | **PASS** |
-| `first_sentence_ms` | 245.5 | 291.2 | 800 (`turn_p50_ms`) | **PASS** |
-| `barge_ms` | 0.9 | 1.5 | 100 | **PASS** |
+| `first_audio_ms` — first frame carrying playable audio | 696.0 | 775.8 | 800 (`turn_p50_ms`) | **PASS** |
+| `turn_worst_ms` — first turn of a fresh process | — | **433.9** | 1200 | **PASS** — was 1455.3 |
+| `barge_ms` | 1.1 | 1.2 | 100 | **PASS** |
+| `stall_ms` | 695.6 | 775.6 | 400 | **FAIL** — machine load, see receipt |
 
-**Component-level** — direct provider calls, N=5, same fixture for STT, a
-12-word sentence for TTS:
+**The `stall_ms` receipt, from the turn's own telemetry** (`server/turns.jsonl`,
+turn `t-latency-4`): `stt 700.3ms`, `stall 748.2ms`. The stall lands **47.9ms
+after STT finishes** — that 47.9ms is the warm stall cache working. The whole of
+the breach is the STT stage, which measured 164.1ms p50 in isolation on the same
+machine and 700.3ms inside the server while Kokoro was synthesizing on other
+threads under load. Nothing in this pass touched STT.
 
-| Component | p50 (ms) | p95 (ms) | Budget (ms) | Result |
-|---|---|---|---|---|
-| `stt_ms` (faster-whisper tiny.en, local) | 143.4 | 148.4 | 150 | **PASS** |
-| `llm_ms` first content delta (proxy → gpt-oss-120b) | 512.4 | 805.4 | 800 | **PASS** at p50 |
-| `tts_ms` (kokoro-local, 12-word sentence) | 236.6 | 262.3 | 200 | **FAIL** |
-| `turn_worst_ms` (warm) | — | 291.2 | 1200 | **PASS** |
-| `turn_worst_ms` (first turn of a fresh process) | — | 1455.3 | 1200 | **FAIL** |
+`turn_worst_ms` passed on all three cold runs: 215.7, 495.9, 433.9ms. The
+warm-up itself completes about 13 seconds after boot, nearly all of it Kokoro's
+one-time model load, and logs its own receipt:
+`stall_warm_done persona=donna warmed=3 of=3 cache_size=3`.
 
-Recorded in `qa/budgets.json` under `measured`, with the previous pass kept
-beneath it as `measured.history`. No budget was softened; the three that do not
-hold are diagnosed below and stay at their written values.
+**Other receipts from this pass:**
 
-**What every candidate measured.** The defaults above are the survivors, not
-the only things tried:
+* **`qa/live_ws_turn.py`, three single-shot runs:** 387.8 PASS, 304.0 PASS,
+  703.7 FAIL against 400ms. The gate is still N=1 and still flaky by design; the
+  failing run is the same load that shows up in `stall_ms`.
+* **`qa/test_real_engine_e2e.py` (PET_TALK_REAL_ENGINE=1): 3/3 pass.**
+  kokoro-local synthesised 278,444 bytes of valid RIFF; `/transcribe` read it
+  back as *"Good morning. Donna Paulson here. Executive Secretary Mode is fully
+  operational."* (the text says "Paulsen" — greedy `tiny.en` is the accuracy cost
+  of the speed, named plainly); a live `/ws` turn drove Donna through the proxy
+  to 210,044 bytes of playable audio.
+* **Backward compatibility, end to end.** On a chunked turn,
+  `GET /audio/t-live-qa-1-s1` returned 200 `audio/wav`, 272,444 bytes. The
+  re-muxed whole-sentence WAV behind `audio_url` is intact, so a client that
+  ignores `agent.chunk` is unaffected — which is the point of keeping both for
+  one release.
 
-| STT (same 1.44s clip) | p50 (ms) | | TTS (12-word sentence) | p50 (ms) |
-|---|---|---|---|---|
-| faster-whisper `tiny.en` tuned | **143.4** | | **kokoro-local** (in-process) | **236.6** |
-| faster-whisper `tiny.en` before tuning | 193.1 | | kokoro daemon, adaptive poll | 1379.3 |
-| groq `whisper-large-v3-turbo` | 306.1 | | kokoro daemon, flat 0.5s poll | 1553.7 |
-| groq `whisper-large-v3` | 331.1 | | deepgram `aura-2-thalia-en` | 1939.4 |
-| faster-whisper `base.en` | 332.6 | | deepgram `aura-asteria-en` | 1640.0 |
-| deepgram `nova-3` | 1432.3 | | | |
-| deepgram `nova-2` | 1436.3 | | | |
-| `mlx-whisper` | not installed | | | |
-
-| LLM (first content delta) | p50 (ms) | note |
-|---|---|---|
-| groq `openai/gpt-oss-20b` | 499.0 | fastest overall; the new `groq` default |
-| **litellm `gpt-oss-120b-groq`** | **512.4** | the new default — house proxy route |
-| groq `openai/gpt-oss-120b` | 554.0 | |
-| litellm `claude-sonnet-4-6` | 1180.3 | over budget |
-| litellm `gemini-3.7-flash` | — | HTTP 429, the proxy's Gemini key is out of quota |
-| litellm `claude-sonnet-5` / `claude-fable-5` | — | HTTP 500, Bedrock: model not enabled |
-| litellm `gpt-oss-120b-cerebras` | — | HTTP 402, payment required |
-| groq `qwen/qwen3.6-27b`, `nim-gpt-oss-20b` | — | reasoning deltas only, at any ceiling |
-
-`gemini-3.7-flash` was the intended default and is rejected on evidence, not
-taste.
-
-**The three FAILs, diagnosed. None of the budgets moved.**
-
-* **`tts_ms` 236.6ms against 200ms.** Down from 1285.9ms, and the remaining gap
-  is structural rather than a tuning miss. Kokoro's real-time factor here is
-  ~0.06, so a 12-word sentence (4.05s of audio) costs ~240ms to synthesise in
-  full, and the `agent.sentence`/`audio_url` contract is one finished WAV per
-  sentence. Every sentence past about nine words is therefore over budget by
-  construction. Meeting 200ms on the 20-word ceiling (`MAX_SENTENCE_WORDS`)
-  needs chunked synthesis that streams audio as it is produced — a change to
-  the wire contract, not to a provider. Worth noting what the budget is *for*:
-  the first thing a person hears is the persona's stall phrase, which is 5
-  words (119ms p50) and is served from the RAM stall cache at zero synth cost
-  on every turn after the first. That is why `first_sentence_ms` passes at
-  245ms while `tts_ms` fails.
-* **`turn_worst_ms` 1455.3ms on the first turn of a fresh process.** That is
-  one cold stall-cache miss: the first turn synthesises its stall phrase, every
-  later turn reads it from RAM. Warm worst is 291.2ms. A pre-warm of the
-  persona's stall phrases at startup would remove it; `kokoro-local` already
-  warms the model this way, the stall cache does not yet.
-* **`llm_ms` p95 805.4ms against 800ms.** p50 is 512.4ms. The tail is the
-  proxy hop plus Groq queueing; going direct to Groq (`LLM_PROVIDER=groq`,
-  499ms p50 / 513.7ms p95) clears it with room, at the cost of leaving the
-  house route. Recorded rather than resolved — the proxy stays the default.
-
-**`qa/live_ws_turn.py`, five runs of the same single-shot stall gate:** 183.4,
-199.2, 213.7, 319.5, 401.3ms. Four inside the 400ms budget, one 1.3ms over. The
-gate is N=1, so it will flake at roughly that rate until it takes a median of a
-few turns like `qa/latency.py` does. `barge_ms` was 0.9-1.3ms on every run,
-`dropped` reported as a number, and the `audio_url` of the first worker
-sentence returned 200 `audio/wav`.
-
-**`qa/test_real_engine_e2e.py` (PET_TALK_REAL_ENGINE=1): 3/3 pass.** Receipts:
-`kokoro-local` synthesised 278,444 bytes of valid RIFF; `/transcribe` read that
-audio back as *"Good morning. Donna Paulson here. Executive Secretary Mode is
-fully operational."* (the real text says "Paulsen" — greedy `tiny.en` is the
-weakest setting in the family, which is the accuracy cost of the 143ms named
-plainly); and a live `/ws` turn drove the Donna persona through the proxy to
-148,844 bytes of playable audio.
+**No budget was softened.** `tts_ms` at p95, `stt_ms` and `stall_ms` all still
+read FAIL against their written values.
 
 **How the server was started for this measurement** (the interpreter matters —
 `kokoro-local` needs `mlx-audio` and `misaki[en]`, which live in
@@ -476,22 +444,29 @@ plainly); and a live `/ws` turn drove the Donna persona through the proxy to
 
 ```bash
 LITELLM_BASE_URL=http://127.0.0.1:8000/v1 PET_TALK_SILENT=1 \
+  STT_PROVIDER=faster-whisper LLM_PROVIDER=litellm TTS_PROVIDER=kokoro-local \
   doppler run --project unfoundbox --config dev_personal -- \
   ~/miniconda3/envs/local-ml-py311/bin/python -m uvicorn server.app:app \
     --host 127.0.0.1 --port 8089
 ```
 
-No provider address is baked into the tree: `LITELLM_BASE_URL` names the proxy
-and the loopback literal in `providers/_shared.py` is only a last-resort
-fallback.
+Those are the chosen defaults, and none of them is baked into the tree:
+`LITELLM_BASE_URL` names the proxy, `TTS_PROVIDER`/`STT_PROVIDER`/`LLM_PROVIDER`
+name the tyres, and `TTS_VOICE` names the voice (docs/VOICES.md). The loopback
+literal in `providers/_shared.py` is only a last-resort fallback.
 
-**Stub-provider numbers, for the harness not the product.** `qa/latency.py`
-with `STT_PROVIDER=stub LLM_PROVIDER=stub TTS_PROVIDER=stub`: `stall_ms` 18.1ms
-p50, `first_sentence_ms` 18.1ms, `barge_ms` 0.5ms. Hermetic slow-TTS barge test
-(`qa/test_turn_lifecycle.py`): barge kill at 0.8ms, `dropped=4`, queue
-high-water 3. These exercise the queue, the frame plumbing and the cancellation
-path — not any backend's real latency. Treat them as "the harness is honest,"
-never as user-facing latency.
+**The 2026-09-12b pass**, taken on a quiet machine before chunked synthesis, is
+kept in `qa/budgets.json` under `measured.history` with its own history beneath
+it. Its headline numbers: `tts_ms` 236.6 p50 **FAIL**, `stall_ms` 245.5 **PASS**,
+`first_sentence_ms` 245.5 **PASS**, `stt_ms` 143.4 **PASS**, cold first turn
+1455.3 **FAIL**.
+
+**Stub-provider numbers, for the harness not the product.** `qa/latency.py` with
+all three tyres stubbed: `stall_ms` 18.1ms p50, `first_sentence_ms` 18.1ms,
+`barge_ms` 0.5ms. Hermetic slow-TTS barge test: barge kill at 0.8ms,
+`dropped=4`, queue high-water 3. These exercise the queue, the frame plumbing
+and the cancellation path — not any backend's real latency. Treat them as "the
+harness is honest," never as user-facing latency.
 
 ### 9.2 Acceptance gates and their proof
 
@@ -512,8 +487,13 @@ never as user-facing latency.
 - **Kokoro word timings are estimated, not measured.** `KokoroSpacePilotTTS` does not appear to report real per-word timestamps from the daemon; `word_times` for Kokoro-synthesized audio comes from `estimate_word_times()` (uniform-per-word or char-length-weighted), always carrying `estimated: true`. Any UI that highlights the currently-spoken word against Kokoro audio is highlighting a guess, not a measurement.
 - **`cli/hotkey/build.sh` does not exist yet** in this checkout, though `Makefile`'s `build-hotkey` target and this repo's build comments both reference it as owned by another lane. `make build-hotkey` will fail until that script lands.
 - **Fixed 2026-09-12b: the LLM could not stream text, and turn latency was unmeasurable.** Both are closed — see §9.1. The diagnosis in the previous pass ("`groq/compound-mini` cannot stream text") was wrong: reasoning models were never given enough token ceiling to reach `content`. `stall_ms`, `first_sentence_ms` and `barge_ms` are now measured live and all three PASS.
-- **`tts_ms` FAILs at 236.6ms against 200ms, and cannot pass without a wire-contract change.** Kokoro's RTF here is ~0.06 and `agent.sentence` carries one finished WAV, so any sentence past ~9 words is over budget by construction. Chunked/streaming synthesis is the fix; see §9.1 for the full diagnosis. Down from 1285.9ms this pass.
-- **The stall cache is cold on the first turn of a fresh process**, which costs one full synth (~1.2s) and is the only reason `turn_worst_ms` breaches. `KokoroLocalTTS` warms its model at startup; nothing warms the persona's stall phrases. A startup pre-synth of each active persona's stall set would close it.
+- **Fixed 2026-09-12c: `tts_ms` passes at p50 (127.3ms) via chunked synthesis, and clips the budget at p95 (246.1ms).** The wire-contract change the previous entry called for is made — `agent.chunk` plus `stream_url`/`chunked` on `agent.sentence`, §4.2.1. What remains is a tail, not a structural gap: the p95 is the same machine-load variance that shows up everywhere in the 12c pass. **Only `kokoro-local` streams.** Every cloud tyre still returns one finished file, so on deepgram, smallest or elevenlabs `tts_ms` is still the whole-sentence number and reads `chunked=false` with `tts_no_chunk_support` in the log. That is the honest state, not a fallback to hide.
+- **Fixed 2026-09-12c: the stall cache is warm before the first turn.** `stall.warm_stall_cache` pre-synthesizes the default persona's stalls from an `on_event("startup")` task, and `turn_worst_ms` now passes on every cold run (215.7 / 495.9 / 433.9ms against 1200, from 1455.3). Two things worth knowing: the warm covers **only the default persona** — a first turn on a freshly switched persona still pays one synth per phrase — and it completes about 13s after boot, nearly all of it Kokoro's one-time model load, so a turn that arrives in the first few seconds of a fresh process still queues behind that load. `PET_TALK_STALL_WARM=0` disables it and logs the reason.
+- **`word_times` across chunks are estimated twice over.** Each chunk's timings are estimated from that chunk's own duration and then shifted onto the sentence timeline (`_shared.shift_word_times`). The per-word split inside a chunk is as much a guess as it ever was, and the chunk boundaries are now also boundaries in the guess. A word-highlighting UI is no worse off than before, but it is not better either — real Kokoro timings are lane 11's job.
+- **`agent.chunk` carries base64 on the WS, which is ~33% overhead per chunk.** Acceptable for clause-sized WAVs on loopback and deliberately chosen over a second HTTP round trip, but it is not the shape for a remote client. Each chunk's `url` is served too, and Opus/WebRTC streaming is lane 11's.
+- **`pcm_duration_ms` believed a lying header until 2026-09-12c.** Deepgram's speak endpoint writes a streaming placeholder (`0x7fff0000`) into the WAV `data` chunk size, so a 5-second clip read back as ~12 hours and every word time derived from it was nonsense. The helper now cross-checks the header's frame count against the bytes actually present. Any other number computed from a Deepgram clip before this date is suspect.
+- **`ElevenLabsTTS.synth` returned mp3 labelled as WAV until 2026-09-12c.** `/audio/{id}` served it as `audio/wav` and `pcm_duration_ms` could not parse it, so `word_times` came back empty. It now requests `pcm_24000` and wraps the PCM itself. The fix is **unverified against the live API** — this key returns HTTP 402 (no credit), so the request shape is right by the documented contract and not by measurement.
+- **`GET /voices` does not list the active provider's voices.** It serves `personas/voices.yaml`. `providers/tts.py:provider_voices(provider)` is the function that enumerates a real tyre (reading Kokoro's 54 voices off the weights on disk), and it is not wired to a route yet — see docs/VOICES.md for the one-line hook.
 - **`qa/live_ws_turn.py`'s stall gate is N=1 and flakes at about 1 run in 5** (measured: 183.4/199.2/213.7/319.5/401.3ms against a 400ms budget). It should take a median of a few turns the way `qa/latency.py` does; until then a single red run is not proof of a regression.
 - **`kokoro-local` needs an interpreter that has `mlx-audio` and `misaki[en]`.** On this machine that is `~/miniconda3/envs/local-ml-py311`, not the base env — a server booted with the base `python3` gets a named `tts_mlx_audio_not_installed` from the first synth, not a silent fallback. Apple Silicon only.
 - **The default STT is the least accurate setting in its family.** `tiny.en` with `beam_size=1` is what buys 143ms; it heard "Donna Paulsen" as "Donna Paulson" in the real-engine receipt. `WHISPER_MODEL=base.en` trades 190ms more for better words, without a code change.
