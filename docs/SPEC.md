@@ -227,7 +227,45 @@ Source of truth: `qa/budgets.json`.
 
 Hermetic slow-TTS barge test (`qa/test_turn_lifecycle.py`): barge kill at **0.8ms**, `dropped=4`, queue high-water **3**.
 
-**Real-engine numbers: NOT MEASURED.** These numbers exercise the queue, the frame plumbing, and the cancellation path — not a real STT/LLM/TTS backend's actual latency. Treat every ms above as "the harness works," not "the product is fast." Do not quote these as user-facing latency.
+**Real-engine numbers, component-level (real providers: Kokoro TTS local, Groq STT+LLM, 2026-09-12, M-series MacBook):**
+
+Attempting the live-WS measurement (`qa/latency.py`, `qa/live_ws_turn.py`) against a real-provider server (`STT_PROVIDER=groq TTS_PROVIDER=kokoro LLM_PROVIDER=groq`) surfaced two real bugs before it surfaced a real number:
+
+1. **Fixed this pass.** `GroqSTT.transcribe()` (and every other `urllib.request`-based provider call) sent no `User-Agent` header. Cloudflare's WAF in front of `api.groq.com/openai/v1/audio/transcriptions` blocks Python's default `Python-urllib/3.x` UA with a 403 ("error code: 1010") — identical request succeeds with any ordinary UA. Fixed by adding `DEFAULT_USER_AGENT` (`server/providers/_shared.py`) to every `urllib.request.Request` in `providers/stt.py` and `providers/tts.py`.
+2. **Not fixed, recorded here.** `LLM_PROVIDER=groq`'s default model (`groq/compound-mini`) is an agentic/tool-using model whose SSE deltas carry `reasoning` and tool-execution events, not plain `content` — for an ordinary question it streamed zero `content` deltas over multiple runs. `OpenAICompatibleLLM.stream()` only reads `delta.content`, so the real worker path emits zero sentences with this provider's own default model. This is a provider-default bug, not a `qa/` bug — `LLM_PROVIDER=groq` as configured today cannot speak.
+
+Because of (2), the **live WS turn could not be driven end-to-end this pass** — `qa/live_ws_turn.py`'s `test_full_turn_worker_path` still fails (`agent.stall` never arrives) once STT succeeds, because the worker LLM call empties out. `qa/latency.py`'s three N=5 runs against the real-provider server all show `stall_ms`/`first_sentence_ms` NOT-MEASURED for the same reason (the turn errors out of the worker path before a stall or sentence frame). `barge_ms` from those runs (~0.3-0.5ms) is not a real barge measurement either — it's the ack latency of barging an already-errored turn, not a mid-speech interrupt.
+
+To still get real numbers instead of nothing, the three provider legs were measured directly (bypassing the WS/turn layer, `N=5`, median of 5): `GroqSTT.transcribe()` on the real `weather_turn_fixture.wav` ("What is the weather today?"), `OpenAICompatibleLLM.stream()` against Groq's `openai/gpt-oss-20b` (an ordinary chat model, substituted only for this measurement — not a config change — because `groq/compound-mini` cannot stream text per finding 2), and `KokoroSpacePilotTTS.synth()` on the first returned sentence:
+
+| Component | p50 (ms) | p95 (ms) | Budget (ms) | Result |
+|---|---|---|---|---|
+| `stt_ms` (Groq, real audio) | 298.5 | 316.4 | 150 | **FAIL** |
+| `llm_first_sentence_ms` (Groq chat model, real stream) | 536.0 | 700.4 | 800 (`llm_ms`) | PASS |
+| `tts_ms` (Kokoro, real synth) | 1285.9 | 1632.7 | 200 | **FAIL** |
+| `stall_ms` | NOT MEASURED (see above) | — | 400 | — |
+| `barge_ms` (live) | NOT MEASURED (see above) | — | 100 | — |
+| `turn_p50_ms` / `turn_worst_ms` | NOT MEASURED (see above) | — | 800 / 1200 | — |
+
+Recorded in `qa/budgets.json` under the `measured` key (excluded from the numeric budget dict both loaders read, same treatment as `_comment`).
+
+**Diagnosis for the two real FAILs:** `stt_ms` at ~300ms (2x budget) is Groq's real network round trip for a 1-2s clip over HTTPS from this machine — the 150ms budget was written against no real measurement and is optimistic for a synchronous request/response round trip to a cloud endpoint; it was never going to hold without either a faster network path or a revised budget. `tts_ms` at ~1.3s (6.4x budget) is the dominant cost in the whole turn — the Kokoro SpacePilot daemon's job-based flow (`POST /api/generate/voice` → poll `GET /api/jobs/{id}` → download) pays at least one `POLL_INTERVAL_S=0.5` poll tick plus queueing/synthesis time on every call; it is the largest component by a wide margin and the one to attack first if turn-level latency work resumes. Neither budget was softened — both stay at their written values in `qa/budgets.json`.
+
+Stub-provider numbers below remain useful for proving the harness (queue, frame plumbing, cancellation) is honest — not for real-engine latency:
+
+### 9.1 MEASURED (2026-09-12, stub providers only — not a real-engine measurement)
+
+`qa/latency.py` against a running server with `STT_PROVIDER=stub LLM_PROVIDER=stub TTS_PROVIDER=stub`:
+
+| Metric | p50 (ms) | p95 (ms) |
+|---|---|---|
+| `stall_ms` | 18.1 | 20.2 |
+| `first_sentence_ms` | 18.1 | 20.3 |
+| `barge_ms` | 0.5 | — |
+
+Hermetic slow-TTS barge test (`qa/test_turn_lifecycle.py`): barge kill at **0.8ms**, `dropped=4`, queue high-water **3**.
+
+These numbers exercise the queue, the frame plumbing, and the cancellation path — not a real STT/LLM/TTS backend's actual latency. Treat every ms above as "the harness works," not "the product is fast." Do not quote these as user-facing latency.
 
 ### 9.2 Acceptance gates and their proof
 
@@ -243,9 +281,12 @@ Hermetic slow-TTS barge test (`qa/test_turn_lifecycle.py`): barge kill at **0.8m
 
 - **The speak queue is per-socket**, not per-turn: `Session.queue` is one `SpeakQueue` reused across turns via `reopen()`. Two turns on the same socket can never interleave (the newer one barges the older via `supersede()`), but this means there is exactly one live turn per socket at a time by design, not by accident.
 - **Gate 3 (≥3 gapless sentences) is only partially exercised** — see §9.2. `StubLLM` hardcodes 3 sentences; nothing in `qa/` currently proves the queue keeps buffering ahead past a 4th or 5th sentence under sustained pressure.
-- **PDF OCR is untested.** `eyes.py`'s PDF path (`pdf_max_pages=5`, `task_for()` forcing `transcribe`) has no `qa/test_eyes.py` coverage with an actual PDF fixture — only image/stub-engine paths are tested.
+- **PDF OCR now has a fixture and coverage (fixed this pass, 2026-09-12).** `qa/fixtures/eyes_sample.pdf` (a hand-built, stdlib-only, single-page real-text PDF) plus `qa/test_eyes.py::TestPdfOcr` — a hermetic path (`StubEngine`, always runs) and a `PET_TALK_REAL_ENGINE=1`-gated path that shells the real `zrv` CLI. Measured: `zrv ocr qa/fixtures/eyes_sample.pdf --task transcribe --json` returns `engine: apple-vision`, exact text match, in ~370ms — `zrv` reads the PDF's real text layer directly rather than rasterizing and OCRing, so there was no OCR noise to account for. `pdf_max_pages=5` (multi-page truncation) is still unexercised — this fixture is one page.
+- **`EYES_DESCRIBE_ENGINE` now fails fast by name when unset (fixed this pass, 2026-09-12).** Previously an unset pin meant `describe` fell through to `zrv`'s own default engine (`apple-vision`, which refuses `--task describe` with its own unrelated error) instead of a clean `eyes_disabled`. `EyesProvider.resolve()` now raises `eyes_disabled` with detail `describe_engine_unset:EYES_DESCRIBE_ENGINE` before touching any engine when `task == "describe"` and `describe_engine_pin` is unset — tested hermetically in `qa/test_eyes.py::TestDescribeEngineGate` (unset fails closed naming the var; set routes through; transcribe is unaffected; an explicit `task: describe` on a PDF still hits the gate since a frame's explicit task wins over the PDF default per `task_for`'s own precedence).
 - **Kokoro word timings are estimated, not measured.** `KokoroSpacePilotTTS` does not appear to report real per-word timestamps from the daemon; `word_times` for Kokoro-synthesized audio comes from `estimate_word_times()` (uniform-per-word or char-length-weighted), always carrying `estimated: true`. Any UI that highlights the currently-spoken word against Kokoro audio is highlighting a guess, not a measurement.
 - **`cli/hotkey/build.sh` does not exist yet** in this checkout, though `Makefile`'s `build-hotkey` target and this repo's build comments both reference it as owned by another lane. `make build-hotkey` will fail until that script lands.
+- **`LLM_PROVIDER=groq`'s default model cannot stream text.** `groq/compound-mini` is agentic/tool-using; its SSE deltas carry `reasoning`/tool-exec events, not `content`, for an ordinary question (verified 2026-09-12, multiple runs, zero `content` deltas). `OpenAICompatibleLLM.stream()` only reads `delta.content`, so a real turn through this provider streams zero sentences and the worker path never reaches `agent.stall`/`agent.sentence`. Needs either a different default model for the groq provider or delta handling that understands `reasoning`/tool-call events — not fixed this pass, see §9.1.
+- **Real-engine turn-level latency (`stall_ms`, live `barge_ms`, `turn_p50_ms`/`turn_worst_ms`) is still not measurable end-to-end**, blocked by the gap above (the worker LLM call empties out before a stall/sentence frame is ever sent). Component-level real numbers (STT, LLM-first-sentence, TTS) are in §9.1; `stt_ms` and `tts_ms` both FAIL their budgets in that measurement, `tts_ms` by 6x — Kokoro's job-poll-download flow is the biggest lever if turn-level work resumes.
 
 ## 11. A note on `cli/hotkey/*.swift`
 

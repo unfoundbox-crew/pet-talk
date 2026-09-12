@@ -16,7 +16,14 @@ import urllib.request
 import wave
 from typing import Optional
 
-from ._shared import ProviderError, encode_multipart_formdata, logger, pcm16_to_wav_bytes, redacted_repr
+from ._shared import (
+    DEFAULT_USER_AGENT,
+    ProviderError,
+    encode_multipart_formdata,
+    logger,
+    pcm16_to_wav_bytes,
+    redacted_repr,
+)
 
 
 class STTProvider(abc.ABC):
@@ -117,6 +124,7 @@ class DeepgramSTT(STTProvider):
             data=wav,
             method="POST",
             headers={
+                "User-Agent": DEFAULT_USER_AGENT,
                 "Content-Type": "audio/wav",
                 "Authorization": f"Token {self._key()}",
             },
@@ -182,6 +190,7 @@ class GroqSTT(STTProvider):
             data=body,
             method="POST",
             headers={
+                "User-Agent": DEFAULT_USER_AGENT,
                 "Content-Type": ctype,
                 "Authorization": f"Bearer {self._key()}",
             },
@@ -242,6 +251,7 @@ class OpenAIWhisperSTT(STTProvider):
             data=body,
             method="POST",
             headers={
+                "User-Agent": DEFAULT_USER_AGENT,
                 "Content-Type": ctype,
                 "Authorization": f"Bearer {self._key()}",
             },
@@ -397,7 +407,8 @@ class SenseVoiceSTT(STTProvider):
             url,
             data=wav,
             method="POST",
-            headers={"Content-Type": "audio/wav"},
+            headers={
+                "User-Agent": DEFAULT_USER_AGENT,"Content-Type": "audio/wav"},
         )
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:

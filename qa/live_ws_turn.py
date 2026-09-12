@@ -37,7 +37,7 @@ except ImportError:
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 with open(os.path.join(ROOT, "qa", "budgets.json")) as _f:
-    BUDGETS = {k: v for k, v in json.load(_f).items() if not k.startswith("_")}
+    BUDGETS = {k: v for k, v in json.load(_f).items() if not k.startswith("_") and k != "measured"}
 
 def _studio_token() -> str:
     """The live server's studio token, if this machine can see it.

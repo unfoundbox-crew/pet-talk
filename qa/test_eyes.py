@@ -263,5 +263,116 @@ class TestPersonaTaskMapping(unittest.TestCase):
         self.assertEqual(task_for(Persona(), "image", "summarise"), "transcribe")
 
 
+class TestDescribeEngineGate(unittest.TestCase):
+    """EYES_DESCRIBE_ENGINE gate (docs/ARCHITECTURE.md, item 3, 2026-09-12).
+
+    Unset (default): describe fails fast with `eyes_disabled` naming the env
+    var -- never a silent fallback to zrv's own default engine (apple-vision,
+    which refuses --task describe with an unrelated error) or a 100s+ hang
+    on apple-fm. Set: describe routes through to whatever engine is staged,
+    same as transcribe -- the pin itself is another lane's job in
+    zero-vision, this lane only has to route to it.
+    """
+
+    def test_describe_with_no_pin_fails_closed_naming_the_env_var(self):
+        sink = run(attach_frame(task="describe"), conf=cfg(describe_engine_pin=None))
+        err = sink.of("agent.error")
+        self.assertEqual(err["reason"], "eyes_disabled")
+        self.assertIn("EYES_DESCRIBE_ENGINE", err["detail"])
+        # Fails before any OCR ran -- eyes.received still fires (payload was
+        # accepted), but there is no eyes.text.
+        self.assertIn("eyes.received", sink.types)
+        self.assertNotIn("eyes.text", sink.types)
+
+    def test_describe_with_pin_set_routes_through(self):
+        sink = run(attach_frame(task="describe"), conf=cfg(describe_engine_pin="cloud-vlm"))
+        text_frame = sink.of("eyes.text")
+        self.assertEqual(text_frame["task"], "describe")
+        self.assertNotIn("agent.error", sink.types)
+
+    def test_transcribe_is_unaffected_by_the_gate(self):
+        """The gate is describe-only -- transcribe never needs a pin."""
+        sink = run(attach_frame(task="transcribe"), conf=cfg(describe_engine_pin=None))
+        self.assertNotIn("agent.error", sink.types)
+        self.assertEqual(sink.of("eyes.text")["task"], "transcribe")
+
+    def test_pdf_with_no_explicit_task_is_forced_transcribe_so_the_gate_never_applies(self):
+        """`task_for`: an explicit frame task wins even for a PDF; only the
+        *implicit* PDF-is-always-transcribe default (no task on the frame)
+        makes the describe gate moot here."""
+        sink = run(attach_frame(kind="pdf", task=None), conf=cfg(describe_engine_pin=None))
+        self.assertNotIn("agent.error", sink.types)
+        self.assertEqual(sink.of("eyes.text")["task"], "transcribe")
+
+    def test_pdf_with_explicit_describe_still_hits_the_gate(self):
+        """An explicit `task: describe` on a PDF frame wins over the PDF
+        default (task_for precedence: frame > kind) and so still needs
+        EYES_DESCRIBE_ENGINE, same as any other kind."""
+        sink = run(attach_frame(kind="pdf", task="describe"), conf=cfg(describe_engine_pin=None))
+        err = sink.of("agent.error")
+        self.assertEqual(err["reason"], "eyes_disabled")
+        self.assertIn("EYES_DESCRIBE_ENGINE", err["detail"])
+
+
+PDF_FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "eyes_sample.pdf")
+with open(PDF_FIXTURE, "rb") as _f:
+    PDF_B64 = base64.b64encode(_f.read()).decode()
+PDF_FIXTURE_TEXT = "Pet Talk PDF fixture: the quick brown fox jumps over the lazy dog."
+
+REAL_ENGINE = os.environ.get("PET_TALK_REAL_ENGINE") == "1"
+
+
+class TestPdfOcr(unittest.TestCase):
+    """PDF OCR (docs/SPEC.md Known gaps: 'PDF OCR is untested').
+
+    A hermetic path (StubEngine, always runs) plus one real-engine path
+    (`PET_TALK_REAL_ENGINE=1`, gated) that shells the actual `zrv` CLI on
+    the fixture PDF above -- verified manually 2026-09-12:
+    `zrv ocr qa/fixtures/eyes_sample.pdf --task transcribe --json` returns
+    `{"ok": true, "engine": "apple-vision", "text": "Pet Talk PDF
+    fixture: ..."}` in ~370ms. `zrv ocr file.pdf --json` reads the PDF's
+    real text layer (not a rasterize-then-OCR path) -- apple-vision's OCR
+    ran on the page text directly and returned an exact match, no OCR
+    noise at all.
+    """
+
+    def test_hermetic_pdf_task_forced_transcribe_and_text_flows(self):
+        sink = run(
+            attach_frame(kind="pdf", mime="application/pdf", b64=PDF_B64, task=None),
+            engine=StubEngine(text=PDF_FIXTURE_TEXT),
+        )
+        received = sink.of("eyes.received")
+        self.assertEqual(received["kind"], "pdf")
+        self.assertEqual(received["task"], "transcribe")  # no explicit task -> PDF's own default
+        text_frame = sink.of("eyes.text")
+        self.assertEqual(text_frame["task"], "transcribe")
+        self.assertEqual(text_frame["text"], PDF_FIXTURE_TEXT)
+        self.assertFalse(text_frame["truncated"])
+
+    def test_hermetic_pdf_suffix_written_to_scratch(self):
+        prov = EyesProvider(cfg(), engine=StubEngine())
+        att = prov.stage(attach_frame(kind="pdf", mime="application/pdf", b64=PDF_B64), None)
+        try:
+            self.assertTrue(att.path.endswith(".pdf"))
+            self.assertTrue(os.path.isfile(att.path))
+            with open(att.path, "rb") as f:
+                self.assertTrue(f.read().startswith(b"%PDF"))
+        finally:
+            prov.discard(att.ref)
+
+    @unittest.skipUnless(REAL_ENGINE, "SKIP: PET_TALK_REAL_ENGINE!=1 — this shells the real zrv CLI")
+    def test_real_zrv_engine_transcribes_the_fixture_pdf(self):
+        conf = cfg(engine="zrv")
+        sink = run(
+            attach_frame(kind="pdf", mime="application/pdf", b64=PDF_B64, task="transcribe"),
+            engine=ZrvEngine(conf),
+            conf=conf,
+        )
+        self.assertNotIn("agent.error", sink.types)
+        text_frame = sink.of("eyes.text")
+        self.assertEqual(text_frame["engine"], "zrv")
+        self.assertIn("Pet Talk PDF fixture", text_frame["text"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -14,6 +14,13 @@ from typing import Optional
 
 logger = logging.getLogger("pet_talk.providers")
 
+# `urllib.request`'s default User-Agent ("Python-urllib/3.x") trips Cloudflare
+# bot detection on at least Groq's audio/transcriptions endpoint (measured
+# 2026-09-12: identical request succeeds with this UA, fails 403 "error code:
+# 1010" with the urllib default). Every provider that shells urllib directly
+# sends this instead of relying on the library default.
+DEFAULT_USER_AGENT = "pet-talk/0.2 (+https://github.com/unfoundbox-crew/pet-talk)"
+
 
 class ProviderError(RuntimeError):
     """Fail-closed error with a machine-readable, snake_case reason.

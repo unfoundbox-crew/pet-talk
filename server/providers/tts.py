@@ -22,6 +22,7 @@ import wave
 from typing import Optional
 
 from ._shared import (
+    DEFAULT_USER_AGENT,
     ProviderError,
     estimate_word_times,
     json_dumps,
@@ -169,6 +170,7 @@ class KokoroSpacePilotTTS(TTSProvider):
             data=data,
             method=method,
             headers={
+                "User-Agent": DEFAULT_USER_AGENT,
                 "Content-Type": "application/json",
                 "X-SpacePilot-Token": self._auth_token(),
             },
@@ -248,7 +250,8 @@ class KokoroSpacePilotTTS(TTSProvider):
             else self.base_url + (file_path if file_path.startswith("/") else f"/{file_path}")
         )
         req = urllib.request.Request(
-            url, headers={"X-SpacePilot-Token": self._auth_token()}
+            url, headers={
+                "User-Agent": DEFAULT_USER_AGENT,"X-SpacePilot-Token": self._auth_token()}
         )
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
@@ -342,6 +345,7 @@ class ElevenLabsTTS(TTSProvider):
             data=data,
             method="POST",
             headers={
+                "User-Agent": DEFAULT_USER_AGENT,
                 "Content-Type": "application/json",
                 "Accept": "application/json",
                 "xi-api-key": self._key(),
@@ -414,6 +418,7 @@ class SmallestAITTS(TTSProvider):
             data=data,
             method="POST",
             headers={
+                "User-Agent": DEFAULT_USER_AGENT,
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {self.api_key}",
                 "Accept": "audio/wav",
@@ -472,6 +477,7 @@ class DeepgramTTS(TTSProvider):
             data=data,
             method="POST",
             headers={
+                "User-Agent": DEFAULT_USER_AGENT,
                 "Content-Type": "application/json",
                 "Authorization": f"Token {self._key()}",
             },

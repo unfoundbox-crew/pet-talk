@@ -6,5 +6,17 @@
   "turn_worst_ms": 1200,
   "stt_ms": 150,
   "llm_ms": 800,
-  "tts_ms": 200
+  "tts_ms": 200,
+  "measured": {
+    "date": "2026-09-12",
+    "providers": "STT+chat-LLM=Groq (whisper-large-v3-turbo / openai/gpt-oss-20b), TTS=Kokoro (local SpacePilot daemon)",
+    "machine": "M-series MacBook",
+    "method": "direct provider calls (GroqSTT.transcribe / OpenAICompatibleLLM.stream / KokoroSpacePilotTTS.synth), N=5, median of 5 (component-level only — see docs/SPEC.md 9.1 for why the live WS turn could not be measured this pass)",
+    "stt_ms": {"p50": 298.5, "p95": 316.4, "budget": 150, "result": "FAIL"},
+    "llm_first_sentence_ms": {"p50": 536.0, "p95": 700.4, "budget": 800, "result": "PASS"},
+    "tts_ms": {"p50": 1285.9, "p95": 1632.7, "budget": 200, "result": "FAIL"},
+    "stall_ms": "NOT MEASURED — see docs/SPEC.md 9.1",
+    "barge_ms": "NOT MEASURED (live) — see docs/SPEC.md 9.1",
+    "turn_p50_ms": "NOT MEASURED (live) — see docs/SPEC.md 9.1"
+  }
 }

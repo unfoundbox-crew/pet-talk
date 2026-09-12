@@ -443,6 +443,14 @@ class EyesProvider:
         """WAVE3 §1.2 — ``(task, text)`` for a staged ref. Deletes the temp file."""
         att = self.get(ref)
         try:
+            if att.task == "describe" and not self.cfg.describe_engine_pin:
+                # Fail fast and name the knob (AGENTS.md law 1): describe
+                # needs a VLM another lane is landing in zero-vision
+                # (cloud-vlm / local-vlm); with no EYES_DESCRIBE_ENGINE set,
+                # this must never fall through to zrv's own default engine
+                # (apple-vision, which refuses --task describe with its own
+                # unrelated error) or hang on apple-fm's 100s+ latency.
+                raise EyesError(REASON_DISABLED, "describe_engine_unset:EYES_DESCRIBE_ENGINE")
             self.engine.preflight()
             try:
                 text = await asyncio.wait_for(

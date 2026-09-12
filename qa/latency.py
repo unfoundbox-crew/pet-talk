@@ -63,7 +63,7 @@ PCM_B64 = base64.b64encode(bytes(320 * 2)).decode()
 def load_budgets() -> dict:
     with open(BUDGETS_PATH) as f:
         data = json.load(f)
-    return {k: v for k, v in data.items() if not k.startswith("_")}
+    return {k: v for k, v in data.items() if not k.startswith("_") and k != "measured"}
 
 
 def port_reachable(host="127.0.0.1", port=APP_PORT, timeout=1.0) -> bool:

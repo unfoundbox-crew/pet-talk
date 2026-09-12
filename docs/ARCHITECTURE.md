@@ -193,7 +193,9 @@ Latency budgets (`qa/budgets.json`), each mapped to its gate per `docs/SPEC.md` 
 
 From `docs/SPEC.md` §10, plus what this pass found:
 
-- 2026-09-12: real-engine latency is NOT MEASURED — every number in `docs/SPEC.md` §9.1 is against `STT_PROVIDER=stub LLM_PROVIDER=stub TTS_PROVIDER=stub`.
+- 2026-09-12: real-engine turn-level latency (`stall_ms`, live `barge_ms`, `turn_p50_ms`/`turn_worst_ms`) is still NOT MEASURED end-to-end — the stub-provider numbers in `docs/SPEC.md` §9.1 prove the harness, not real speed. Component-level real numbers now exist (same section): Groq STT ~300ms (FAILs the 150ms budget), Groq LLM first-sentence ~536ms (passes 800ms), Kokoro TTS ~1.3s (FAILs the 200ms budget by 6x, and is the largest single component).
+- 2026-09-12 (found this pass): `LLM_PROVIDER=groq`'s default model `groq/compound-mini` cannot drive the worker path — it's agentic/tool-using and streams `reasoning`/tool-exec SSE events instead of `content` for a plain question, so `OpenAICompatibleLLM.stream()` (which only reads `delta.content`) yields zero sentences. This is why the live end-to-end WS turn couldn't be measured this pass — the worker LLM call empties out before `agent.stall` ever fires.
+- 2026-09-12 (fixed this pass): every `urllib.request`-based provider call (`server/providers/stt.py`, `server/providers/tts.py`) sent no `User-Agent`, and Cloudflare's WAF in front of `api.groq.com`'s transcription endpoint blocks Python's default UA with a 403 (measured: identical request succeeds with any ordinary UA). Fixed with a shared `DEFAULT_USER_AGENT` constant (`server/providers/_shared.py`) applied to every such request.
 - 2026-09-12: the speak queue is per-socket, not per-turn (`Session.queue` reused via `reopen()`); at most one live turn per socket by design.
 - 2026-09-12: gate 3 (≥3 gapless sentences) only partially exercised — `StubLLM` hardcodes 3 sentences, nothing proves buffering past 4-5 under sustained pressure.
 - 2026-09-12: PDF OCR (`eyes.py`, `pdf_max_pages=5`) has no test fixture with a real PDF.
