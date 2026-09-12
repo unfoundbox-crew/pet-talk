@@ -13,7 +13,7 @@ from typing import Any, Optional
 from fastapi import WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 
-from .logs import log, swallowed
+from .logs import log, redact_home, swallowed
 from .providers import ProviderError
 
 _turn_counter = itertools.count(1)
@@ -45,9 +45,15 @@ def frame(ftype: str, turn_id: str, **fields: Any) -> dict[str, Any]:
 
 
 def error_frame(turn_id: str, reason: str, detail: str = "", **fields: Any) -> dict[str, Any]:
+    """Build ``agent.error``. ``detail`` is redacted on the way out.
+
+    Details are built from whatever failed — including another process's
+    stderr, which names absolute paths. One choke point here means no caller
+    has to remember; ``/Users/<name>`` never reaches a client.
+    """
     payload = dict(fields)
     if detail:
-        payload["detail"] = detail
+        payload["detail"] = redact_home(detail)
     return frame("agent.error", turn_id, reason=reason, **payload)
 
 
@@ -82,7 +88,10 @@ async def send_error(
     ws: WebSocket, turn_id: str, reason: str, detail: str = "", **fields: Any
 ) -> bool:
     """Emit ``agent.error`` with a named reason (law 1) and log it."""
-    log.info("agent_error turn_id=%s reason=%s detail=%s", turn_id, reason, detail)
+    log.info(
+        "agent_error turn_id=%s reason=%s detail=%s",
+        turn_id, reason, redact_home(detail),
+    )
     return await safe_send_json(ws, error_frame(turn_id, reason, detail, **fields))
 
 

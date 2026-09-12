@@ -41,7 +41,7 @@ from typing import Any, Optional
 
 from . import receipts_archie as archie
 from .frames import error_frame, frame
-from .logs import log
+from .logs import log, redact_home
 from .providers import ProviderError
 
 RECEIPT_FRAME = "agent.receipt"
@@ -254,13 +254,28 @@ def _repo_identity(repo: str) -> str:
     return parts[-1] if parts else ""
 
 
-def _short_path(path: str) -> str:
+def _short_path(path: str, repo: str = "") -> str:
+    """A path a person can read, never an absolute one (law 3).
+
+    Order: strip a worktree prefix, else make it relative to the repo the
+    receipt names, else fall back to the basename. A receipt used to carry
+    ``/Users/<name>/code/...`` straight onto the wire, which names the machine's
+    owner and tells the reader nothing they can act on.
+    """
     trimmed = (path or "").rstrip("/")
+    if not trimmed:
+        return ""
     marker = "/.claude/worktrees/"
     if marker in trimmed:
         tail = trimmed.split(marker, 1)[1]
         return tail.split("/", 1)[1] if "/" in tail else tail
-    return trimmed
+    if not os.path.isabs(trimmed):
+        return trimmed
+    base = (repo or "").rstrip("/")
+    if base and trimmed.startswith(base + "/"):
+        return trimmed[len(base) + 1:]
+    # No repo to anchor it to: the basename is the most it may say.
+    return redact_home(os.path.basename(trimmed))
 
 
 _PATH_HINT = re.compile(r"[\w./-]*\.(?:py|ts|tsx|js|jsx|swift|rs|sh|md|json|yaml|yml)\b")
@@ -332,7 +347,7 @@ def _commit_source(repo: str, hint: str) -> tuple[Source, int, dict]:
         kind="commit" if short_sha else "session",
         id=short_sha or session_id,
         repo=_repo_identity(report.get("repo_identity") or repo),
-        path=_short_path(str(row.get("file_path") or "")),
+        path=_short_path(str(row.get("file_path") or ""), repo),
     )
     if not source.id:
         raise ProviderError(MISSING, "the blame row carried no session id")

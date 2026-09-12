@@ -455,6 +455,85 @@ class TestVoiceRoutes(ReceiptsTestCase):
 # ---------------------------------------------------------------------------
 
 
+class TestNoAbsolutePathsOnTheWire(ReceiptsTestCase):
+    """Law 3: a frame never carries an absolute local path.
+
+    `agent.receipt.source.path` forwarded archie's `file_path` verbatim, and
+    `agent.error.detail` forwarded archie's stderr verbatim — both of which name
+    `/Users/<name>`, i.e. the machine's owner, to anyone holding the socket.
+    """
+
+    def test_the_helper_replaces_a_home_directory_with_a_tilde(self):
+        from server.logs import redact_home
+
+        self.assertEqual(
+            redact_home("archie exit 1: cannot open /Users/saurabh/code/x/y.py"),
+            "archie exit 1: cannot open ~/code/x/y.py",
+        )
+        self.assertEqual(redact_home("/home/bob/.codex/s.jsonl"), "~/.codex/s.jsonl")
+        self.assertEqual(redact_home("server/speech.py"), "server/speech.py")
+        self.assertEqual(redact_home(None), "")
+
+    def test_an_absolute_blame_path_becomes_repo_relative(self):
+        self.assertEqual(
+            receipts._short_path(f"{REPO}/server/speech.py", REPO), "server/speech.py"
+        )
+
+    def test_an_unanchorable_absolute_path_falls_back_to_the_basename(self):
+        short = receipts._short_path("/Users/someone/elsewhere/secret_plan.py", REPO)
+        self.assertEqual(short, "secret_plan.py")
+        self.assertNotIn("/Users/", short)
+
+    def test_a_receipt_frame_carries_no_absolute_path(self):
+        absolute = dict(BLAME_FIXTURE[0])
+        absolute["file_path"] = f"{REPO}/server/speak_queue.py"
+
+        def runner(args: list[str], cwd: str) -> str:
+            joined = " ".join(args)
+            if "session wake" in joined:
+                return json.dumps(wake_fixture(SCAN_FRESH))
+            if "repo suspect" in joined:
+                return json.dumps(SUSPECT_FIXTURE)
+            if "repo blame" in joined:
+                return json.dumps([absolute])
+            raise ProviderError("receipts_unavailable", joined)
+
+        receipts_archie.set_runner(runner)
+        receipts_archie.set_clock(lambda: NOW)
+        receipts_archie.set_head_reader(lambda repo: HEAD_AT)
+        f = receipts.attach(TURN, "A Codex session wrote server/speak_queue.py.", repo=REPO)
+        self.assertEqual(f["type"], "agent.receipt")
+        self.assertEqual(f["source"]["path"], "server/speak_queue.py")
+        self.assertNotIn("/Users/", json.dumps(f))
+        self.assertFalse(
+            f["source"]["path"].startswith("/"), f"absolute path on the wire: {f['source']}"
+        )
+
+    def test_an_error_detail_never_carries_a_username(self):
+        from server.frames import error_frame
+
+        f = error_frame(
+            TURN,
+            "receipts_unavailable",
+            "archie exit 2: no such file /Users/saurabh/code/pet-talk/server/ws.py",
+        )
+        self.assertNotIn("/Users/", f["detail"])
+        self.assertIn("~/code/pet-talk/server/ws.py", f["detail"])
+
+    def test_a_refused_receipt_carries_a_redacted_detail(self):
+        def runner(args: list[str], cwd: str) -> str:
+            raise ProviderError(
+                "receipts_unavailable", "archie died reading /Users/saurabh/.codex/x.jsonl"
+            )
+
+        receipts_archie.set_runner(runner)
+        receipts_archie.set_clock(lambda: NOW)
+        receipts_archie.set_head_reader(lambda repo: HEAD_AT)
+        f = receipts.attach(TURN, "The tests are green.", repo=REPO)
+        self.assertEqual(f["type"], "agent.error")
+        self.assertNotIn("/Users/", json.dumps(f))
+
+
 class TestFrameDiscipline(ReceiptsTestCase):
     def test_a_receipt_without_a_turn_id_fails_closed(self):
         self.arrange(SCAN_FRESH)

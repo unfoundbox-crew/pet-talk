@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 
 LOGGER_NAME = "pet_talk.server"
 
@@ -40,3 +41,26 @@ def swallowed(
         f" exc={type(exc).__name__}: {exc}" if exc is not None else "",
     )
     return reason
+
+
+# ---------------------------------------------------------------------------
+# Redaction: a home directory is the machine's owner, by name
+# ---------------------------------------------------------------------------
+
+#: ``/Users/saurabh/...`` and ``/home/saurabh/...`` name the person at the
+#: keyboard. Any of it is a privacy leak in a frame, a log line or a receipt —
+#: and an absolute path tells a reader nothing they can use anyway.
+_HOME_RE = re.compile(r"/(?:Users|home)/[^/\s:'\"]+")
+
+
+def redact_home(text: object) -> str:
+    """Replace every ``/Users/<name>`` or ``/home/<name>`` prefix with ``~``.
+
+    One helper, used by :func:`server.frames.error_frame` (so no named reason's
+    detail can carry a username — archie's stderr names paths) and by the
+    receipt source path. Non-strings come back as ``str(text)`` so a caller
+    never has to check first.
+    """
+    if text is None:
+        return ""
+    return _HOME_RE.sub("~", str(text))
