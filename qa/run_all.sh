@@ -70,6 +70,7 @@ SUITES=(
   "voice forensics & latency analyzer|qa/test_voice_analyzer.py|unit|REAL"
   "real engine e2e (Kokoro/STT/LLM)|qa/test_real_engine_e2e.py|unit|REAL"
   "archie receipts, freshness law & chip rules|qa/test_receipts.py|unit|"
+  "archie small-form glyph, states & placement rules|qa/test_archie_glyph.py|unit|"
   "latency budget vs qa/budgets.json|qa/latency.py|main|"
   "say.sh smoke (one sentence)|say.sh|shell|SILENT,PORT:${TTS_PORT}"
   "live WS turn (needs server on :${APP_PORT})|qa/live_ws_turn.py|unit|PORT:${APP_PORT}"
