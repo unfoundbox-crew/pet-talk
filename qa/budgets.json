@@ -195,6 +195,71 @@
           "_note": "SUPERSEDED by the 2026-09-12b row. Kept as history: this is what the stack measured before the reasoning-token fix (llm), the in-process Kokoro tyre (tts), the tuned local Whisper (stt) and the real-audio fixture (which is why every turn-level metric here reads NOT MEASURED)."
         }
       }
+    },
+    "stt_streaming": {
+      "date": "2026-09-12e",
+      "what": "Streaming STT (server/stt_stream.py) vs the whole-utterance pass, on the stage 9.1 named as the whole stall_ms breach (stt 590.0ms of 642.2ms). APPENDED, not a replacement: the 2026-09-12d turn-level row above is untouched and still stands.",
+      "harness": "qa/test_stt_streaming.py::TestRealEngineStreamingLatency, PET_TALK_REAL_ENGINE=1. COMPONENT-LEVEL, not turn-level: real faster-whisper tiny.en through the real _on_user_chunk/_stream_stop handlers, 20ms chunks paced in real time (what cli/client.py sends), stub TTS + stub LLM. Its 'streaming OFF' column is therefore NOT comparable to the 642.2ms turn-level stall_ms above - it is an A/B of one stage on one clock in one process.",
+      "clip": "qa/fixtures/weather_turn.wav repeated to 2.88s @16kHz mono (the 1.44s fixture alone is shorter than two 700ms windows)",
+      "window_ms": 700,
+      "n": "5 turns per mode plus a discarded warm-up, 5 runs kept",
+      "machine": "M-series MacBook Pro, ~/miniconda3/envs/local-ml-py311. NOT QUIET: 1-min load 42.3 / 52.4 / 53.4 / 74.3 / 88.2 across the five runs, against ~7 for the 12d row - six other lanes were building in this worktree. Absolute numbers are ceilings; the ON/OFF comparison is the point.",
+      "stall_ms": {
+        "streaming_on_early_stall": {
+          "p50_range": [
+            0.2,
+            0.8
+          ],
+          "p95_range": [
+            8.8,
+            39.7
+          ],
+          "budget": 400,
+          "result": "PASS",
+          "note": "agent.stall is emitted from the latest partial BEFORE finalization, so stall_ms stops being an STT number: a warm stall-cache lookup and a frame send. PASSED in every run, including load 88.2. REQUIRES the one-line stall_sent hook in server/turn.py named in docs/SPEC.md 9.2 - until that lands turn.py would send a second agent.stall and the person would hear two fillers, so stt_stream.turn_accepts_stall_sent() reads False and this path does not run."
+        },
+        "streaming_on_tail_only": {
+          "p50_range": [
+            537.9,
+            808.8
+          ],
+          "p95_range": [
+            1104.9,
+            1313.4
+          ],
+          "budget": 400,
+          "result": "FAIL",
+          "note": "WORSE than streaming off at this load, and the reason PET_TALK_STT_STREAM defaults to 0. With turn.py still owning the stall it waits for the transcript, and the transcript waits up to PET_TALK_STT_STREAM_WAIT_MS (1200) for an in-flight prefix decode - at load 50+ a prefix decode outlasts the 700ms window, so one is nearly always in flight at user.stop. Dropping that wait instead runs two faster-whisper decodes at once and produced a 2534ms outlier when measured that way."
+        },
+        "streaming_off": {
+          "p50_range": [
+            209.2,
+            542.1
+          ],
+          "p95_range": [
+            426.9,
+            1563.6
+          ],
+          "budget": 400,
+          "result": "FAIL",
+          "note": "Today's shape on this harness. Not the same number as the 642.2ms turn-level row - no Kokoro, no proxy."
+        }
+      },
+      "final_transcript_ms": {
+        "streaming_on_p50_range": [
+          411.9,
+          486.8
+        ],
+        "streaming_off_p50_range": [
+          362.5,
+          541.8
+        ],
+        "result": "NO IMPROVEMENT",
+        "note": "Streaming does NOT make the answer start sooner, and has a fatter tail (up to 2136ms) from the in-flight wait. It moves the STALL off the transcript's critical path; claiming more than that would be a fake green."
+      },
+      "turn_level_stall_ms": "NOT MEASURED for the streaming path - needs a live server with Kokoro + the LiteLLM proxy at load ~7 AND the server/turn.py stall_sent hook. The 12d turn-level 642.2ms FAIL above is still the standing turn-level number.",
+      "whisperkit": "NOT MEASURED. whisperkit-cli is not on PATH and no CoreML model is on disk; the CLI plus model is far over the 200MB this lane was allowed to download. The belief that the Neural Engine must be the fastest tyre is still a belief. Flagged supports_streaming=false regardless: it spawns a process and reloads its model per call.",
+      "deepgram_streaming": "OUT OF SCOPE (2026-09-12). Deepgram has a real streaming socket that belongs behind supports_streaming instead of repeated POSTs; this lane fixed the local default first."
     }
   }
 }
