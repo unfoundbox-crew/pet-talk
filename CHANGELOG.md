@@ -102,6 +102,7 @@ Also:
   did, while the footer hint said "Enter".
 
 ### Security
+- The AX screen line (app and window title) is sanitized and fenced as `<untrusted_screen>` with a disclaimer, the same treatment as OCR; a window title cannot inject instructions.
 
 - **OCR text is fenced as untrusted** (`0e8fd34`,
   `fence_ocr` in `server/persona_runtime.py`): the block sits inside a tag pair

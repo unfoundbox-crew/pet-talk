@@ -61,6 +61,7 @@ SUITES=(
   "studio token + egress allowlist (exfiltration refused)|qa/test_security.py|unit|OPTIONAL"
   "zero-vision eyes lane (attach, OCR, named errors)|qa/test_eyes.py|unit|"
   "hand-over chord frame (user.handover)|qa/test_handover.py|unit|"
+  "screen line fenced as untrusted (AX grounding)|qa/test_grounding_fence.py|unit|"
   "terminal CLI client|qa/test_cli_client.py|unit|"
   "native macOS global hotkey listener|qa/test_hotkey.py|unit|SILENT"
   "floating glass capsule HUD|qa/test_hud.py|unit|"
