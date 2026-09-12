@@ -21,6 +21,7 @@ import { MemoryDrawer, MemoryTurn } from "./components/MemoryDrawer";
 import { ActiveProviders, RuntimeSettings, SettingsModal } from "./components/SettingsModal";
 import { PromptComposer } from "./components/PromptComposer";
 import { EyesAttachDock, EyesBlock, EyesEntry, ScreenGroundingLine } from "./components/EyesAttach";
+import { ReceiptChip, ReceiptFrame, asReceiptFrame } from "./components/ReceiptChip";
 
 type Strings = typeof en;
 const STRINGS: Record<"en" | "hi", Strings> = { en, hi };
@@ -64,6 +65,8 @@ interface TranscriptLine {
   time: string;
   /** Set when who === "eyes": key into the eyes entry map. */
   eyesRef?: string;
+  /** The proof under a spoken claim about work. See ReceiptChip. */
+  receipt?: ReceiptFrame;
 }
 
 function clockNow(): string {
@@ -206,6 +209,38 @@ export default function App() {
         time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
       },
     ]);
+  }, []);
+
+  /**
+   * Attach proof to the claim it proves.
+   *
+   * A receipt lands after the sentence it backs, so it patches the newest
+   * agent line whose text is that claim. If the claim never reached the
+   * transcript (a receipt for a line spoken before this socket opened), the
+   * receipt speaks for itself on its own line rather than being dropped —
+   * an unshown receipt is the failure mode this whole lane exists to stop.
+   */
+  const attachReceipt = useCallback((receipt: ReceiptFrame) => {
+    setLines((prev) => {
+      for (let i = prev.length - 1; i >= 0; i -= 1) {
+        const line = prev[i];
+        if (line.who === "agent" && !line.receipt && line.text === receipt.claim) {
+          const next = [...prev];
+          next[i] = { ...line, receipt };
+          return next;
+        }
+      }
+      return [
+        ...prev,
+        {
+          id: `receipt-${receipt.turn_id}-${prev.length}`,
+          who: "agent",
+          text: receipt.claim,
+          time: clockNow(),
+          receipt,
+        },
+      ];
+    });
   }, []);
 
   const patchEyes = useCallback((ref: string, patch: Partial<EyesEntry>) => {
@@ -472,6 +507,14 @@ export default function App() {
       const now = performance.now();
       const elapsed = turnStartTimeRef.current > 0 ? Math.round(now - turnStartTimeRef.current) : 0;
 
+      // Receipts are handled before the audio frame switch: a receipt plays
+      // nothing and owns its own shape, so it stays out of ws.ts's union.
+      const receipt = asReceiptFrame(frame);
+      if (receipt) {
+        attachReceipt(receipt);
+        return;
+      }
+
       switch (frame.type) {
         case "state.idle":
           setState("idle");
@@ -581,7 +624,7 @@ export default function App() {
       offAuth();
       socket.close();
     };
-  }, [pushLine, pumpQueue, patchEyes]);
+  }, [pushLine, pumpQueue, patchEyes, attachReceipt]);
 
   // --- Fetch Voices, Personas, and Memory Ledger on load ---
   useEffect(() => {
@@ -1205,6 +1248,8 @@ export default function App() {
                     <span style={{ color: "#636c84" }}>{line.time}</span>
                   </div>
                   <div style={{ color: "#f1f3f9", lineHeight: 1.4 }}>{line.text}</div>
+                  {/* Proof under the spoken line. Never a mascot here. */}
+                  {line.receipt ? <ReceiptChip receipt={line.receipt} /> : null}
                   {line.audio_url && (
                     <div style={{ marginTop: "0.35rem" }}>
                       <button

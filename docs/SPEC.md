@@ -106,6 +106,7 @@ An unrecognized frame type gets `agent.error` reason `unknown_frame` (detail: th
 | `agent.error` | `reason`, `detail?`, plus per-call fields (`seq`, `ref`, ...) | any failure, see catalogue in §4.3 |
 | `eyes.received` | `ref`, `kind`, `task`, `bytes` | `eyes.py:handle_attach` as soon as the payload is accepted |
 | `eyes.text` | `ref`, `source`, `kind`, `task`, `engine`, `text`, `truncated` | `eyes.py:handle_attach` after OCR resolves |
+| `agent.receipt` | `claim`, `source{kind,id,repo,path}`, `tokens`, `cost_usd`, `index_age_s`, `fresh` | `receipts.py:attach` — one per spoken claim about work done |
 
 ### 4.3 `agent.error` reason catalogue
 
@@ -131,6 +132,8 @@ Every reason a running server can actually emit today, grepped from `ProviderErr
 **Grounding (`grounding.py`, swallowed — logged, never sent to the client):** `grounding_repo_missing`, `grounding_subprocess_timeout`, `grounding_subprocess_missing`, `grounding_subprocess_failed`, `grounding_subprocess_nonzero`, `grounding_subprocess_kill_failed`, `grounding_subprocess_unreaped`, `grounding_subprocess_reap_failed`, `grounding_repo_task_failed`, `ax_bad_json`, `ax_not_ok`, `ax_empty_context`, `ax_task_failed`.
 
 **Eyes (`eyes.py`):** `eyes_too_large`, `eyes_bad_kind`, `eyes_ocr_failed`, `eyes_no_text`, `eyes_disabled`, plus `eyes_import_failed` (swallowed at import time in `ws.py`, surfaces as `eyes_disabled` to the client).
+
+**Receipts (`receipts.py`, `receipts_archie.py`):** `receipt_missing` (the claim is about work and nothing in the index proves it), `receipt_stale_index` (the scan predates HEAD, so a blame claim is refused and never spoken), `receipts_unavailable` (the `archie` binary is missing, exits non-zero, times out, or prints something that is not the JSON we asked for). Each carries `spoken`, the Noun-Rule line to say instead of the claim.
 
 **HTTP-only reasons (`routes_http.py`, JSON body not `agent.error`):** `bad_request`, `not_found`, `audio_not_found`, `ledger_clear_failed`, `invalid_base64` (`/transcribe`), `empty_audio` (`/transcribe`).
 
@@ -200,6 +203,70 @@ An unknown engine name fails closed (`make_engine` raises `EyesError(eyes_disabl
 **Describe-mode measurement (2026-09-12):** the only local engine that can actually run `--task describe` is `apple-fm` (`apple-vision` refuses it in ~0.2s with a clean error). `apple-fm` was measured at **101.9s for one 2280×600 PNG** — 12x the 8s `EYES_TIMEOUT_S` default and ~68x an earlier 1.5s target. Because of this, **`describe` ships disabled by default**: `EyesConfig.describe_engine_pin` is unset, so a `describe` task hits `apple-vision`'s fast, honest refusal instead of a 100+ second hang. Set `EYES_DESCRIBE_ENGINE=apple-fm` and raise `EYES_TIMEOUT_S` well past 100s if you want describe mode anyway. `EYES_DEFAULT_TASK` and persona frontmatter `eyes_task`/`eyes_default` both default to `transcribe`.
 
 Other knobs: `EYES_MAX_BYTES` (8MB decoded cap), `EYES_CHAR_CAP` (4000 chars before `truncated:true`), `EYES_TIMEOUT_S` (8.0s OCR wall clock), `EYES_ZRV_BIN`, `EYES_SCRATCH_DIR` (system temp dir, never inside the repo). A PDF is always `transcribe` (`task_for`), capped at `pdf_max_pages=5`.
+
+## 8a. Receipts lane (Archie / AgentWorth)
+
+No spoken claim about work stands without a receipt. A sentence that claims
+tests passed, a commit landed, a file changed, or that a session wrote
+something either emits `agent.receipt` or is refused by name. It is never
+spoken bare.
+
+`receipts.py` classifies the spoken sentence (a keyword set plus a persona
+hint, no network), then asks AgentWorth what proves it. `receipts_archie.py`
+shells the **`archie` CLI with `--json`** — never the MCP server, because the
+voice loop has no coding agent in it to host one. Nothing but ids, paths and
+token counts is read out of the JSON; transcript content never enters a frame.
+
+```json
+{
+  "type": "agent.receipt",
+  "turn_id": "t12-9ab3f1",
+  "claim": "A Codex session wrote server/speak_queue.py, and its commit proved nothing.",
+  "source": { "kind": "session|commit|scan", "id": "d01eaae", "repo": "unfoundbox-crew/pet-talk", "path": "server/speak_queue.py" },
+  "tokens": 18400,
+  "cost_usd": null,
+  "index_age_s": 420,
+  "fresh": true
+}
+```
+
+`cost_usd` is always `null` today. archie 0.1.23's `repo blame`, `repo
+suspect`, `session wake` and `session list` JSON all report tokens and no
+dollar figure (probed 2026-09-12). A computed price would be a number nobody
+measured, so the field stays null until AgentWorth publishes one. Reported
+upstream, not patched from here.
+
+**The freshness law.** `archie session wake --json` carries
+`index.last_scanned_at`: when the index last took a write. If that predates
+the repo's HEAD commit time, the index cannot have seen that commit's work.
+`fresh` is then `false`, `behind_s` is how far behind, and every blame claim
+is refused with `receipt_stale_index` and the spoken line *"My index is N
+minutes behind the last commit. Rescan?"* — never an answer and never a
+guess. A session recall is not refused for staleness, because recalling what
+a past session did stays true when the scan is old; its receipt carries
+`fresh: false` so the cockpit shows the age.
+
+**Two voice routes**, both returning `Answer(spoken, receipt, refused)`:
+
+| Said | Answered from | Refused when |
+| --- | --- | --- |
+| "who broke `<thing>`" | `repo blame` for the session and its tokens, `repo suspect` for the unproven commit | stale index, no blame row, no archie |
+| "where was I with `<lane>`" | `session wake` — the checkout's carry-forward | no session for this checkout, no archie |
+
+`receipts.answer_voice_route(text)` matches both and returns `None` for
+anything else, so the deterministic router can call it before the LLM.
+
+Config only, no code change (law 2): `ARCHIE_BIN` (default: `archie` on
+`PATH`), `ARCHIE_REPO` (default: cwd), `ARCHIE_TIMEOUT_S` (default 8),
+`RECEIPTS_ENABLED` (default 1; `0`/`false`/`no` switches the lane off).
+
+**The chip.** `web/src/components/ReceiptChip.tsx` renders the receipt under
+the spoken line: source chip (click copies the full session or commit id),
+file path, index age, and the token total. AgentWorth's accent (violet) is
+allowed on the total line and nowhere else, and Archie never appears on a
+receipt — it is one of the three places their design doc forbids him. Both
+rules are enforced by `qa/test_receipts.py`, not by convention.
+
 
 ## 9. Latency budgets and gates
 
