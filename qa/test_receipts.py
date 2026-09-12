@@ -397,6 +397,48 @@ class TestFrameDiscipline(ReceiptsTestCase):
         self.assertNotIn("turn_id", f["spoken"])
 
 
+class TestTurnHook(ReceiptsTestCase):
+    """`receipts.emit` is the one-line hook turn.py gets. It never raises."""
+
+    def test_emit_sends_one_frame_per_claim_and_skips_chat(self):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        from starlette.websockets import WebSocketState
+
+        self.arrange(SCAN_FRESH)
+        ws = MagicMock()
+        ws.client_state = WebSocketState.CONNECTED
+        ws.send_json = AsyncMock()
+        spoken = ["All systems online and ready.", "A Codex session wrote it, Tuesday."]
+        sent = asyncio.run(receipts.emit(ws, TURN, spoken))
+        self.assertEqual(sent, 1, "emit proved the wrong number of sentences")
+        frames = [c.args[0] for c in ws.send_json.await_args_list]
+        self.assertEqual([f["type"] for f in frames], ["agent.receipt"])
+
+    def test_emit_never_raises_on_a_bad_turn_id(self):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        self.arrange(SCAN_FRESH)
+        ws = MagicMock()
+        ws.send_json = AsyncMock()
+        self.assertEqual(asyncio.run(receipts.emit(ws, "", ["The tests are green."])), 0)
+
+    def test_emit_is_off_when_receipts_are_disabled(self):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        self.arrange(SCAN_FRESH)
+        os.environ["RECEIPTS_ENABLED"] = "0"
+        try:
+            ws = MagicMock()
+            ws.send_json = AsyncMock()
+            self.assertEqual(asyncio.run(receipts.emit(ws, TURN, ["The tests are green."])), 0)
+        finally:
+            os.environ.pop("RECEIPTS_ENABLED", None)
+
+
 # ---------------------------------------------------------------------------
 # 6. The cockpit chip: shape, the single accent, and Archie's absence
 #

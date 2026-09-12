@@ -534,3 +534,31 @@ def answer_voice_route(text: str, *, repo: Optional[str] = None) -> Optional[Ans
 def enabled() -> bool:
     """Receipts are on unless switched off by config (law 2)."""
     return os.environ.get("RECEIPTS_ENABLED", "1").strip().lower() not in ("0", "false", "no")
+
+
+# ---------------------------------------------------------------------------
+# The turn hook: one line at the call site, on purpose
+# ---------------------------------------------------------------------------
+
+
+async def emit(ws: Any, turn_id: str, sentences: Any, persona: Optional[str] = None) -> int:
+    """Prove every sentence a turn spoke. Returns how many frames went out.
+
+    This exists so `turn.py` needs exactly one line and no try/except: a
+    receipt never raises at the call site, never blocks the turn, and a
+    sentence that claims nothing costs one regex pass.
+    """
+    from .frames import safe_send_json
+
+    if not enabled() or not turn_id:
+        return 0
+    sent = 0
+    for text in list(sentences or []):
+        try:
+            payload = attach(turn_id, text, persona=persona)
+        except ProviderError as e:  # a frame bug must not kill a finished turn
+            log.info("receipt_emit_failed turn_id=%s reason=%s", turn_id, e.reason)
+            continue
+        if payload and await safe_send_json(ws, payload):
+            sent += 1
+    return sent
