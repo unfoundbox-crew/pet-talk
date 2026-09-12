@@ -347,7 +347,92 @@ Source of truth: `qa/budgets.json`.
 | `llm_ms` | 800 |
 | `tts_ms` | 200 |
 
-### 9.1 MEASURED (2026-09-12c, real providers, real speech, live WS loop, chunked TTS)
+### 9.1 MEASURED (2026-09-12d, quiet re-measure, load ~7)
+
+**The 12c "quiet re-measure owed" caveat, followed up — only partially resolved.**
+`uptime` read 3.93 (1-min) before this pass started. By the time the turn-level
+runs actually executed, two other `opencode` lanes had spun up at 200%+ CPU
+each and load had risen to 6-20; a 10-minute bounded wait (per the job's own
+cap) never got it back under 4 — the best point seen was 4.28, and the three
+kept `qa/latency.py` runs below ran at 1-min load 6.19, 7.48, and 6.26. This is
+**not the quiet machine the 12c caveat asked for**, but it is a real ~25x drop
+from 12c's peak of 186, and the result is informative anyway: `stall_ms`
+improved (695.6ms → 642.2ms p50) but is **still well over budget**, which means
+the 12c diagnosis — "this is 100% machine load, nothing in this pass touched
+STT" — was too optimistic. The dominant component, STT, is sensitive to *any*
+concurrent CPU contention (Kokoro's synthesis threads included), not only to
+extreme load. See the stage receipt below.
+
+Component-level TTS/STT was not re-run in isolation this pass (no isolated
+provider-call script was executed); the numbers below are turn-level
+(`qa/latency.py` x3, median kept) plus the server's own per-stage telemetry
+ledger (`server/turns.jsonl`).
+
+**Turn-level** — live WS through the real FastAPI loop, `APP_PORT=8089 python3
+qa/latency.py` run three times at N=5 turns; median run kept (1-min load 7.48
+at the moment it ran):
+
+| Metric | p50 (ms) | p95 (ms) | Budget (ms) | Result |
+|---|---|---|---|---|
+| `first_sentence_ms` / `first_audio_ms` | 642.4 | 758.9 | 800 (`turn_p50_ms`) | **PASS** |
+| `cold_first_audio_ms` — first turn of a fresh process | — | 550.5 | 1200 | **PASS** |
+| `barge_ms` | 1.0 | 1.2 | 100 | **PASS** |
+| `stall_ms` | **642.2** | 758.7 | 400 | **FAIL** |
+
+**The `stall_ms` receipt, from the turn's own telemetry** (`server/turns.jsonl`,
+turn `t-latency-2` of the kept run): `stt 590.0ms`, `stall 639.3ms`. The stall
+lands **49.3ms after STT finishes** — the warm stall cache is still working
+exactly as designed. The whole of the breach is the STT stage. That stage was
+164.1ms p50 in isolation on the same machine in 12c and 143.4ms on the fully
+quiet 12b machine; here, inside the server, with two other lanes' processes on
+CPU, it ran 495-870ms across the 15 turns in the three kept-set runs. **STT
+inside this server is not resilient to ordinary background CPU contention**,
+Kokoro's own synthesis threads included — this is a real property of the stack,
+not only a load-186 artifact.
+
+`cold_first_audio_ms` passed on all three post-wait runs: 192.1, 550.5, 553.5ms.
+`warm_stall_cache` is still doing its job — the stall never has to pay a
+cold synth.
+
+**Other receipts from this pass:**
+
+* **`qa/live_ws_turn.py`, one run:** barge ack latency 1.9ms (budget ≤100,
+  PASS), time-to-stall 218.9ms (budget ≤400, PASS) — this harness drives the
+  worker in-process against a stub LLM, so it does not see the live-server STT
+  contention above; it proves the queue/cancellation path, not turn-level
+  latency.
+* **`qa/test_real_engine_e2e.py` (`PET_TALK_REAL_ENGINE=1`): 3/3 pass.**
+  kokoro-local synthesised 278,444 bytes of valid RIFF; `/transcribe` read it
+  back as *"Good morning. Donna Paulson here. Executive Secretary Mode is fully
+  operational."*; a live `/ws` turn drove Donna through the proxy to 228,044
+  bytes of playable audio.
+
+**No budget was softened.** `stall_ms` still reads FAIL against its written
+value, with the dominant-component diagnosis above rather than a rewritten
+number.
+
+**How the server was started for this measurement:**
+
+```bash
+TTS_PROVIDER=kokoro-local STT_PROVIDER=faster-whisper LLM_PROVIDER=litellm \
+  PET_TALK_TTS_CHUNKS=1 PET_TALK_STALL_WARM=1 PET_TALK_SILENT=1 \
+  doppler run --project unfoundbox --config dev_personal -- \
+  ~/miniconda3/envs/local-ml-py311/bin/python -m uvicorn server.app:app \
+    --host 127.0.0.1 --port 8089
+```
+
+`LITELLM_BASE_URL`/`LITELLM_MASTER_KEY` come from the Doppler scope, not the
+tree. `TTS_PROVIDER`/`STT_PROVIDER`/`LLM_PROVIDER` name the tyres; the loopback
+literal in `providers/_shared.py` is only a last-resort fallback.
+
+**Stub-provider numbers, for the harness not the product.** `qa/latency.py` with
+all three tyres stubbed: `stall_ms` 18.1ms p50, `first_sentence_ms` 18.1ms,
+`barge_ms` 0.5ms. Hermetic slow-TTS barge test: barge kill at 0.8ms,
+`dropped=4`, queue high-water 3. These exercise the queue, the frame plumbing
+and the cancellation path — not any backend's real latency. Treat them as "the
+harness is honest," never as user-facing latency.
+
+### History: 2026-09-12c (real providers, real speech, live WS loop, chunked TTS)
 
 **Read the machine note before any number below.** Three other P0 lanes were
 building and testing on this same MacBook throughout this pass. Load average hit
@@ -356,6 +441,9 @@ load of roughly 2 for the 2026-09-12b pass. Every turn-level number here is a
 **ceiling, not this stack's capability**, and the two regressions against 12b
 (`stt_ms`, `stall_ms`) are machine load rather than code — the stage receipt
 below proves where the time went. A clean re-measure on a quiet machine is owed.
+(**Followed up 2026-09-12d, above**: partially confirmed. `stall_ms` improved
+but did not clear budget even at load ~7, so STT's contention-sensitivity is not
+purely a load-186 pathology.)
 
 **What this pass changed.** `tts_ms` was failing structurally: every backend
 returned one complete WAV per sentence, so nothing could arrive before the whole
@@ -376,11 +464,6 @@ earlier brief called it 12; it is 13 by plain `split()`).
 | `stt_ms` (faster-whisper tiny.en, local, N=5) | 164.1 | 285.6 | 150 | **FAIL** — was 143.4 on the quiet machine |
 | `llm_ms` first content delta | — | — | 800 | **NOT MEASURED** this pass; unchanged from 12b (512.4 / 805.4) |
 
-`tts_ms` now measures **the first playable audio of a sentence**, because that
-is what a listener waits on. Chunk 0 is the only chunk racing a budget: once it
-is playing, every later chunk only has to arrive before the queued audio runs
-out, and at an RTF of ~0.06 that is never close.
-
 **The first chunk cannot usefully be made smaller.** Measured, same run:
 
 | words in chunk 0 | first-chunk p50 (ms) | p95 (ms) | whole-sentence total (ms) |
@@ -390,83 +473,30 @@ out, and at an RTF of ~0.06 that is never close.
 | 3 | 136.7 | 213.0 | 573.8 |
 | 2 | 204.1 | 389.8 | 950.3 |
 
-There is a floor of roughly 110ms of fixed per-call overhead. Below four words a
-shorter chunk buys no latency and costs an extra chunk, which is why the default
-is 4 and not 2. The `PET_TALK_REAL_ENGINE=1` gated test in
-`qa/test_tts_chunking.py` re-measured first-chunk p50 at 174.4ms (N=5) during a
-busier moment and still passed the budget.
+There is a floor of roughly 110ms of fixed per-call overhead, which is why the
+default chunk-0 size is 4 words, not 2.
 
-**Turn-level** — live WS through the real FastAPI loop, `APP_PORT=8089 python3
-qa/latency.py` run three times at N=5 turns, median of the three runs:
+**Turn-level** — live WS, three runs at N=5, median kept:
 
 | Metric | p50 (ms) | p95 (ms) | Budget (ms) | Result |
 |---|---|---|---|---|
-| `first_audio_ms` — first frame carrying playable audio | 696.0 | 775.8 | 800 (`turn_p50_ms`) | **PASS** |
-| `turn_worst_ms` — first turn of a fresh process | — | **433.9** | 1200 | **PASS** — was 1455.3 |
+| `first_audio_ms` | 696.0 | 775.8 | 800 | **PASS** |
+| `turn_worst_ms` (cold) | — | 433.9 | 1200 | **PASS** — was 1455.3 |
 | `barge_ms` | 1.1 | 1.2 | 100 | **PASS** |
 | `stall_ms` | 695.6 | 775.6 | 400 | **FAIL** — machine load, see receipt |
 
-**The `stall_ms` receipt, from the turn's own telemetry** (`server/turns.jsonl`,
-turn `t-latency-4`): `stt 700.3ms`, `stall 748.2ms`. The stall lands **47.9ms
-after STT finishes** — that 47.9ms is the warm stall cache working. The whole of
-the breach is the STT stage, which measured 164.1ms p50 in isolation on the same
-machine and 700.3ms inside the server while Kokoro was synthesizing on other
-threads under load. Nothing in this pass touched STT.
-
-`turn_worst_ms` passed on all three cold runs: 215.7, 495.9, 433.9ms. The
-warm-up itself completes about 13 seconds after boot, nearly all of it Kokoro's
-one-time model load, and logs its own receipt:
-`stall_warm_done persona=donna warmed=3 of=3 cache_size=3`.
-
-**Other receipts from this pass:**
-
-* **`qa/live_ws_turn.py`, three single-shot runs:** 387.8 PASS, 304.0 PASS,
-  703.7 FAIL against 400ms. The gate is still N=1 and still flaky by design; the
-  failing run is the same load that shows up in `stall_ms`.
-* **`qa/test_real_engine_e2e.py` (PET_TALK_REAL_ENGINE=1): 3/3 pass.**
-  kokoro-local synthesised 278,444 bytes of valid RIFF; `/transcribe` read it
-  back as *"Good morning. Donna Paulson here. Executive Secretary Mode is fully
-  operational."* (the text says "Paulsen" — greedy `tiny.en` is the accuracy cost
-  of the speed, named plainly); a live `/ws` turn drove Donna through the proxy
-  to 210,044 bytes of playable audio.
-* **Backward compatibility, end to end.** On a chunked turn,
-  `GET /audio/t-live-qa-1-s1` returned 200 `audio/wav`, 272,444 bytes. The
-  re-muxed whole-sentence WAV behind `audio_url` is intact, so a client that
-  ignores `agent.chunk` is unaffected — which is the point of keeping both for
-  one release.
-
-**No budget was softened.** `tts_ms` at p95, `stt_ms` and `stall_ms` all still
-read FAIL against their written values.
-
-**How the server was started for this measurement** (the interpreter matters —
-`kokoro-local` needs `mlx-audio` and `misaki[en]`, which live in
-`~/miniconda3/envs/local-ml-py311`, not in the base env):
-
-```bash
-LITELLM_BASE_URL=http://127.0.0.1:8000/v1 PET_TALK_SILENT=1 \
-  STT_PROVIDER=faster-whisper LLM_PROVIDER=litellm TTS_PROVIDER=kokoro-local \
-  doppler run --project unfoundbox --config dev_personal -- \
-  ~/miniconda3/envs/local-ml-py311/bin/python -m uvicorn server.app:app \
-    --host 127.0.0.1 --port 8089
-```
-
-Those are the chosen defaults, and none of them is baked into the tree:
-`LITELLM_BASE_URL` names the proxy, `TTS_PROVIDER`/`STT_PROVIDER`/`LLM_PROVIDER`
-name the tyres, and `TTS_VOICE` names the voice (docs/VOICES.md). The loopback
-literal in `providers/_shared.py` is only a last-resort fallback.
+Stage receipt, turn `t-latency-4`: `stt 700.3ms`, `stall 748.2ms` (47.9ms after
+STT). `qa/live_ws_turn.py` three single-shot runs: 387.8 PASS, 304.0 PASS, 703.7
+FAIL. `qa/test_real_engine_e2e.py` 3/3 pass: 278,444 bytes RIFF from Kokoro,
+210,044 bytes of playable audio from a live `/ws` Donna turn. Backward
+compatibility: `GET /audio/t-live-qa-1-s1` → 200, 272,444 bytes, re-muxed
+whole-sentence WAV intact for clients that ignore `agent.chunk`.
 
 **The 2026-09-12b pass**, taken on a quiet machine before chunked synthesis, is
 kept in `qa/budgets.json` under `measured.history` with its own history beneath
 it. Its headline numbers: `tts_ms` 236.6 p50 **FAIL**, `stall_ms` 245.5 **PASS**,
 `first_sentence_ms` 245.5 **PASS**, `stt_ms` 143.4 **PASS**, cold first turn
 1455.3 **FAIL**.
-
-**Stub-provider numbers, for the harness not the product.** `qa/latency.py` with
-all three tyres stubbed: `stall_ms` 18.1ms p50, `first_sentence_ms` 18.1ms,
-`barge_ms` 0.5ms. Hermetic slow-TTS barge test: barge kill at 0.8ms,
-`dropped=4`, queue high-water 3. These exercise the queue, the frame plumbing
-and the cancellation path — not any backend's real latency. Treat them as "the
-harness is honest," never as user-facing latency.
 
 ### 9.2 Acceptance gates and their proof
 

@@ -87,7 +87,7 @@ N=3 per pair. One untimed warm-up for `kokoro-local` and `stub` only — cloud p
 | elevenlabs | CwhRBWXzGAHq8TQ4Fs17 (Roger) | OK | 526.7 | 526.7 | 494.0 | 654.4 | 67753 | NOT MEASURED (mp3, not WAV, at measurement time) | | real |
 | stub | af_heart | OK (control row, not a product number) | 12.6 | 12.6 | 9.1 | 14.0 | 22094 | 500 | 0.0252 | estimated |
 
-**These numbers were taken while four lanes were building concurrently on the same MacBook; load average reached 186.** Treat them as relative ordering between voices, not as absolute latency. The same `kokoro-local af_heart` sentence measured 236.6ms p50 on a quiet machine on the same day (`docs/SPEC.md` 9.1) against 553.0ms here. A clean re-measure is owed.
+**These numbers were taken while four lanes were building concurrently on the same MacBook; load average reached 186.** Treat them as relative ordering between voices, not as absolute latency. The same `kokoro-local af_heart` sentence measured 236.6ms p50 on a quiet machine on the same day (`docs/SPEC.md` 9.1) against 553.0ms here. **Followed up 2026-09-12d** (`docs/SPEC.md` 9.1): the general turn-level re-measure ran at 1-min load ~7 (a 10-minute bounded wait never got the machine back under 4), and `stall_ms` improved but stayed over budget even at that much lower load — so contention sensitivity, not only extreme load, is real here too. This per-voice matrix itself was not re-run this pass; its own clean re-measure is still owed.
 
 Deepgram's and ElevenLabs' numbers include network round trips from this machine.
 

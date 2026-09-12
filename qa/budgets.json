@@ -1,5 +1,5 @@
 {
-  "_comment": "Single source of truth for latency budgets (TECH-SPEC.md sec 8.4). qa/latency.py and qa/live_ws_turn.py both load this file \u2014 never hardcode a copy elsewhere.",
+  "_comment": "Single source of truth for latency budgets (TECH-SPEC.md sec 8.4). qa/latency.py and qa/live_ws_turn.py both load this file — never hardcode a copy elsewhere.",
   "stall_ms": 400,
   "barge_ms": 100,
   "turn_p50_ms": 800,
@@ -8,146 +8,192 @@
   "llm_ms": 800,
   "tts_ms": 200,
   "measured": {
-    "date": "2026-09-12c",
+    "date": "2026-09-12d",
     "providers": "STT=faster-whisper tiny.en (local, tuned) / LLM=LiteLLM proxy gpt-oss-120b-groq / TTS=kokoro-local (in-process Kokoro-82M via mlx-audio), CHUNKED synthesis on (PET_TALK_TTS_CHUNKS=1, first chunk 4 words, later chunks 6)",
-    "machine": "M-series MacBook Pro, server under ~/miniconda3/envs/local-ml-py311. NOT A QUIET MACHINE: three other P0 lanes were building and testing on the same box throughout. Load average was 186 at the worst point and 16-20 during the runs recorded here, against a load of roughly 2 for the 2026-09-12b row. Every turn-level number below is therefore a CEILING, not this stack's capability, and the stt/stall regressions against 12b are machine load, not code \u2014 see the stage receipt in `notes`.",
-    "method": "Turn-level: live WS through the real FastAPI loop, `APP_PORT=8089 python3 qa/latency.py` x3 at N=5 turns, median of the three runs, real speech from qa/fixtures/weather_turn.wav (1.44s, 16kHz mono). Component-level: direct provider calls, N=9 for TTS and N=5 for STT, p50/p95. The TTS sentence is 13 words (the brief called it 12; it is 13 by plain split). `tts_ms` now measures the FIRST PLAYABLE AUDIO of a sentence \u2014 chunk 0 under chunked synthesis \u2014 because that is what a listener waits on; the whole-sentence figure is kept beside it.",
-    "stt_ms": {
-      "p50": 164.1,
-      "p95": 285.6,
-      "budget": 150,
-      "result": "FAIL",
-      "note": "143.4 p50 on the quiet machine in the 12b row. Nothing in this lane touched STT."
-    },
-    "llm_first_content_ms": "NOT MEASURED this pass \u2014 no component LLM run; unchanged from the 12b row (512.4 p50 / 805.4 p95)",
-    "tts_ms": {
-      "p50": 127.3,
-      "p95": 246.1,
-      "budget": 200,
-      "result": "PASS at p50; p95 clips the budget",
-      "what": "time to the first playable audio chunk of a 13-word sentence, kokoro-local, N=9",
-      "was": 236.6,
-      "note": "Down from 236.6 p50 by chunked synthesis. The floor is ~110ms of fixed per-call overhead: a 3-word first chunk measured 136.7 p50 and a 2-word one 204.1, both WORSE, so 4 words is the setting. Gated real-engine test measured 174.4 p50 at N=5 on a busier moment."
-    },
-    "tts_whole_sentence_ms": {
-      "p50": 303.1,
-      "p95": 548.1,
-      "budget": 200,
-      "result": "FAIL",
-      "note": "the same sentence with PET_TALK_TTS_CHUNKS=0. This is what every non-chunking tyre still pays."
-    },
+    "machine": "M-series MacBook Pro, server under ~/miniconda3/envs/local-ml-py311. Quiet re-measure attempted per the 12c caveat: `uptime` read 3.93 (1-min) before this pass started. By the time the kept turn-level runs executed, two other opencode lanes had spun up at 200%+ CPU each; a 10-minute bounded wait never got load back under 4 (best point 4.28), and the three kept qa/latency.py runs ran at 1-min load 6.19, 7.48, 6.26 — NOT fully quiet, but a real ~25x drop from 12c's peak of 186. stall_ms improved (695.6ms to 642.2ms p50) but did not clear budget, so the dominant component (STT) is sensitive to ordinary background contention, not only to extreme load — see stall_ms.note.",
+    "method": "Turn-level only this pass: live WS through the real FastAPI loop, `APP_PORT=8089 python3 qa/latency.py` x3 at N=5 turns, median of the three runs (by stall_ms) kept, real speech from qa/fixtures/weather_turn.wav (1.44s, 16kHz mono). No isolated component-level provider-call script was run this pass; stt/tts per-turn figures come from the server's own telemetry ledger (server/turns.jsonl) for the kept run instead.",
+    "stt_ms": "NOT MEASURED in isolation this pass — see stall_ms.note for the in-server per-turn STT stage times from server/turns.jsonl (495-870ms across the 15 turns in the three kept-set runs, against 164.1ms p50 in isolation in 12c and 143.4ms on the fully quiet 12b machine)",
+    "llm_first_content_ms": "NOT MEASURED this pass — unchanged from the 12b row (512.4 p50 / 805.4 p95)",
+    "tts_ms": "NOT MEASURED in isolation this pass — unchanged from the 12c row (127.3 p50 / 246.1 p95, PASS at p50)",
     "stall_ms": {
-      "p50": 695.6,
-      "p95": 775.6,
+      "p50": 642.2,
+      "p95": 758.7,
       "budget": 400,
       "result": "FAIL",
-      "note": "Machine load, upstream of this lane. One turn's own stage receipt (server/turns.jsonl, t-latency-4): stt 700.3ms, stall 748.2ms \u2014 the stall lands 47.9ms after STT finishes, which is the warm cache hit working. On the 12b quiet machine the same path was 245.5ms."
+      "was": 695.6,
+      "note": "Improved from 12c's 695.6ms (load 186) but still FAILs at load ~7. Kept run's own stage receipt (server/turns.jsonl, t-latency-2): stt 590.0ms, stall 639.3ms — stall lands 49.3ms after STT finishes (warm cache working). Dominant component is STT: 164.1ms p50 in isolation in 12c, 143.4ms on the fully quiet 12b machine, but 495-870ms inside the server here while Kokoro's own synthesis threads and two other opencode lanes shared the CPU. STT inside this server is not resilient to ordinary background contention — not only a load-186 artifact as 12c guessed."
     },
     "first_audio_ms": {
-      "p50": 696.0,
-      "p95": 775.8,
+      "p50": 642.4,
+      "p95": 758.9,
       "budget": 800,
       "result": "PASS",
       "what": "first frame carrying playable audio, agent.chunk or agent.sentence, whichever lands first"
     },
     "barge_ms": {
-      "p50": 1.1,
+      "p50": 1.0,
       "p95": 1.2,
       "budget": 100,
       "result": "PASS"
     },
     "turn_worst_ms": {
-      "cold_first_turn": 433.9,
+      "cold_first_turn": 550.5,
       "cold_runs": [
-        215.7,
-        495.9,
-        433.9
+        192.1,
+        550.5,
+        553.5
       ],
       "budget": 1200,
       "result": "PASS",
-      "was": 1455.3,
-      "note": "The cold-start breach is closed. `warm_stall_cache` pre-synthesizes the persona's stalls at startup (donna, 3 of 3, ~13s after boot, dominated by Kokoro's one-time model load), so the first turn of a fresh process no longer pays a full synth. PASS on all three runs, under load."
+      "note": "PASS on all three post-wait runs. warm_stall_cache still doing its job; the stall never pays a cold synth."
     },
     "notes": {
-      "live_ws_turn_gate": "3 single-shot runs: 387.8 PASS, 304.0 PASS, 703.7 FAIL against 400ms. Still N=1 and still flaky by design; the third run is the same machine load as stall_ms above.",
-      "real_engine_e2e": "PET_TALK_REAL_ENGINE=1 qa/test_real_engine_e2e.py 3/3 PASS. kokoro-local synthesised 278,444 bytes of valid RIFF; STT read it back; a live /ws turn drove Donna through the proxy to 210,044 bytes of playable audio.",
-      "backward_compat": "GET /audio/t-live-qa-1-s1 -> 200 audio/wav, 272,444 bytes on a chunked turn. The re-muxed whole-sentence WAV that audio_url serves is intact, so a client that ignores agent.chunk is unaffected.",
-      "not_softened": "No budget moved. tts_ms p95, stt_ms and stall_ms all still read FAIL against their written values."
+      "live_ws_turn_gate": "1 run this pass: barge ack 1.9ms PASS (budget <=100), time-to-stall 218.9ms PASS (budget <=400). This harness drives the worker in-process against a stub LLM, so it does not see the live-server STT contention in stall_ms above — it proves the queue/cancellation path, not turn-level latency under load.",
+      "real_engine_e2e": "PET_TALK_REAL_ENGINE=1 qa/test_real_engine_e2e.py 3/3 PASS. kokoro-local synthesised 278,444 bytes of valid RIFF; STT read it back as 'Good morning. Donna Paulson here. Executive Secretary Mode is fully operational.'; a live /ws turn drove Donna through the proxy to 228,044 bytes of playable audio.",
+      "not_softened": "No budget moved. stall_ms still reads FAIL against its written value — the change this pass is the dominant-component diagnosis, not the number."
     },
     "history": {
-      "date": "2026-09-12b",
-      "providers": "STT=faster-whisper tiny.en (local, tuned) / LLM=LiteLLM proxy gpt-oss-120b-groq / TTS=kokoro-local (in-process Kokoro-82M via mlx-audio)",
-      "machine": "M-series MacBook Pro, server under ~/miniconda3/envs/local-ml-py311",
-      "method": "Turn-level: live WS through the real FastAPI loop, `APP_PORT=8089 python3 qa/latency.py` x3 (N=5 turns each), median of the three runs, real speech from qa/fixtures/weather_turn.wav (1.44s, 16kHz mono). Component-level: direct provider calls (FasterWhisperSTT.transcribe / OpenAICompatibleLLM.stream / KokoroLocalTTS.synth), N=5, p50/p95. TTS sentence is 12 words; STT clip is the same fixture.",
+      "date": "2026-09-12c",
+      "providers": "STT=faster-whisper tiny.en (local, tuned) / LLM=LiteLLM proxy gpt-oss-120b-groq / TTS=kokoro-local (in-process Kokoro-82M via mlx-audio), CHUNKED synthesis on (PET_TALK_TTS_CHUNKS=1, first chunk 4 words, later chunks 6)",
+      "machine": "M-series MacBook Pro, server under ~/miniconda3/envs/local-ml-py311. NOT A QUIET MACHINE: three other P0 lanes were building and testing on the same box throughout. Load average was 186 at the worst point and 16-20 during the runs recorded here, against a load of roughly 2 for the 2026-09-12b row. Every turn-level number below is therefore a CEILING, not this stack's capability, and the stt/stall regressions against 12b are machine load, not code — see the stage receipt in `notes`. Followed up 2026-09-12d: only partially confirmed, see the current measured block above.",
+      "method": "Turn-level: live WS through the real FastAPI loop, `APP_PORT=8089 python3 qa/latency.py` x3 at N=5 turns, median of the three runs, real speech from qa/fixtures/weather_turn.wav (1.44s, 16kHz mono). Component-level: direct provider calls, N=9 for TTS and N=5 for STT, p50/p95. The TTS sentence is 13 words (the brief called it 12; it is 13 by plain split). `tts_ms` now measures the FIRST PLAYABLE AUDIO of a sentence — chunk 0 under chunked synthesis — because that is what a listener waits on; the whole-sentence figure is kept beside it.",
       "stt_ms": {
-        "p50": 143.4,
-        "p95": 148.4,
+        "p50": 164.1,
+        "p95": 285.6,
         "budget": 150,
-        "result": "PASS"
+        "result": "FAIL",
+        "note": "143.4 p50 on the quiet machine in the 12b row. Nothing in this lane touched STT."
       },
-      "llm_first_content_ms": {
-        "p50": 512.4,
-        "p95": 805.4,
-        "budget": 800,
-        "result": "PASS at p50; p95 clips the budget \u2014 see docs/SPEC.md 9.1"
-      },
+      "llm_first_content_ms": "NOT MEASURED this pass — no component LLM run; unchanged from the 12b row (512.4 p50 / 805.4 p95)",
       "tts_ms": {
-        "p50": 236.6,
-        "p95": 262.3,
+        "p50": 127.3,
+        "p95": 246.1,
         "budget": 200,
-        "result": "FAIL"
+        "result": "PASS at p50; p95 clips the budget",
+        "what": "time to the first playable audio chunk of a 13-word sentence, kokoro-local, N=9",
+        "was": 236.6,
+        "note": "Down from 236.6 p50 by chunked synthesis. The floor is ~110ms of fixed per-call overhead: a 3-word first chunk measured 136.7 p50 and a 2-word one 204.1, both WORSE, so 4 words is the setting. Gated real-engine test measured 174.4 p50 at N=5 on a busier moment."
+      },
+      "tts_whole_sentence_ms": {
+        "p50": 303.1,
+        "p95": 548.1,
+        "budget": 200,
+        "result": "FAIL",
+        "note": "the same sentence with PET_TALK_TTS_CHUNKS=0. This is what every non-chunking tyre still pays."
       },
       "stall_ms": {
-        "p50": 245.5,
-        "p95": 291.1,
+        "p50": 695.6,
+        "p95": 775.6,
         "budget": 400,
-        "result": "PASS"
+        "result": "FAIL",
+        "note": "Machine load, upstream of this lane. One turn's own stage receipt (server/turns.jsonl, t-latency-4): stt 700.3ms, stall 748.2ms — the stall lands 47.9ms after STT finishes, which is the warm cache hit working. On the 12b quiet machine the same path was 245.5ms."
       },
-      "first_sentence_ms": {
-        "p50": 245.5,
-        "p95": 291.2,
+      "first_audio_ms": {
+        "p50": 696.0,
+        "p95": 775.8,
         "budget": 800,
-        "result": "PASS"
+        "result": "PASS",
+        "what": "first frame carrying playable audio, agent.chunk or agent.sentence, whichever lands first"
       },
       "barge_ms": {
-        "p50": 0.9,
-        "p95": 1.5,
+        "p50": 1.1,
+        "p95": 1.2,
         "budget": 100,
         "result": "PASS"
       },
       "turn_worst_ms": {
-        "warm": 291.2,
-        "cold_first_turn": 1455.3,
+        "cold_first_turn": 433.9,
+        "cold_runs": [
+          215.7,
+          495.9,
+          433.9
+        ],
         "budget": 1200,
-        "result": "PASS warm / FAIL on the first turn of a fresh process"
+        "result": "PASS",
+        "was": 1455.3,
+        "note": "The cold-start breach is closed. `warm_stall_cache` pre-synthesizes the persona's stalls at startup (donna, 3 of 3, ~13s after boot, dominated by Kokoro's one-time model load), so the first turn of a fresh process no longer pays a full synth. PASS on all three runs, under load."
+      },
+      "notes": {
+        "live_ws_turn_gate": "3 single-shot runs: 387.8 PASS, 304.0 PASS, 703.7 FAIL against 400ms. Still N=1 and still flaky by design; the third run is the same machine load as stall_ms above.",
+        "real_engine_e2e": "PET_TALK_REAL_ENGINE=1 qa/test_real_engine_e2e.py 3/3 PASS. kokoro-local synthesised 278,444 bytes of valid RIFF; STT read it back; a live /ws turn drove Donna through the proxy to 210,044 bytes of playable audio.",
+        "backward_compat": "GET /audio/t-live-qa-1-s1 -> 200 audio/wav, 272,444 bytes on a chunked turn. The re-muxed whole-sentence WAV that audio_url serves is intact, so a client that ignores agent.chunk is unaffected.",
+        "not_softened": "No budget moved. tts_ms p95, stt_ms and stall_ms all still read FAIL against their written values."
       },
       "history": {
-        "date": "2026-09-12",
-        "providers": "STT+chat-LLM=Groq (whisper-large-v3-turbo / openai/gpt-oss-20b), TTS=Kokoro (local SpacePilot daemon)",
-        "machine": "M-series MacBook",
-        "method": "direct provider calls (GroqSTT.transcribe / OpenAICompatibleLLM.stream / KokoroSpacePilotTTS.synth), N=5, median of 5 (component-level only \u2014 see docs/SPEC.md 9.1 for why the live WS turn could not be measured this pass)",
+        "date": "2026-09-12b",
+        "providers": "STT=faster-whisper tiny.en (local, tuned) / LLM=LiteLLM proxy gpt-oss-120b-groq / TTS=kokoro-local (in-process Kokoro-82M via mlx-audio)",
+        "machine": "M-series MacBook Pro, server under ~/miniconda3/envs/local-ml-py311",
+        "method": "Turn-level: live WS through the real FastAPI loop, `APP_PORT=8089 python3 qa/latency.py` x3 (N=5 turns each), median of the three runs, real speech from qa/fixtures/weather_turn.wav (1.44s, 16kHz mono). Component-level: direct provider calls (FasterWhisperSTT.transcribe / OpenAICompatibleLLM.stream / KokoroLocalTTS.synth), N=5, p50/p95. TTS sentence is 12 words; STT clip is the same fixture.",
         "stt_ms": {
-          "p50": 298.5,
-          "p95": 316.4,
+          "p50": 143.4,
+          "p95": 148.4,
           "budget": 150,
-          "result": "FAIL"
-        },
-        "llm_first_sentence_ms": {
-          "p50": 536.0,
-          "p95": 700.4,
-          "budget": 800,
           "result": "PASS"
         },
+        "llm_first_content_ms": {
+          "p50": 512.4,
+          "p95": 805.4,
+          "budget": 800,
+          "result": "PASS at p50; p95 clips the budget — see docs/SPEC.md 9.1"
+        },
         "tts_ms": {
-          "p50": 1285.9,
-          "p95": 1632.7,
+          "p50": 236.6,
+          "p95": 262.3,
           "budget": 200,
           "result": "FAIL"
         },
-        "stall_ms": "NOT MEASURED \u2014 see docs/SPEC.md 9.1",
-        "barge_ms": "NOT MEASURED (live) \u2014 see docs/SPEC.md 9.1",
-        "turn_p50_ms": "NOT MEASURED (live) \u2014 see docs/SPEC.md 9.1",
-        "_note": "SUPERSEDED by the 2026-09-12b row. Kept as history: this is what the stack measured before the reasoning-token fix (llm), the in-process Kokoro tyre (tts), the tuned local Whisper (stt) and the real-audio fixture (which is why every turn-level metric here reads NOT MEASURED)."
+        "stall_ms": {
+          "p50": 245.5,
+          "p95": 291.1,
+          "budget": 400,
+          "result": "PASS"
+        },
+        "first_sentence_ms": {
+          "p50": 245.5,
+          "p95": 291.2,
+          "budget": 800,
+          "result": "PASS"
+        },
+        "barge_ms": {
+          "p50": 0.9,
+          "p95": 1.5,
+          "budget": 100,
+          "result": "PASS"
+        },
+        "turn_worst_ms": {
+          "warm": 291.2,
+          "cold_first_turn": 1455.3,
+          "budget": 1200,
+          "result": "PASS warm / FAIL on the first turn of a fresh process"
+        },
+        "history": {
+          "date": "2026-09-12",
+          "providers": "STT+chat-LLM=Groq (whisper-large-v3-turbo / openai/gpt-oss-20b), TTS=Kokoro (local SpacePilot daemon)",
+          "machine": "M-series MacBook",
+          "method": "direct provider calls (GroqSTT.transcribe / OpenAICompatibleLLM.stream / KokoroSpacePilotTTS.synth), N=5, median of 5 (component-level only — see docs/SPEC.md 9.1 for why the live WS turn could not be measured this pass)",
+          "stt_ms": {
+            "p50": 298.5,
+            "p95": 316.4,
+            "budget": 150,
+            "result": "FAIL"
+          },
+          "llm_first_sentence_ms": {
+            "p50": 536.0,
+            "p95": 700.4,
+            "budget": 800,
+            "result": "PASS"
+          },
+          "tts_ms": {
+            "p50": 1285.9,
+            "p95": 1632.7,
+            "budget": 200,
+            "result": "FAIL"
+          },
+          "stall_ms": "NOT MEASURED — see docs/SPEC.md 9.1",
+          "barge_ms": "NOT MEASURED (live) — see docs/SPEC.md 9.1",
+          "turn_p50_ms": "NOT MEASURED (live) — see docs/SPEC.md 9.1",
+          "_note": "SUPERSEDED by the 2026-09-12b row. Kept as history: this is what the stack measured before the reasoning-token fix (llm), the in-process Kokoro tyre (tts), the tuned local Whisper (stt) and the real-audio fixture (which is why every turn-level metric here reads NOT MEASURED)."
+        }
       }
     }
   }
