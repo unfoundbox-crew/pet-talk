@@ -179,8 +179,71 @@ class TestClauseSplitter(unittest.TestCase):
         for part in chunk_clauses(long_text, max_words=4):
             self.assertLessEqual(len(part.split()), 4)
 
+    def test_first_chunk_is_shorter_than_the_rest(self) -> None:
+        long_text = " ".join(f"word{i}" for i in range(24))
+        parts = chunk_clauses(long_text, max_words=8, first_max_words=3)
+        self.assertEqual(len(parts[0].split()), 3, "chunk 0 is the only one on a budget")
+        self.assertGreater(len(parts[1].split()), 3)
+        self.assertEqual(" ".join(parts).split(), long_text.split())
+
+    def test_first_chunk_cap_never_exceeds_the_tail_cap(self) -> None:
+        parts = chunk_clauses(" ".join(f"w{i}" for i in range(12)), max_words=2, first_max_words=9)
+        for part in parts:
+            self.assertLessEqual(len(part.split()), 2)
+
     def test_empty_text_is_no_chunks(self) -> None:
         self.assertEqual(chunk_clauses("   ", max_words=5), [])
+
+
+class TestRuntimeKeyForwarding(unittest.TestCase):
+    """A key supplied at runtime must reach the provider it was posted for.
+
+    Reported by lane 4c: `POST /settings` accepted a key for `elevenlabs` or
+    `deepgram` and `make_tts` dropped it, so the swap landed as
+    `missing_api_key` even though the key was right there.
+    """
+
+    def setUp(self) -> None:
+        self._saved = {k: os.environ.pop(k, None) for k in ("ELEVENLABS_API_KEY", "DEEPGRAM_API_KEY")}
+
+    def tearDown(self) -> None:
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_posted_key_reaches_elevenlabs(self) -> None:
+        from server.providers import make_tts
+
+        tts = make_tts("elevenlabs", api_key="posted-eleven-key")
+        self.assertEqual(tts._key(), "posted-eleven-key")
+        self.assertNotIn("posted-eleven-key", repr(tts), "a repr must never leak the key")
+
+    def test_posted_key_reaches_deepgram(self) -> None:
+        from server.providers import make_tts
+
+        tts = make_tts("deepgram", api_key="posted-deepgram-key")
+        self.assertEqual(tts._key(), "posted-deepgram-key")
+        self.assertNotIn("posted-deepgram-key", repr(tts))
+
+    def test_no_key_anywhere_still_fails_closed_by_name(self) -> None:
+        from server.providers import make_tts
+
+        for provider in ("elevenlabs", "deepgram"):
+            with self.subTest(provider=provider):
+                with self.assertRaises(ProviderError) as cm:
+                    make_tts(provider)._key()
+                self.assertEqual(cm.exception.reason, "tts_no_key")
+
+    def test_tts_voice_env_selects_the_voice_without_a_code_change(self) -> None:
+        from server.providers import make_tts
+
+        os.environ["TTS_VOICE"] = "aura-2-andromeda-en"
+        try:
+            self.assertEqual(make_tts("deepgram", api_key="k").model, "aura-2-andromeda-en")
+        finally:
+            os.environ.pop("TTS_VOICE", None)
 
 
 class TestWavHelpers(unittest.TestCase):
@@ -193,6 +256,13 @@ class TestWavHelpers(unittest.TestCase):
         with self.assertRaises(ProviderError) as cm:
             concat_wavs([tiny_wav(0.1, 8000), tiny_wav(0.1, 24000)])
         self.assertEqual(cm.exception.reason, "tts_chunk_format_mismatch")
+
+    def test_duration_ignores_a_lying_header(self) -> None:
+        # Deepgram's speak endpoint writes a streaming placeholder into the
+        # data chunk size; a 100ms clip read back as ~12 hours (2026-09-12).
+        wav = bytearray(tiny_wav(0.10, 8000))
+        wav[40:44] = (0x7FFF0000).to_bytes(4, "little")
+        self.assertAlmostEqual(pcm_duration_ms(bytes(wav)), 100, delta=10)
 
     def test_shift_word_times_offsets_both_ends(self) -> None:
         wt = [{"word": "hi", "start_ms": 0, "end_ms": 100, "estimated": True}]
@@ -389,6 +459,71 @@ class TestWarmStallCache(unittest.IsolatedAsyncioTestCase):
             n = await stall_mod.warm_stall_cache(persona(), DeadTTS())
         self.assertEqual(n, 0)
         self.assertTrue(any("stall_warm_failed" in line for line in logs.output))
+
+
+class TestRealKokoroChunking(unittest.IsolatedAsyncioTestCase):
+    """The same claims against the real tyre. Gated on PET_TALK_REAL_ENGINE=1.
+
+    The hermetic tests above prove the wire path; only this one can prove the
+    number. `tts_ms` is the time to the first PLAYABLE audio of a sentence,
+    which under chunked synthesis is chunk 0, not the whole WAV.
+    """
+
+    N = 5
+
+    async def asyncSetUp(self) -> None:
+        if os.environ.get("PET_TALK_REAL_ENGINE") != "1":
+            raise unittest.SkipTest(
+                "SKIP: PET_TALK_REAL_ENGINE!=1 — this test loads real Kokoro "
+                "weights and synthesizes audio"
+            )
+        from server.providers.tts import KokoroLocalTTS
+
+        self.tts = KokoroLocalTTS(warm=False)
+        try:
+            self.tts.synth("Warming up.")  # pay the cold graph build here
+        except ProviderError as e:
+            raise unittest.SkipTest(f"SKIP: kokoro-local unavailable: {e.reason}")
+
+    async def test_first_chunk_beats_the_whole_sentence_and_the_budget(self) -> None:
+        import json
+
+        budget = json.load(
+            open(os.path.join(ROOT, "qa", "budgets.json"), encoding="utf-8")
+        )["tts_ms"]
+        firsts: list[float] = []
+        wholes: list[float] = []
+        for _ in range(self.N):
+            t0 = time.perf_counter()
+            first: Optional[float] = None
+            finals = 0
+            async for wav, _wt, final in self.tts.synth_chunks(SENTENCE, "af_heart", 1.0):
+                if first is None:
+                    first = (time.perf_counter() - t0) * 1000.0
+                    self.assertTrue(wav.startswith(b"RIFF"))
+                finals += int(bool(final))
+            firsts.append(first or float("inf"))
+            self.assertEqual(finals, 1, "exactly one chunk carries final=True")
+            t0 = time.perf_counter()
+            self.tts.synth(SENTENCE, "af_heart", 1.0)
+            wholes.append((time.perf_counter() - t0) * 1000.0)
+
+        firsts.sort()
+        wholes.sort()
+        p50_first = firsts[len(firsts) // 2]
+        p50_whole = wholes[len(wholes) // 2]
+        print(
+            f"\n  real kokoro-local N={self.N}: first_chunk p50={p50_first:.1f}ms "
+            f"whole_sentence p50={p50_whole:.1f}ms budget={budget}ms"
+        )
+        self.assertLess(
+            p50_first, p50_whole, "chunking must beat whole-sentence synthesis"
+        )
+        self.assertLess(
+            p50_first,
+            budget,
+            f"first-chunk p50 {p50_first:.1f}ms breaches the {budget}ms tts_ms budget",
+        )
 
 
 if __name__ == "__main__":

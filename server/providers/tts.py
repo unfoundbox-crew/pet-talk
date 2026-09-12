@@ -27,16 +27,17 @@ from ._shared import (
     estimate_word_times,
     json_dumps,
     logger,
+    pcm16_to_wav_bytes,
     pcm_duration_ms,
     redacted_repr,
     shift_word_times,
 )
 
-#: Words per synthesis chunk. Kokoro's real-time factor on this machine is
-#: ~0.06, so a chunk of N words costs roughly N * 20ms to synthesize. Six
-#: words is the largest window that still leaves headroom under the 200ms
-#: ``tts_ms`` budget for the FIRST chunk, which is the only one a listener
-#: waits on. Override with ``PET_TALK_TTS_CHUNK_WORDS``.
+#: Words per synthesis chunk after the first. Per-call overhead is real, so
+#: these are kept reasonably long — nobody waits on them, they only have to
+#: arrive before the already-queued audio runs out. The FIRST chunk is capped
+#: separately and shorter; see :func:`first_chunk_max_words`. Override with
+#: ``PET_TALK_TTS_CHUNK_WORDS``.
 DEFAULT_CHUNK_MAX_WORDS = 6
 
 #: Clause boundaries, strongest first. A chunk break at a comma or a
@@ -57,22 +58,45 @@ def chunk_max_words() -> int:
         return DEFAULT_CHUNK_MAX_WORDS
 
 
-def chunk_clauses(text: str, max_words: Optional[int] = None) -> list:
+def first_chunk_max_words() -> int:
+    """Words in the FIRST chunk, which is the only one racing a budget.
+
+    Chunk 0 is what ``tts_ms`` measures: once it is playing, every later chunk
+    only has to arrive before the audio already queued runs out, and at an RTF
+    of ~0.06 that is never close. So chunk 0 is deliberately shorter than the
+    rest. Override with ``PET_TALK_TTS_FIRST_CHUNK_WORDS``.
+    """
+    raw = os.environ.get("PET_TALK_TTS_FIRST_CHUNK_WORDS", "4")
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        logger.warning("swallowed reason=bad_first_chunk_words_env value=%r", raw)
+        return 4
+
+
+def chunk_clauses(
+    text: str, max_words: Optional[int] = None, first_max_words: Optional[int] = None
+) -> list:
     """Split one sentence into speakable chunks, losing no word.
 
     Breaks after clause punctuation or a coordinating conjunction, and
-    otherwise every ``max_words`` words. ``" ".join(chunk_clauses(t)).split()
-    == t.split()`` holds by construction — the splitter only ever inserts
-    boundaries between whitespace-separated tokens, so a chunked sentence and
-    a whole one speak the same words in the same order.
+    otherwise every ``max_words`` words — except the first chunk, which is
+    capped shorter (``first_max_words``) because it is the only one a listener
+    waits on. ``" ".join(chunk_clauses(t)).split() == t.split()`` holds by
+    construction — the splitter only ever inserts boundaries between
+    whitespace-separated tokens, so a chunked sentence and a whole one speak
+    the same words in the same order.
     """
-    cap = max_words if max_words is not None else chunk_max_words()
+    tail_cap = max_words if max_words is not None else chunk_max_words()
+    head_cap = first_max_words if first_max_words is not None else first_chunk_max_words()
+    head_cap = min(head_cap, tail_cap)
     words = text.split()
     if not words:
         return []
     chunks: list = []
     current: list = []
     for i, word in enumerate(words):
+        cap = head_cap if not chunks else tail_cap
         current.append(word)
         last = i == len(words) - 1
         if last:
@@ -598,14 +622,30 @@ class ElevenLabsTTS(TTSProvider):
     """
 
     API = "https://api.elevenlabs.io/v1/text-to-speech"
+    #: `pcm_<rate>` is the only raw format the endpoint offers on every tier;
+    #: 24000 matches Kokoro's rate so a voice swap does not change the wire.
+    SAMPLE_RATE = 24000
 
-    def __init__(self, voice_id: str = "21m00Tcm4TlvDq8ikWAM", model_id: str = "eleven_flash_v2_5") -> None:
+    def __init__(
+        self,
+        voice_id: str = "21m00Tcm4TlvDq8ikWAM",
+        model_id: str = "eleven_flash_v2_5",
+        api_key: str = "",
+    ) -> None:
         # Default voice_id is Rachel (English female); pass-through otherwise.
         self.voice_id = voice_id
         self.model_id = model_id
+        # An explicit key beats the environment, so a `POST /settings` swap
+        # actually takes effect: without this the runtime key was accepted by
+        # the settings store and then ignored here, and the swap landed as
+        # `missing_api_key` (found by lane 4c, 2026-09-12).
+        self.api_key = api_key
+
+    def __repr__(self) -> str:
+        return redacted_repr(self, secret_attrs=("api_key",))
 
     def _key(self) -> str:
-        key = os.environ.get("ELEVENLABS_API_KEY", "")
+        key = self.api_key or os.environ.get("ELEVENLABS_API_KEY", "")
         if not key:
             raise ProviderError("tts_no_key", "ELEVENLABS_API_KEY env not set")
         return key
@@ -617,6 +657,12 @@ class ElevenLabsTTS(TTSProvider):
         if not text or not text.strip():
             raise ProviderError("tts_empty_text", "nothing to synthesize")
         vid = voice if voice not in ("af_heart", "") else self.voice_id
+        # `with-timestamps` defaults to mp3, and every caller here treats the
+        # return value as a WAV: `/audio/{id}` serves it as `audio/wav` and
+        # `pcm_duration_ms` cannot parse it, so word times were empty and the
+        # bytes were mislabelled (measured 2026-09-12 — 67,753 bytes of mp3,
+        # duration 0). Ask for raw PCM and wrap it ourselves.
+        query = f"?output_format=pcm_{self.SAMPLE_RATE}"
         payload = {
             "text": text,
             "model_id": self.model_id,
@@ -624,7 +670,7 @@ class ElevenLabsTTS(TTSProvider):
         }
         data = json_dumps(payload).encode()
         req = urllib.request.Request(
-            f"{self.API}/{urllib.parse.quote(vid)}/with-timestamps",
+            f"{self.API}/{urllib.parse.quote(vid)}/with-timestamps{query}",
             data=data,
             method="POST",
             headers={
@@ -640,9 +686,12 @@ class ElevenLabsTTS(TTSProvider):
         except Exception as e:
             raise ProviderError("tts_request_failed", f"elevenlabs: {e}")
         audio_b64 = body.get("audio_base64", "")
-        audio = base64.b64decode(audio_b64) if audio_b64 else b""
-        if len(audio) < 1000:
-            raise ProviderError("tts_empty_audio", f"elevenlabs returned {len(audio)} bytes")
+        pcm = base64.b64decode(audio_b64) if audio_b64 else b""
+        if len(pcm) < 1000:
+            raise ProviderError("tts_empty_audio", f"elevenlabs returned {len(pcm)} bytes")
+        # Raw signed 16-bit little-endian PCM in, a real WAV out — so the
+        # bytes match the `audio/wav` the audio route serves them as.
+        audio = pcm16_to_wav_bytes(pcm, sample_rate=self.SAMPLE_RATE)
         alignment = body.get("alignment") or {}
         word_times = _word_times_from_char_alignment(alignment)
         if not word_times:
@@ -808,10 +857,20 @@ def make_tts(
         )
     if which == "kokoro":
         return KokoroSpacePilotTTS(base_url=base_url or os.environ.get("KOKORO_BASE_URL", "http://127.0.0.1:8088"))
+    # Both cloud tyres take the key explicitly so a runtime `POST /settings`
+    # swap constructs a live provider instead of a degraded one. An empty
+    # string means "no key was supplied", and each provider then reads its own
+    # env var — never a silent substitution either way.
     if which == "elevenlabs":
-        return ElevenLabsTTS(voice_id=chosen_voice) if chosen_voice else ElevenLabsTTS()
+        eleven = ElevenLabsTTS(api_key=api_key or os.environ.get("ELEVENLABS_API_KEY", ""))
+        if chosen_voice:
+            eleven.voice_id = chosen_voice
+        return eleven
     if which == "deepgram":
-        return DeepgramTTS(model=chosen_voice) if chosen_voice else DeepgramTTS()
+        deep = DeepgramTTS(api_key=api_key or os.environ.get("DEEPGRAM_API_KEY", ""))
+        if chosen_voice:
+            deep.model = chosen_voice
+        return deep
     if which in ("stub-chunked", "stub_chunked"):
         return StubChunkedTTS()
     if which == "stub":

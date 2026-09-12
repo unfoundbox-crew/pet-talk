@@ -97,7 +97,14 @@ async def _recv(ws, timeout=10.0):
 
 
 async def _measure_turn(ws_connect, turn_no):
-    """One user.start/stop turn: returns (stall_ms|None, first_sentence_ms|None)."""
+    """One user.start/stop turn.
+
+    Returns ``(stall_ms, first_sentence_ms, first_audio_ms)``, each None when
+    that frame never came. ``first_audio_ms`` is the first frame carrying
+    playable audio — an ``agent.chunk`` or an ``agent.sentence``, whichever
+    lands first. With chunked TTS the chunk lands first, and it is what the
+    person actually hears, so it is the honest user-facing number.
+    """
     turn_id = f"t-latency-{turn_no}"
     async with ws_connect(WS_URL, max_size=4 * 1024 * 1024) as ws:
         await _recv(ws, 5.0)  # state.idle
@@ -109,15 +116,19 @@ async def _measure_turn(ws_connect, turn_no):
                                   "sample_rate": PCM_SAMPLE_RATE}))
         stall_ms = None
         first_sentence_ms = None
+        first_audio_ms = None
         while True:
             m = await _recv(ws, 10.0)
             dt = (time.monotonic() - t0) * 1000.0
-            if m.get("type") == "agent.stall" and stall_ms is None:
+            mtype = m.get("type")
+            if mtype == "agent.stall" and stall_ms is None:
                 stall_ms = dt
-            if m.get("type") == "agent.sentence" and first_sentence_ms is None:
+            if mtype == "agent.sentence" and first_sentence_ms is None:
                 first_sentence_ms = dt
-            if m.get("type") in ("agent.done", "agent.error"):
-                return stall_ms, first_sentence_ms
+            if mtype in ("agent.chunk", "agent.sentence") and first_audio_ms is None:
+                first_audio_ms = dt
+            if mtype in ("agent.done", "agent.error"):
+                return stall_ms, first_sentence_ms, first_audio_ms
 
 
 async def _measure_barge(ws_connect):
@@ -148,15 +159,19 @@ def run_measurements():
     except ImportError:
         return None, "websockets not installed (`pip install websockets`)"
 
-    stalls, first_sentences, barges = [], [], []
+    stalls, first_sentences, first_audios, barges = [], [], [], []
+    # The FIRST turn of a fresh process is the cold one (turn_worst_ms); it is
+    # reported on its own line rather than averaged into the warm p50.
 
     async def go():
         for i in range(N_TURNS):
-            stall_ms, fs_ms = await _measure_turn(ws_connect, i)
+            stall_ms, fs_ms, fa_ms = await _measure_turn(ws_connect, i)
             if stall_ms is not None:
                 stalls.append(stall_ms)
             if fs_ms is not None:
                 first_sentences.append(fs_ms)
+            if fa_ms is not None:
+                first_audios.append(fa_ms)
             barge_ms = await _measure_barge(ws_connect)
             if barge_ms is not None:
                 barges.append(barge_ms)
@@ -169,7 +184,11 @@ def run_measurements():
     return {
         "stall_ms": stalls,
         "first_sentence_ms": first_sentences,
+        "first_audio_ms": first_audios,
         "barge_ms": barges,
+        # Turn 1 of a fresh process. Reported on its own line, never folded
+        # into the warm numbers, because it is the one that broke the budget.
+        "cold_first_audio_ms": first_audios[:1],
     }, None
 
 
@@ -184,7 +203,7 @@ def main():
     reachable = port_reachable()
     if not reachable:
         print(f"\nno listener on 127.0.0.1:{APP_PORT} — nothing measured")
-        for metric in ("stall_ms", "first_sentence_ms", "barge_ms"):
+        for metric in ("stall_ms", "first_sentence_ms", "first_audio_ms", "barge_ms"):
             print(f"  {metric:<18} NOT-MEASURED (no server on :{APP_PORT})")
         print("RESULT: NOT-MEASURED (no server)")
         return 0
@@ -194,7 +213,7 @@ def main():
         print(f"\nserver on :{APP_PORT} reachable but could not measure: {err}")
         if not STUDIO_TOKEN:
             print("  hint: no studio token found (STUDIO_TOKEN, STUDIO_TOKEN_FILE, .qa-scratch/studio.token)")
-        for metric in ("stall_ms", "first_sentence_ms", "barge_ms"):
+        for metric in ("stall_ms", "first_sentence_ms", "first_audio_ms", "barge_ms"):
             print(f"  {metric:<18} NOT-MEASURED ({err})")
         print("RESULT: NOT-MEASURED")
         return 0
@@ -204,6 +223,10 @@ def main():
     checks = [
         ("stall_ms", samples["stall_ms"], budgets.get("stall_ms")),
         ("first_sentence_ms", samples["first_sentence_ms"], budgets.get("turn_p50_ms")),
+        # What the person actually hears first, chunk or sentence.
+        ("first_audio_ms", samples["first_audio_ms"], budgets.get("turn_p50_ms")),
+        # Turn 1 of a fresh process, against the worst-case budget.
+        ("cold_first_audio_ms", samples["cold_first_audio_ms"], budgets.get("turn_worst_ms")),
         ("barge_ms", samples["barge_ms"], budgets.get("barge_ms")),
     ]
 

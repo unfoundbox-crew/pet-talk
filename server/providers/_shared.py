@@ -115,6 +115,13 @@ def pcm_duration_ms(wav_bytes: bytes) -> int:
 
     Used only for word-time *estimation* — never for playback — so a
     malformed or empty input returns 0 rather than raising.
+
+    A streaming encoder may write a placeholder into the `data` chunk-size
+    field rather than the real length, and `wave` believes it. Measured
+    2026-09-12: Deepgram's `speak` endpoint writes `0x7fff0000` there, so a
+    5-second clip read back as 44,737,877ms and every word time derived from
+    it was nonsense. The header's frame count is therefore cross-checked
+    against the bytes actually present, and the smaller of the two wins.
     """
     if not wav_bytes:
         return 0
@@ -122,6 +129,13 @@ def pcm_duration_ms(wav_bytes: bytes) -> int:
         with wave.open(io.BytesIO(wav_bytes), "rb") as w:
             frames = w.getnframes()
             rate = w.getframerate() or 1
+            frame_size = max(1, w.getnchannels() * w.getsampwidth())
+            # 44 bytes is the canonical PCM header; anything bigger only makes
+            # this bound tighter, so under-counting the header is the safe way
+            # to round.
+            frames_present = max(0, len(wav_bytes) - 44) // frame_size
+            if frames_present and frames > frames_present:
+                frames = frames_present
             return int(frames * 1000 / rate)
     except (wave.Error, EOFError, OSError):
         return 0

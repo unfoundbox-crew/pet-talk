@@ -97,6 +97,10 @@ app.include_router(routes_http.router)
 app.include_router(ws_module.router)
 
 
+#: Strong reference to the startup warm task (see below).
+_WARM_TASK = None
+
+
 @app.on_event("startup")
 async def _warm_on_startup() -> None:
     """Pre-synthesize the default persona's stall phrases (lane 2).
@@ -115,7 +119,12 @@ async def _warm_on_startup() -> None:
         except Exception as e:  # a failed warm must never take the server down
             swallowed("stall_warm_task_failed", e)
 
-    _asyncio.create_task(_warm(), name="stall-warm")
+    # The reference is held on purpose. asyncio keeps only a weak reference to
+    # a running task, so a bare `create_task(...)` whose result nobody holds can
+    # be garbage-collected before it ever runs — measured here: the first boot
+    # of this hook logged nothing at all because of exactly that.
+    global _WARM_TASK
+    _WARM_TASK = _asyncio.create_task(_warm(), name="stall-warm")
 
 # --------------------------------------------------- compatibility names ---
 # The live provider triple is published here because this is the documented
