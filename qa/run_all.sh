@@ -98,9 +98,26 @@ finally:
 " 2>/dev/null
 }
 
-run_bounded() { # timeout_s cmd... -> runs cmd bounded by a hard wall-clock alarm
+run_bounded() { # timeout_s cmd... -> runs cmd in its own process group under a hard wall-clock alarm
+  # On timeout the WHOLE group is killed (TERM, then KILL after 2s), so a suite
+  # that forked a server or an OCR subprocess cannot leave orphans behind.
+  # Exit status 124 on timeout, else the command's own status.
   local t="$1"; shift
-  perl -e 'alarm shift; exec @ARGV' "$t" "$@"
+  perl -e '
+    use POSIX qw(setsid);
+    my $t = shift;
+    my $pid = fork();
+    die "fork: $!" unless defined $pid;
+    if ($pid == 0) { setsid(); exec @ARGV or die "exec: $!"; }
+    local $SIG{ALRM} = sub {
+      kill "TERM", -$pid; select(undef, undef, undef, 2);
+      kill "KILL", -$pid; waitpid($pid, 0); exit 124;
+    };
+    alarm $t;
+    waitpid($pid, 0);
+    my $st = $?;
+    exit(($st & 127) ? 128 + ($st & 127) : $st >> 8);
+  ' "$t" "$@"
 }
 
 timeout_for() { # path -> per-suite override via env, else DEFAULT_TIMEOUT
