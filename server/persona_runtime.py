@@ -101,7 +101,9 @@ HANDOVER_LINE = (
 )
 
 
-def build_system_prompt(p: Persona, grounding: str, handover: bool = False) -> str:
+def build_system_prompt(
+    p: Persona, grounding: str, handover: bool = False, eyes_context: str = ""
+) -> str:
     """Build the system prompt from the ACTIVE persona only.
 
     A persona carrying an ``instruction_spec`` supplies its own prompt
@@ -112,13 +114,17 @@ def build_system_prompt(p: Persona, grounding: str, handover: bool = False) -> s
     ``handover`` adds :data:`HANDOVER_LINE`, and nothing else — a hand-over
     changes what the turn is for, not who the persona is. It reaches both
     prompt shapes, including a persona with its own ``instruction_spec``.
+
+    ``eyes_context`` is server/eyes.py's queued OCR text for this turn
+    (server/turn.py drains it) — empty on every turn with no attachment.
     """
     spec = str(getattr(p, "instruction_spec", "") or "").strip()
     grounding_block = f"[ACTIVE SYSTEM GROUNDING]\n{grounding}" if grounding else ""
+    eyes_block = f"[EYES CONTEXT]\n{eyes_context}" if eyes_context else ""
     handover_block = HANDOVER_LINE if handover else ""
     if spec:
         return "\n\n".join(
-            part for part in (spec, grounding_block, handover_block) if part
+            part for part in (spec, grounding_block, eyes_block, handover_block) if part
         )
 
     name = (getattr(p, "name", "") or "the assistant").strip()
@@ -126,7 +132,7 @@ def build_system_prompt(p: Persona, grounding: str, handover: bool = False) -> s
     identity = f"You are {name}." if name else ""
     parts = [
         part
-        for part in (identity, tone, grounding_block, handover_block, VOICE_RULES)
+        for part in (identity, tone, grounding_block, eyes_block, handover_block, VOICE_RULES)
         if part
     ]
     return "\n\n".join(parts)

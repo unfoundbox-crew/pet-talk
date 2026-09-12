@@ -14,6 +14,7 @@ from typing import Awaitable, Callable, Optional
 
 from fastapi import WebSocket
 
+from . import eyes
 from .control import check_deterministic_control
 from .frames import frame, safe_send_json, send_error
 from .grounding import collect_grounding
@@ -39,6 +40,25 @@ from .telemetry import TurnLog
 
 #: Called with the turn id to cancel; returns the true dropped count.
 BargeFn = Callable[[str], Awaitable[int]]
+
+
+def _drain_eyes_context() -> str:
+    """Pull whatever server/eyes.py queued for THIS turn's prompt.
+
+    ``EyesProvider.take_context()`` drains and clears its own queue, so an
+    attachment's OCR text reaches exactly one turn — the very next one —
+    and never a later one. Empty on every turn with no pending attachment,
+    which is most turns. Never raises: a drain failure must not sink the
+    turn, only drop the (already-optional) eyes context.
+    """
+    try:
+        pending = eyes.get_provider().take_context()
+    except Exception as e:
+        swallowed("eyes_context_drain_failed", e)
+        return ""
+    if not pending:
+        return ""
+    return "\n".join(tag for tag, _truncated in pending)
 
 
 async def handle_turn(
@@ -122,8 +142,16 @@ async def handle_turn(
 
     history = runtime.memory.get_history_messages(pname, limit=6)
     grounding = await collect_grounding()
+    eyes_context = _drain_eyes_context()
+    if eyes_context and log_ is not None:
+        log_.mark("eyes_ocr_ms")
     messages = [
-        {"role": "system", "content": build_system_prompt(p, grounding, handover=handover)},
+        {
+            "role": "system",
+            "content": build_system_prompt(
+                p, grounding, handover=handover, eyes_context=eyes_context
+            ),
+        },
         *history,
         {"role": "user", "content": text},
     ]
