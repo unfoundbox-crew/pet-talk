@@ -60,14 +60,21 @@ def root() -> dict[str, str]:
 
 @router.get("/health")
 def health() -> dict[str, Any]:
-    """The one health route. ``degraded`` names every unusable tyre."""
+    """The one health route. ``degraded`` names every unusable tyre.
+
+    ``ok`` was hardcoded true, so a server with no working TTS answered a
+    health check with ``ok: true`` and a populated ``degraded`` — a monitor
+    reading the one field it is supposed to read saw green. ``ok`` is now false
+    whenever anything is degraded; the reasons stay in ``degraded``.
+    """
     providers = runtime.current()
+    degraded = list(providers.degraded)
     return {
-        "ok": True,
+        "ok": not degraded,
         "service": SERVICE_NAME,
         "version": SERVICE_VERSION,
         "providers": providers.class_names(),
-        "degraded": list(providers.degraded),
+        "degraded": degraded,
     }
 
 

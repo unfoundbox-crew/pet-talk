@@ -893,6 +893,54 @@ class TestSettingsRedaction(unittest.TestCase):
         for tyre in ("stt", "llm", "tts"):
             self.assertIn(tyre, data["providers"])
         self.assertIsInstance(data["degraded"], list)
+        # `ok` is a claim about the whole server, not a constant.
+        self.assertEqual(data["ok"], not data["degraded"])
+
+    def test_health_is_not_ok_while_a_tyre_is_degraded(self):
+        """`ok` was hardcoded true: a server with no working TTS answered green
+        to the one field a monitor reads."""
+        from dataclasses import replace
+
+        from server import runtime
+
+        live = runtime.current()
+        runtime.install(replace(live, degraded=("tts:tts_unknown_provider:nope",)))
+        try:
+            data = self.client.get("/health").json()
+            self.assertFalse(data["ok"], f"degraded but ok: {data}")
+            self.assertEqual(data["degraded"], ["tts:tts_unknown_provider:nope"])
+        finally:
+            runtime.install(live)
+        self.assertTrue(self.client.get("/health").json()["ok"])
+
+
+class TestTurnErrorReachesAgentDone(unittest.IsolatedAsyncioTestCase):
+    """docs/SPEC.md 4.2 lists `error` among agent.done's paths and nothing ever
+    emitted it — a turn that blew up sent agent.error and then silence, leaving
+    a client that waits for agent.done stuck in `thinking`."""
+
+    async def test_a_provider_error_in_the_turn_ends_with_path_error(self):
+        class ExplodingSTT:
+            base_url = "test://boom"
+
+            def transcribe(self, audio, sample_rate=16000):
+                raise RuntimeError("the microphone caught fire")
+
+        ws = fake_ws()
+        providers = ProviderSet(stt=ExplodingSTT(), llm=FastLLM(["Hello."]), tts=StubTTS())
+        await handle_turn_task(
+            ws, "t-err", None, SpeakQueue(), {},
+            active_persona=TEST_PERSONA, providers=providers,
+            audio=b"\x00\x00", sample_rate=16000,
+        )
+        frames = sent_frames(ws)
+        errors = [f for f in frames if f["type"] == "agent.error"]
+        self.assertTrue(errors, f"no agent.error: {frames}")
+        dones = [f for f in frames if f["type"] == "agent.done"]
+        self.assertTrue(dones, f"the turn never ended: {frames}")
+        self.assertEqual(dones[-1]["path"], "error")
+        self.assertEqual(dones[-1]["reason"], errors[-1]["reason"])
+        self.assertEqual(dones[-1]["sentences"], 0)
 
 
 class TestSocketSurvivesBadFrames(unittest.TestCase):

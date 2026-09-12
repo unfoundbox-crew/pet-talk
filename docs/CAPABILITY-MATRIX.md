@@ -44,7 +44,7 @@ All eight construct hermetically (no network I/O at `__init__`, per each class's
 | `kokoro-local` (default; aliases `kokoro_local`/`kokoro-mlx`/`mlx`) | — | none | local, in-process | 255ms p50 — **FAILs** the 200ms budget, `docs/SPEC.md` §9.1 |
 | `kokoro` (SpacePilot daemon) | — (token chain, not a settings field — see gap below) | `SPACEPILOT_TOKEN`/`STUDIO_TOKEN`/`KOKORO_TOKEN`, or auto-fetched from the daemon | local daemon | 1235ms p50 (measured, `server/providers/tts.py` docstring) |
 | `smallest` (aliases `smallest-ai`/`smallest_ai`/`waves`) | `smallest_api_key` | `SMALLEST_API_KEY` | cloud | NOT-MEASURED |
-| `elevenlabs` | `elevenlabs_api_key` **(added this pass — see fix below)** | `ELEVENLABS_API_KEY` | cloud | NOT-MEASURED |
+| `elevenlabs` | `elevenlabs_api_key` | `ELEVENLABS_API_KEY` | cloud | NOT-MEASURED |
 | `deepgram` | `deepgram_api_key` (shared with STT's Deepgram key) | `DEEPGRAM_API_KEY` | cloud | 1939ms p50 (measured, `server/providers/tts.py` docstring, Aura-2) |
 | `stub` | — | none | n/a (tests) | n/a |
 
@@ -76,12 +76,27 @@ What already exists and is real today: `LLM_PROVIDER=litellm|fleet|local` are th
 
 `TTS_REQUIRED_KEY` (`server/settings.py`) has always listed `elevenlabs` -> `ELEVENLABS_API_KEY` and `deepgram` -> `DEEPGRAM_API_KEY`, but `RuntimeSettings.key_for_tts()` only ever returned a value for the `smallest` family — so `provider_factory._require_key` degraded `TTS_PROVIDER=elevenlabs` or `=deepgram` with `missing_api_key` **even when the real env var was set**. Fixed: added the `elevenlabs_api_key` field to `RuntimeSettings` (populated from `ELEVENLABS_API_KEY` in `from_env()`), and `key_for_tts()` now returns `elevenlabs_api_key`/`deepgram_api_key` for those two providers. Proven by `qa/test_capability_matrix.py::TestAtLeastTwoProvidersFromEnv.test_tts_has_at_least_two`.
 
-## Known gap NOT fixed here (belongs to lane 2, `server/providers/tts.py`)
+## Closed since 1.0.0: `make_tts` forwards the posted key
 
-`make_tts()`'s `elevenlabs` and `deepgram` branches (`return ElevenLabsTTS()` / `return DeepgramTTS()`) ignore the `api_key` argument `provider_factory._tts()` passes them — unlike the `smallest`/`kokoro` branches, which forward it correctly. Practical effect: a key supplied *only* in a `POST /settings` body, with no matching process env var, never reaches the constructed provider for these two tyres; both keep reading `ELEVENLABS_API_KEY`/`DEEPGRAM_API_KEY` straight from `os.environ` at synth time instead. Boot-time env selection still works (the env var is already in the process's environment either way); a pure runtime credential swap via `/settings` alone does not, for these two providers specifically. `server/providers/tts.py` is lane 2's owned path, not one of the two files (`server/provider_factory.py`, `server/settings.py`) this lane may touch, so this is reported for lane 2/the coordinator rather than patched here. `qa/test_capability_matrix.py::test_tts_elevenlabs_and_deepgram_key_not_forwarded_by_make_tts_KNOWN_GAP` is the tripwire — it fails loudly (in a good way) the day `make_tts()` forwards the key, which is the cue to delete this paragraph and the matching table caveat above.
+`make_tts()`'s `elevenlabs` and `deepgram` branches once ignored the `api_key`
+argument `provider_factory._tts()` passed them, so a key supplied only in a
+`POST /settings` body never reached the constructed provider and a runtime
+credential swap did not work for those two tyres. It does now — both branches
+forward the key, verified 2026-09-12:
+`qa/test_tts_chunking.py::TestRuntimeKeyForwarding::test_posted_key_reaches_elevenlabs`
+and `::test_posted_key_reaches_deepgram` assert `make_tts(p, api_key=...)._key()`
+returns the posted value and that no `repr` leaks it, and
+`::test_no_key_anywhere_still_fails_closed_by_name` holds the `tts_no_key`
+refusal in place.
+
+The tripwire this section used to name,
+`test_tts_elevenlabs_and_deepgram_key_not_forwarded_by_make_tts_KNOWN_GAP`,
+never existed in the tree — the paragraph it guarded outlived the gap it
+described by five commits. The three tests above are the real guard.
 
 ## Changelog
 
 | Version | Date | Change |
 | --- | --- | --- |
 | 1.0.0 | 2026-09-12 | First capability matrix, written for lane 4c's no-vendor-lock-in test pass. VAD and the eyes/elevenlabs/deepgram gaps above are the real findings; everything else in this table is a passing, hermetic assertion in `qa/test_capability_matrix.py`. |
+| 1.0.1 | 2026-09-12 | The elevenlabs/deepgram key-forwarding gap is closed and its section rewritten; it had named a tripwire test that never existed. The VAD gap and its tripwire (`test_vad_has_only_one_provider_today_this_is_a_real_gap`, which does exist) are unchanged and still real. |

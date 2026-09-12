@@ -105,7 +105,7 @@ An unrecognized frame type gets `agent.error` reason `unknown_frame` (detail: th
 | `agent.stall` | `phrase_id`, `text` | `turn.py` worker path, before the LLM answer starts |
 | `agent.sentence` | `seq`, `text`, `audio_url`, `word_times`, `estimated`, `stream_url`, `chunked` | `speech.py:speak_sentence` — one per spoken sentence |
 | `agent.chunk` | `seq`, `chunk_no`, `audio_b64`, `url`, `final` | `speech.py:stream_chunks` — one per synthesis chunk, only on a chunk-capable tyre |
-| `agent.done` | `path`, `sentences`, `dropped?` | end of every turn; `path` is one of `empty`, `control`, `control_cancel`, `worker`, `direct`, `interrupted`, `error` |
+| `agent.done` | `path`, `sentences`, `dropped?`, `reason?` | end of every turn; `path` is one of `empty`, `control`, `control_cancel`, `worker`, `direct`, `interrupted`, `error`. `path="error"` follows the `agent.error` that named the failure and repeats its `reason`, so a client always sees a turn end |
 | `agent.error` | `reason`, `detail?`, plus per-call fields (`seq`, `ref`, ...) | any failure, see catalogue in §4.3 |
 | `eyes.received` | `ref`, `kind`, `task`, `bytes` | `eyes.py:handle_attach` as soon as the payload is accepted |
 | `eyes.text` | `ref`, `source`, `kind`, `task`, `engine`, `text`, `truncated` | `eyes.py:handle_attach` after OCR resolves |

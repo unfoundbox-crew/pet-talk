@@ -244,11 +244,23 @@ async def _turn_pipeline(
         except ProviderError as e:
             await send_error(ws, turn_id, e.reason, e.detail)
             log_.end(path="stt_error", chars=0, sentences=0)
+            # Every turn ends with agent.done (docs/SPEC.md 4.2). A failed STT
+            # used to send agent.error and nothing else, so a client waiting on
+            # agent.done stayed in `thinking` for ever. The telemetry keeps its
+            # finer `stt_error`; the wire uses the catalogued `error`.
+            await safe_send_json(
+                ws,
+                frame("agent.done", turn_id, path="error", sentences=0, reason=e.reason),
+            )
             return
         except Exception as e:
             reason = swallowed("stt_failed", e, turn_id=turn_id)
             await send_error(ws, turn_id, reason, str(e))
             log_.end(path="stt_error", chars=0, sentences=0)
+            await safe_send_json(
+                ws,
+                frame("agent.done", turn_id, path="error", sentences=0, reason=reason),
+            )
             return
         log_.mark("stt")
         await safe_send_json(
@@ -338,12 +350,21 @@ async def handle_turn_task(
         log_.end(path="interrupted", chars=0, sentences=0)
         await safe_send_json(ws, frame("agent.done", turn_id, path="interrupted"))
     except ProviderError as e:
+        # docs/SPEC.md 4.2 lists `error` among agent.done's paths, and nothing
+        # emitted it: a turn that died here sent agent.error and then silence,
+        # so a client waiting on agent.done sat in `thinking` for ever.
         log_.end(path="error", chars=0, sentences=0)
         await send_error(ws, turn_id, e.reason, e.detail)
+        await safe_send_json(
+            ws, frame("agent.done", turn_id, path="error", sentences=0, reason=e.reason)
+        )
     except Exception as e:
         log_.end(path="error", chars=0, sentences=0)
         reason = swallowed("turn_task_exception", e, turn_id=turn_id)
         await send_error(ws, turn_id, reason, str(e))
+        await safe_send_json(
+            ws, frame("agent.done", turn_id, path="error", sentences=0, reason=reason)
+        )
     finally:
         cancel_token.set()  # nothing from this turn may speak after it ends
         turn_tasks.pop(turn_id, None)
