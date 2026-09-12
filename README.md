@@ -152,3 +152,8 @@ with no side effects.
 The only latency numbers this README will quote are the ones in
 `qa/budgets.json` or the measured table in `docs/SPEC.md` §9 — both labelled.
 No other number in this file is a claim about real-world speed.
+
+## Living docs
+
+Architecture and roadmap: `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`. Rendered page: https://claude.ai/code/artifact/57578976-d952-47ac-b219-2c440af1cd22
+Rebuild: `python3 docs/site/build.py --arch docs/ARCHITECTURE.md --roadmap docs/ROADMAP.md --out docs/site/index.html --product-name pet-talk --repo-url https://github.com/unfoundbox-crew/pet-talk`
