@@ -94,6 +94,15 @@ merged into this branch.
   longer tracked in git; build them with `make build-hotkey`.
 
 ### Fixed
+- Chunked audio now reaches the cockpit: `ChunkPlayer` is wired into `App.tsx` and plays `agent.chunk` frames as they arrive; whole-sentence playback is suppressed when a sentence is chunked (`acf90b7`).
+- Receipts no longer block the event loop: the Archie lookup runs off-thread under a 2 s timeout, so a slow index cannot freeze other sockets (`f0544b7`).
+- A reused `turn_id` barges the incumbent turn instead of overwriting it; each turn keeps its own queue (`464f140`).
+- `archie` is called with `--` before positionals and path hints starting with `-` or containing `..` are refused (`2b1713c`).
+- The hand-over flag is consumed by the next turn: `transcript.user` carries `handover: true` once and the prompt gets one delegation line (`e586a94`).
+- Hotkey config rejects non-finite spring values and clamps ranges; the error earcon honours the silent and headless flags; AX casts are conditional (`dcc3697`, `cd3320e`).
+- `agent.chunk` payloads are capped (`PET_TALK_CHUNK_MAX_BYTES`, default 512 KiB) and every sentence ends with exactly one `final` chunk (`756570a`).
+- No absolute home paths on the wire in receipts or error details (`0a2eaca`).
+- `/health` reports `ok: false` while any provider is degraded; the stale capability-matrix note is corrected (`a44117d`).
 
 - **Barge could be lost.** The event loop blocked on STT/TTS/git calls, so
   a barge frame couldn't be read while a turn was in flight; a barge
