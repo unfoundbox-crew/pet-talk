@@ -10,6 +10,7 @@ import {
   newAttachRef,
   newTurnId,
   socket,
+  studioTokenHeader,
 } from "./ws";
 import en from "./i18n/en.json";
 import hi from "./i18n/hi.json";
@@ -94,6 +95,9 @@ export default function App() {
 
   // Core Connection & State
   const [connected, setConnected] = useState(false);
+  // Set on a 401 from a mutating fetch, or a WS close 4401 — shown as a
+  // banner instead of a silent retry (server/auth.py requires the token).
+  const [authError, setAuthError] = useState(false);
   const [state, setState] = useState<AgentState>("idle");
   const [activeSentence, setActiveSentence] = useState<string>("");
 
@@ -459,6 +463,11 @@ export default function App() {
     socket.connect(WS_URL);
     setConnected(true);
 
+    const offAuth = socket.onAuthError(() => {
+      setConnected(false);
+      setAuthError(true);
+    });
+
     const off = socket.onFrame((frame: ServerFrame) => {
       const now = performance.now();
       const elapsed = turnStartTimeRef.current > 0 ? Math.round(now - turnStartTimeRef.current) : 0;
@@ -569,6 +578,7 @@ export default function App() {
 
     return () => {
       off();
+      offAuth();
       socket.close();
     };
   }, [pushLine, pumpQueue, patchEyes]);
@@ -634,9 +644,13 @@ export default function App() {
     const base = httpBaseFromWs(WS_URL);
     const res = await fetch(`${base}/settings`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...studioTokenHeader() },
       body: JSON.stringify(newSettings),
     });
+    if (res.status === 401) {
+      setAuthError(true);
+      return;
+    }
     if (res.ok) {
       const data = await res.json();
       if (data.settings) setSettings(data.settings);
@@ -661,9 +675,13 @@ export default function App() {
     const base = httpBaseFromWs(WS_URL);
     const res = await fetch(`${base}/personas`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...studioTokenHeader() },
       body: JSON.stringify(personaData),
     });
+    if (res.status === 401) {
+      setAuthError(true);
+      return;
+    }
     if (res.ok) {
       const refreshed = await fetch(`${base}/personas`).then((r) => r.json());
       setPersonas(refreshed);
@@ -674,7 +692,14 @@ export default function App() {
   // Handle Delete Persona
   const handleDeletePersona = async (name: string) => {
     const base = httpBaseFromWs(WS_URL);
-    const res = await fetch(`${base}/personas/${name}`, { method: "DELETE" });
+    const res = await fetch(`${base}/personas/${name}`, {
+      method: "DELETE",
+      headers: { ...studioTokenHeader() },
+    });
+    if (res.status === 401) {
+      setAuthError(true);
+      return;
+    }
     if (res.ok) {
       const refreshed = await fetch(`${base}/personas`).then((r) => r.json());
       setPersonas(refreshed);
@@ -685,7 +710,14 @@ export default function App() {
   // Clear Memory
   const handleClearMemory = async () => {
     const base = httpBaseFromWs(WS_URL);
-    const res = await fetch(`${base}/ledger`, { method: "DELETE" });
+    const res = await fetch(`${base}/ledger`, {
+      method: "DELETE",
+      headers: { ...studioTokenHeader() },
+    });
+    if (res.status === 401) {
+      setAuthError(true);
+      return;
+    }
     if (res.ok) {
       setMemoryTurns([]);
     }
@@ -747,6 +779,44 @@ export default function App() {
         padding: "1.5rem 1rem",
       }}
     >
+      {authError && (
+        <div
+          role="alert"
+          style={{
+            width: "100%",
+            maxWidth: 720,
+            background: "rgba(255, 61, 0, 0.15)",
+            border: "1px solid #ff3d00",
+            color: "#ff3d00",
+            borderRadius: "10px",
+            padding: "0.6rem 1rem",
+            marginBottom: "0.75rem",
+            fontSize: "0.8rem",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: "0.75rem",
+          }}
+        >
+          <span>studio token missing or wrong — set it in Settings to reconnect.</span>
+          <button
+            type="button"
+            onClick={() => setShowSettings(true)}
+            style={{
+              background: "none",
+              border: "1px solid #ff3d00",
+              color: "#ff3d00",
+              borderRadius: "6px",
+              padding: "0.2rem 0.6rem",
+              fontSize: "0.75rem",
+              cursor: "pointer",
+              flexShrink: 0,
+            }}
+          >
+            Open Settings
+          </button>
+        </div>
+      )}
       {/* Top App Bar */}
       <header
         style={{
@@ -1170,6 +1240,7 @@ export default function App() {
           disabled={!connected}
           connected={connected}
           serverUrl={httpBaseFromWs(WS_URL)}
+          onAuthError={() => setAuthError(true)}
           t={t}
         />
       </main>
@@ -1191,6 +1262,11 @@ export default function App() {
         activeProviders={activeProviders}
         secretsSet={secretsSet}
         onApplySettings={handleApplySettings}
+        onTokenSaved={() => {
+          setAuthError(false);
+          socket.connect(WS_URL);
+          setConnected(true);
+        }}
         t={t}
       />
 

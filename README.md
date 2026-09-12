@@ -41,6 +41,22 @@ on a laptop (the fan rule), it runs on `ssh air`. As of this branch,
 `cli/hotkey/build.sh` does not exist in this checkout yet; `make build-hotkey`
 will fail until another lane lands it.
 
+### Studio token
+
+Every mutating HTTP route and the `/ws` handshake require a token
+(`server/auth.py`). The server resolves it in order — env `STUDIO_TOKEN` →
+the file named by `STUDIO_TOKEN_FILE` → one it generates at startup into
+`.qa-scratch/studio.token` (path logged once, value never) — and
+`cli/client.py` / the web cockpit read the same three sources, so a local
+client picks it up with no extra config. Send it as header
+`X-Studio-Token`; the WS handshake also accepts `?token=<token>` since
+browsers can't set headers on `new WebSocket()`. Reads (`/health`,
+`/voices`, `/audio/{id}`, and the `GET` forms of `/settings`, `/personas`,
+`/ledger`) stay open. `*_base_url` fields in `POST /settings` are checked
+against an allowlist — loopback, RFC1918, or a host in
+`PET_TALK_ALLOWED_HOSTS` — so a mutating request can't repoint a stored
+credential at an arbitrary host. Full contract: `docs/SPEC.md` §6.1.
+
 ## Environment variables
 
 Provider selection and credentials, from `server/settings.py` and
@@ -64,6 +80,9 @@ tree — every credential comes from the environment or a `POST /settings` call.
 | `PET_TALK_GROUNDING_REPOS` | Colon-separated extra repo paths to report git-head lines for in the system prompt. Empty by default. |
 | `EYES_ENGINE` | `zrv` (default) \| `stub`, for the eyes/OCR lane. |
 | `PET_TALK_CORS_ORIGINS` | Comma-separated allowed origins. Default `http://localhost:5173`. |
+| `STUDIO_TOKEN` | The studio token, checked first. See [Studio token](#studio-token). |
+| `STUDIO_TOKEN_FILE` | Path to a file holding the studio token, checked if `STUDIO_TOKEN` is unset. |
+| `PET_TALK_ALLOWED_HOSTS` | Comma-separated extra hostnames `POST /settings`'s `*_base_url` egress allowlist accepts, beyond loopback/RFC1918/the built-in provider hosts. |
 
 ## Repository layout
 

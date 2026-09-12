@@ -5,6 +5,51 @@
 export const WS_URL =
   import.meta.env.VITE_WS_URL ?? "ws://127.0.0.1:8089/ws";
 
+// ---- Studio token (server/auth.py contract) ----
+// Every mutating HTTP route and the WS handshake require ``X-Studio-Token``.
+// Browsers cannot set headers on `new WebSocket()`, so the WS form is
+// `?token=`. Resolution order: build-time env VITE_STUDIO_TOKEN, else what
+// the user typed into the Settings modal's "Connect" field (persisted to
+// localStorage so it survives a reload), else nothing — a request made with
+// no token gets the server's 401 / close 4401, which the UI turns into a
+// visible banner rather than a silent retry.
+const STUDIO_TOKEN_STORAGE_KEY = "pet_talk_studio_token";
+
+export function studioToken(): string {
+  const envToken = import.meta.env.VITE_STUDIO_TOKEN;
+  if (envToken) return String(envToken);
+  try {
+    return localStorage.getItem(STUDIO_TOKEN_STORAGE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/** Persists the token the user typed into the Settings "Connect" field. */
+export function setStudioToken(token: string): void {
+  try {
+    if (token) localStorage.setItem(STUDIO_TOKEN_STORAGE_KEY, token);
+    else localStorage.removeItem(STUDIO_TOKEN_STORAGE_KEY);
+  } catch {
+    // localStorage unavailable (private mode) — token still works this
+    // page-load via VITE_STUDIO_TOKEN, just won't survive a reload.
+  }
+}
+
+/** Spread onto every mutating fetch's `headers`. Empty when unset — the
+ * server's 401 is what surfaces the missing-token banner. */
+export function studioTokenHeader(): Record<string, string> {
+  const token = studioToken();
+  return token ? { "X-Studio-Token": token } : {};
+}
+
+function wsUrlWithToken(url: string): string {
+  const token = studioToken();
+  if (!token) return url;
+  const sep = url.includes("?") ? "&" : "?";
+  return `${url}${sep}token=${encodeURIComponent(token)}`;
+}
+
 export type AgentState = "idle" | "listening" | "thinking" | "speaking";
 
 export type PersonaId = string;
@@ -191,6 +236,10 @@ export function newAttachRef(): string {
 export class PetTalkSocket {
   private ws: WebSocket | null = null;
   private handlers = new Set<ServerHandler>();
+  // Close code 4401 = unauthorized (missing/wrong studio token, server/auth.py).
+  // Kept separate from ServerHandler because it isn't a JSON frame — it's the
+  // handshake itself failing, so there is no `onmessage` to have carried it.
+  private authErrorHandlers = new Set<() => void>();
 
   get connected(): boolean {
     return this.ws?.readyState === WebSocket.OPEN;
@@ -198,13 +247,18 @@ export class PetTalkSocket {
 
   connect(url: string = WS_URL): void {
     this.close();
-    this.ws = new WebSocket(url);
+    this.ws = new WebSocket(wsUrlWithToken(url));
     this.ws.onmessage = (ev: MessageEvent) => {
       try {
         const frame = JSON.parse(String(ev.data)) as ServerFrame;
         this.handlers.forEach((h) => h(frame));
       } catch {
         // Ignore malformed frames; server contract is JSON (§4).
+      }
+    };
+    this.ws.onclose = (ev: CloseEvent) => {
+      if (ev.code === 4401) {
+        this.authErrorHandlers.forEach((h) => h());
       }
     };
   }
@@ -217,6 +271,12 @@ export class PetTalkSocket {
   onFrame(h: ServerHandler): () => void {
     this.handlers.add(h);
     return () => this.handlers.delete(h);
+  }
+
+  /** Fires when the WS handshake is closed with 4401 (unauthorized). */
+  onAuthError(h: () => void): () => void {
+    this.authErrorHandlers.add(h);
+    return () => this.authErrorHandlers.delete(h);
   }
 
   send(frame: ClientFrame): void {

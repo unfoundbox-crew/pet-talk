@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { setStudioToken, studioToken } from "../ws";
 
 // Field names the server redacts (matches server.settings.SECRET_HINTS:
 // any field whose name contains "key" or "token" — plus "secret"/"password").
@@ -52,6 +53,9 @@ interface SettingsModalProps {
       llm_api_key?: string;
     }
   ) => Promise<void>;
+  // Fired after the "Connect" field saves a new studio token — App
+  // reconnects the WS and clears the auth-error banner.
+  onTokenSaved?: () => void;
   t: Record<string, string>;
 }
 
@@ -67,8 +71,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   activeProviders,
   secretsSet,
   onApplySettings,
+  onTokenSaved,
   t,
 }) => {
+  const [tokenInput, setTokenInput] = useState("");
+  const [tokenStatus, setTokenStatus] = useState("");
   const [sttProvider, setSttProvider] = useState(settings.stt_provider || "stub");
   // Credential inputs always start empty — the server never returns the
   // real value (it sends "***" when set), so there is nothing safe to
@@ -117,6 +124,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     } finally {
       setClearingField(null);
     }
+  };
+
+  const handleSaveToken = () => {
+    setStudioToken(tokenInput.trim());
+    setTokenInput("");
+    setTokenStatus(tokenInput.trim() ? "✓ Saved — reconnecting" : "Cleared");
+    onTokenSaved?.();
+    setTimeout(() => setTokenStatus(""), 1500);
   };
 
   const applyPreset = (preset: "mocks" | "fleet" | "cloud" | "apple") => {
@@ -246,6 +261,52 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <span>LLM: <b style={{ color: activeProviders.llm === "StubLLM" ? "#ffb300" : "#24c1e0" }}>{activeProviders.llm}</b></span>
           <span>•</span>
           <span>TTS: <b style={{ color: activeProviders.tts === "StubTTS" ? "#ffb300" : "#a142f4" }}>{activeProviders.tts}</b></span>
+        </div>
+
+        {/* Studio Token — server/auth.py requires X-Studio-Token on every
+            mutating route and on the WS handshake (?token= for browsers). */}
+        <div style={{ marginBottom: "1.25rem" }}>
+          <label style={{ display: "block", fontSize: "0.75rem", color: "#9ba3b8", marginBottom: "0.4rem", fontWeight: 600 }}>
+            Studio Token
+          </label>
+          <div style={{ display: "flex", gap: "0.5rem" }}>
+            <input
+              type="password"
+              value={tokenInput}
+              onChange={(e) => setTokenInput(e.target.value)}
+              placeholder={studioToken() ? "set (hidden) — paste to replace" : "paste the token from .qa-scratch/studio.token"}
+              style={{
+                flex: 1,
+                background: "#191c26",
+                border: "1px solid #282c3f",
+                borderRadius: "8px",
+                padding: "0.4rem 0.6rem",
+                color: "#f1f3f9",
+                fontSize: "0.8rem",
+              }}
+            />
+            <button
+              type="button"
+              onClick={handleSaveToken}
+              style={{
+                background: "#24c1e0",
+                color: "#090a0f",
+                border: "none",
+                borderRadius: "8px",
+                padding: "0.4rem 0.9rem",
+                fontSize: "0.8rem",
+                fontWeight: 600,
+                cursor: "pointer",
+              }}
+            >
+              Connect
+            </button>
+          </div>
+          {tokenStatus && (
+            <span style={{ fontSize: "0.7rem", color: "#636c84", marginTop: "0.3rem", display: "block" }}>
+              {tokenStatus}
+            </span>
+          )}
         </div>
 
         {/* 1-Click Presets */}
