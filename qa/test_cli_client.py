@@ -275,6 +275,27 @@ class TestLiveWsClient(unittest.IsolatedAsyncioTestCase):
         except Exception:
             self.skipTest(f"Live server not running at 127.0.0.1:{self.PORT}")
 
+        # A server answering on this port may not be OURS. The studio token is
+        # per-checkout (`.qa-scratch/studio.token`), so a demo server, another
+        # worktree, or a colleague's instance rejects our handshake with 403 —
+        # and that is nothing of ours to measure, exactly like a refused
+        # connection. It used to FAIL the whole gate, which meant anyone with
+        # any pet-talk server running could not get a clean run.
+        probe = PetTalkClient(ws_url=self.WS_URL, quiet=True)
+        try:
+            await probe.connect()
+        except RuntimeError as e:
+            if "studio token" in str(e).lower():
+                self.skipTest(
+                    f"a server answers on 127.0.0.1:{self.PORT} but rejects this "
+                    "checkout's studio token (403) — it belongs to another "
+                    "checkout or process. Set LIVE_WS_PORT to your own server, "
+                    "or STUDIO_TOKEN to that server's token."
+                )
+            raise
+        else:
+            await probe.close()
+
     async def test_client_connect_and_idle_handshake(self):
         client = PetTalkClient(ws_url=self.WS_URL, quiet=True)
         await client.connect()

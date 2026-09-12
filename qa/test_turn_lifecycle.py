@@ -24,6 +24,7 @@ import io
 import os
 import struct
 import sys
+import threading
 import time
 import unittest
 import wave
@@ -51,6 +52,7 @@ from server.providers import LLMProvider, ProviderError, StubSTT, StubTTS, TTSPr
 from server.persona_runtime import build_system_prompt, resolve_persona
 from server.speak_queue import SpeakQueue
 from server.turn import handle_turn_task
+from server import app as app_module, runtime, warmup
 
 BARGE_BUDGET_S = 0.100
 BUFFER_AHEAD_TARGET = 3
@@ -1017,6 +1019,130 @@ class TestSocketSurvivesBadFrames(unittest.TestCase):
             err = ws.receive_json()
             self.assertEqual(err.get("type"), "agent.error")
             self.assertEqual(err.get("reason"), "eyes_disabled")
+
+
+# ---------------------------------------------------------------------------
+# STT warm-up (0.4.0)
+# ---------------------------------------------------------------------------
+
+
+class RecordingSTT(StubSTT):
+    """A stub STT that remembers every transcribe call it was handed.
+
+    Records on the worker thread `asyncio.to_thread` puts it on, so the count
+    also proves the warm ran off the loop rather than inline.
+    """
+
+    def __init__(self, raises: Exception | None = None) -> None:
+        super().__init__()
+        self.calls: list[tuple[int, int]] = []
+        self.threads: list[int] = []
+        self.raises = raises
+
+    def transcribe(self, pcm16_bytes: bytes, sample_rate: int = 16000) -> str:
+        self.calls.append((len(pcm16_bytes), sample_rate))
+        self.threads.append(threading.get_ident())
+        if self.raises is not None:
+            raise self.raises
+        return "warm"
+
+
+class TestSttWarm(unittest.IsolatedAsyncioTestCase):
+    """The startup hook warms STT exactly once, off-thread, and never dies.
+
+    Why this exists: with TTS and the stall cache both pre-warmed, the first
+    turn after a boot still stalled 1264ms because faster-whisper loaded its
+    weights on the first real call (measured 2026-09-12; warm turns that day
+    ran 317-383ms). The fix is one throwaway transcription at startup, so the
+    thing to hold in place is "exactly one, and a failure cannot take the boot
+    down" — not a latency number a stub cannot produce.
+    """
+
+    def setUp(self) -> None:
+        self._saved = dict(os.environ)
+        os.environ.pop("PET_TALK_STT_WARM", None)
+        # The stall warm is a separate lane's task; keep it out of the way so
+        # this test measures only the STT path.
+        os.environ["PET_TALK_STALL_WARM"] = "0"
+
+    def tearDown(self) -> None:
+        os.environ.clear()
+        os.environ.update(self._saved)
+        app_module.__dict__.pop("stt", None)
+        app_module.stt = runtime.current().stt
+
+    async def _run_startup(self) -> None:
+        """Drive the real startup hook and await the tasks it scheduled."""
+        await app_module._warm_on_startup()
+        tasks = app_module.warm_tasks()
+        self.assertTrue(tasks, "startup scheduled no warm tasks at all")
+        await asyncio.gather(*tasks)
+
+    async def test_startup_warms_stt_exactly_once(self) -> None:
+        rec = RecordingSTT()
+        app_module.stt = rec  # the documented monkeypatch seam (server/runtime.py)
+        self.assertIs(runtime.current().stt, rec)
+
+        await self._run_startup()
+
+        self.assertEqual(
+            len(rec.calls), 1, f"expected exactly one warm transcribe, got {rec.calls}"
+        )
+        n_bytes, rate = rec.calls[0]
+        self.assertEqual(rate, warmup.WARM_SAMPLE_RATE)
+        # 0.5s of 16kHz mono int16 = 16000 bytes, and every one of them silent.
+        self.assertEqual(n_bytes, int(warmup.WARM_SECONDS * warmup.WARM_SAMPLE_RATE) * 2)
+        self.assertEqual(rec.threads[0] != threading.get_ident(), True,
+                         "the warm must run off the event loop's thread")
+
+    async def test_the_warm_buffer_is_half_a_second_of_silence(self) -> None:
+        pcm = warmup.silent_pcm16()
+        self.assertEqual(len(pcm), 16000)
+        self.assertEqual(set(pcm), {0}, "the warm buffer must be digital silence")
+
+    async def test_a_failing_stt_warm_is_logged_and_non_fatal(self) -> None:
+        rec = RecordingSTT(raises=ProviderError("stt_faster_whisper_not_installed", "no wheel"))
+        app_module.stt = rec
+        with self.assertLogs("pet_talk.server", level="INFO") as caught:
+            await self._run_startup()  # must not raise
+        self.assertEqual(len(rec.calls), 1)
+        self.assertTrue(
+            any("stt_warm_failed" in line for line in caught.output),
+            f"the failure must be named in the log, got {caught.output}",
+        )
+
+    async def test_silence_coming_back_empty_counts_as_a_successful_warm(self) -> None:
+        # A real engine transcribing silence raises stt_empty_result. The model
+        # still loaded, which is the whole point, so it logs stt_warm_ms.
+        rec = RecordingSTT(raises=ProviderError("stt_empty_result", "no text"))
+        app_module.stt = rec
+        with self.assertLogs("pet_talk.server", level="INFO") as caught:
+            elapsed = await warmup.warm_stt(rec)
+        self.assertIsNotNone(elapsed)
+        joined = "\n".join(caught.output)
+        self.assertIn("stt_warm_ms=", joined)
+        self.assertNotIn("stt_warm_failed", joined)
+
+    async def test_the_env_flag_turns_the_warm_off_loudly(self) -> None:
+        os.environ["PET_TALK_STT_WARM"] = "0"
+        self.assertFalse(warmup.stt_warm_enabled())
+        rec = RecordingSTT()
+        app_module.stt = rec
+        with self.assertLogs("pet_talk.server", level="INFO") as caught:
+            await self._run_startup()
+        self.assertEqual(rec.calls, [], "PET_TALK_STT_WARM=0 must call nothing")
+        self.assertTrue(
+            any("stt_warm_disabled" in line for line in caught.output),
+            f"a disabled warm must read loudly, got {caught.output}",
+        )
+
+    async def test_a_backend_without_transcribe_is_skipped_by_name(self) -> None:
+        class NoTranscribe:
+            pass
+
+        with self.assertLogs("pet_talk.server", level="INFO") as caught:
+            self.assertIsNone(await warmup.warm_stt(NoTranscribe()))
+        self.assertTrue(any("stt_warm_skipped" in line for line in caught.output))
 
 
 if __name__ == "__main__":

@@ -30,6 +30,9 @@ bin/*
 .DS_Store
 *.swp
 .env
+.env.local
+.env.*.local
+web/.env.local
 
 # agent worktrees
 .claude/worktrees/

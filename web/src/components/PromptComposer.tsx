@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { float32ToBase64Pcm16, studioTokenHeader } from "../ws";
+import { handleComposerKeyDown } from "./composerKeys";
 
 interface PromptComposerProps {
   onSend: (text: string) => void;
@@ -66,15 +67,8 @@ export const PromptComposer: React.FC<PromptComposerProps> = ({
     }
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
-    }
-  };
-
-  const handleSend = () => {
-    const trimmed = text.trim();
+  /** The one send path: both the button and Enter land here. */
+  const sendNow = (trimmed: string) => {
     if (!trimmed || disabled || !connected || isRecording || isTranscribing) return;
     onSend(trimmed);
     setText("");
@@ -82,6 +76,14 @@ export const PromptComposer: React.FC<PromptComposerProps> = ({
       textareaRef.current.style.height = "auto";
     }
   };
+
+  // Enter sends, Shift+Enter is a newline, Cmd/Ctrl+Enter sends. The decision
+  // is in composerKeys.ts so the suite can assert it without a DOM.
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    handleComposerKeyDown(e, text, sendNow);
+  };
+
+  const handleSend = () => sendNow(text.trim());
 
   // --- Dictation: Start Mic Recording ---
   const startDictation = useCallback(async () => {

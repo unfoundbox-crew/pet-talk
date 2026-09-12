@@ -1,10 +1,18 @@
-.PHONY: build-hotkey qa qa-silent qa-real
+.PHONY: build-cli build-hotkey qa qa-silent qa-real
+
+# bin/pet-talk-cli — the launcher the hotkey daemon spawns on Option+Tab. It
+# used to be an untracked binary nothing built, so a fresh clone gave the
+# daemon "Target CLI: (unresolved)" and the chord did nothing. Cheap, no
+# compiler, runs anywhere.
+build-cli:
+	cli/build-cli.sh bin/
 
 # The hotkey build is five Swift files and ~8 s on Apple silicon: it runs
 # locally at low priority. It is the one exception to the fan rule (Saurabh,
 # 2026-09-12). `air` is Intel and would produce an x86_64 binary that cannot
-# run on this Mac, so never route it there.
-build-hotkey:
+# run on this Mac, so never route it there. It depends on build-cli because a
+# daemon without a CLI to spawn is a daemon whose hotkey is a no-op.
+build-hotkey: build-cli
 	nice -n 19 cli/hotkey/build.sh bin/
 
 qa:

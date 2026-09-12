@@ -367,6 +367,16 @@ class HotkeyListener {
     }
 
     func resolveCliPath() throws -> String {
+        try HotkeyListener.resolveCliPath(override: cliOverridePath)
+    }
+
+    /// The same resolution, without needing a live listener — so
+    /// `--dump-state` can report what the daemon WOULD spawn. `bin/pet-talk-cli`
+    /// was an untracked binary nothing built, so this returned
+    /// `cli_path_unresolved` on a fresh clone and Option+Tab was a silent
+    /// no-op; `make build-cli` writes the launcher now, and the dump makes the
+    /// resolution testable rather than only visible in a daemon's startup log.
+    static func resolveCliPath(override cliOverridePath: String?) throws -> String {
         if let overridePath = cliOverridePath, FileManager.default.isExecutableFile(atPath: overridePath) {
             return overridePath
         }
@@ -1746,6 +1756,20 @@ func doDumpState() -> Int32 {
         }
         dump["state"] = state
     }
+
+    // What Option+Tab would actually spawn. A daemon with no CLI to spawn is a
+    // daemon whose hotkey does nothing, and that failed silently for a whole
+    // release — so it is in the machine-readable dump, not only the startup log.
+    var cli: [String: Any] = [:]
+    do {
+        let resolved = try HotkeyListener.resolveCliPath(override: nil)
+        cli["resolved"] = true
+        cli["path"] = resolved
+    } catch {
+        cli["resolved"] = false
+        cli["reason"] = "\(error)"
+    }
+    dump["cli"] = cli as [String: Any]
 
     dump["chords"] = [
         "optionTab": "ask",
