@@ -32,7 +32,7 @@ humanizer, QA gates. Local-first; cloud tyres explicit, never silent.
    it has one provider and no env switch today. Full per-provider table,
    and exactly what's proven vs. not: `docs/CAPABILITY-MATRIX.md`.
 3. No absolute paths, no secrets in tree (Doppler + env only).
-4. Heavy compute leaves the MacBook; node/python checks stay local. Exception: `make build-hotkey` (five Swift files, ~8 s) builds locally at nice 19; `air` is Intel and cannot produce the arm64 binary.
+4. Heavy compute leaves the MacBook; node/python checks stay local. Exception: `make build-hotkey` (12 Swift files, ~8 s) builds locally at nice 19; `air` is Intel and cannot produce the arm64 binary.
 5. Subagents report back in ONE message; never spawn sideways.
 6. Taste (personas' character) is human-approved; tone changes are PRs.
 7. **Night mode: `PET_TALK_SILENT=1`** — nothing plays audio, nothing starts

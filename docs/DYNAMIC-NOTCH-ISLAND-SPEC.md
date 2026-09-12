@@ -230,17 +230,41 @@ overridden in `~/.pet-talk/config.yaml` — `motion.spring_stiffness`,
 | `Option+Shift+Tab` | **Hand over** to the agent | Was pause until 2026-09-12 |
 | `Escape` | Barge — kill audio, hard-cut the HUD | ≤ 50 ms budget, no animation at all |
 
-Hand-over is emitted the way a wake turn is emitted: the daemon spawns
-`pet-talk-cli handover` (it holds no socket of its own). The CLI turns that into
-one WS frame — the contract for the server lane:
+Hand-over is emitted the way a wake turn is emitted, and since 2026-09-12 that
+means the daemon's own socket, not a subprocess (`turn_engine: native`,
+docs/SPEC.md §4.4). One WS frame, then the mic opens:
 
 ```json
 {"type": "user.handover", "turn_id": "<uuid4>", "source": "hotkey"}
 ```
 
-A CLI that does not know the subcommand exits non-zero; the daemon logs
-`handover_emit_failed` with the exit status and shakes the capsule. It never
-silently succeeds.
+On the `cli` fallback engine the daemon still spawns `pet-talk-cli handover` and
+the CLI sends that frame; a CLI that does not know the subcommand exits non-zero,
+the daemon logs `handover_emit_failed` with the exit status and shakes the
+capsule. Either way it never silently succeeds.
+
+---
+
+## 4a-1. Where the capsule's numbers come from
+
+The capsule is fed from inside this process now. `AudioCapture`'s input tap
+computes RMS and peak on every 20 ms frame and calls
+`HUDController.updateAudioLevel(rms:peak:)` directly, normalised the same way as
+before (`rms / 4000`, `peak / 16000`), so the waveform behaves identically while
+nothing is parsed out of a pipe. On the `cli` engine, `parseRMSTelemetry` still
+reads `[RMS: 0.245, PEAK: 0.512]` lines off the child's stdout.
+
+`agent.sentence.word_times` drives the glyph: one `ArchieGlyphView.beat()` per
+word start, scheduled on the main queue and dropped if a barge has happened since
+(`ChunkPlayback.scheduleBeats`). A sentence with no timings gets one beat — never
+an invented rhythm.
+
+The error state carries a plain line, never an engineering word: the named reason
+(`health_probe_failed`, `ws_unauthorized`, `mic_permission_denied`, …) goes to the
+log, and `TurnController.capsuleText(for:)` maps it to what the capsule shows —
+"can't reach the studio", "studio token missing", "microphone access needed".
+Microphone permission is requested with `AVCaptureDevice.requestAccess(for:
+.audio)` on first use; a denial is that error state, not an empty recording.
 
 ---
 
@@ -254,7 +278,18 @@ The HUD is never shown to prove it works:
   width, fallback pill, ear-fillet threshold, height stepping, top-edge anchoring),
   then asserts no window became visible.
 * `pet-talk-hotkey --dump-state` prints one JSON line: state machine, capsule
-  geometry, spring constants in force, chord map, and the hand-over event shape.
+  geometry, spring constants in force, chord map, the hand-over event shape, the
+  resolved `turnEngine` (with the studio token's SOURCE, never its value) and the
+  `nativeAudio` contract (sample rate, frame size, VAD constants, chunk cap, mic
+  permission status).
+* `pet-talk-hotkey --self-test --turn-engine native` exercises the turn engine
+  with no hardware: the VAD's constants and end-of-turn arithmetic, the WAV
+  parser, the barge generation counter, token resolution, engine precedence.
+  Adding `--fake-server <ws-url>` runs one whole turn against
+  `qa/fixtures/fake_ws_server.py` over a real socket — synthetic mic, silent
+  sink. Both print one `NATIVE-METRICS {json}` line for a test to assert on.
+  The only real-microphone path is behind `PET_TALK_REAL_MIC=1`: it records one
+  second and plays nothing.
 * `PET_TALK_HEADLESS=1` routes every show path through
   `HUDController.orderFrontUnlessHeadless()`, so a QA run can never pop the
   capsule onto the screen someone is working on. The visual `test-hud` /
@@ -332,4 +367,10 @@ as `reducedMotion`, and the suite asserts it. **Nothing loops while idle** —
 | Hard cut | `HUDController.dismiss(hardCut: true)` |
 | Chords | `HotkeyConfig.hotKeyModifier` / `handoverHotKeyModifier`, `HotkeyListener.handleHotKeyTrigger()` / `handleHandoverHotKeyTrigger()` / `emitHandover()` |
 | Headless guard | `HUDController.isHeadless`, `orderFrontUnlessHeadless()` |
-| Tests | `qa/test_hud.py`, `qa/test_hotkey.py` (both headless) |
+| Mic -> capsule level | `AudioCapture` tap -> `PCMEnergy.normalise` -> `HUDController.updateAudioLevel` (`AudioCapture.swift`) |
+| Turn state machine | `TurnController` (`TurnController.swift`), engine choice `TurnEngine.resolve` |
+| Studio socket | `WSClient` (`WSClient.swift`), token `StudioToken.resolve()` |
+| Reply audio + barge cut | `ChunkPlayback.stop()` (`ChunkPlayback.swift`), generation counter |
+| Glyph beat from word timings | `ChunkPlayback.scheduleBeats(wordTimes:)` -> `ArchieGlyphView.beat()` |
+| Error line on the capsule | `TurnController.capsuleText(for:)` |
+| Tests | `qa/test_hud.py`, `qa/test_hotkey.py` (both headless), fixture `qa/fixtures/fake_ws_server.py` |

@@ -7,7 +7,7 @@
 build-cli:
 	cli/build-cli.sh bin/
 
-# The hotkey build is five Swift files and ~8 s on Apple silicon: it runs
+# The hotkey build is 12 Swift files and ~8 s on Apple silicon: it runs
 # locally at low priority. It is the one exception to the fan rule (Saurabh,
 # 2026-09-12). `air` is Intel and would produce an x86_64 binary that cannot
 # run on this Mac, so never route it there. It depends on build-cli because a

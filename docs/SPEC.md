@@ -76,6 +76,11 @@ Full-duplex voice loop: the user can interrupt any time, the agent stalls natura
 | `qa/budgets.json` | The one source of truth for latency budgets. |
 | `qa/latency.py` | Live-WS latency probe against `qa/budgets.json`; prints `NOT-MEASURED` with no server. |
 | `cli/hotkey/*.swift` | Native macOS hotkey/HUD/earcon daemon. A concurrent lane may still be editing this — see section 11. |
+| `cli/hotkey/AudioCapture.swift` | The daemon's own microphone: AVAudioEngine input tap → 16 kHz mono linear16 → 20 ms frames with RMS/peak measured; `EnergyVAD` (cli/audio.py's constants); `MicPermission`; `SyntheticAudioSource` for headless proof. |
+| `cli/hotkey/WSClient.swift` | The daemon's own socket: `URLSessionWebSocketTask` to `/ws`, JSON frames, `StudioToken` resolution (server/auth.py's order), reconnect backoff, the 300 ms `/health` probe. |
+| `cli/hotkey/ChunkPlayback.swift` | `agent.chunk` playback: WAV parse, `AVAudioPlayerNode` queue, the generation counter that makes a barge cut and discards the killed turn's late chunks. `SilentPlaybackSink` for night mode and headless. |
+| `cli/hotkey/TurnController.swift` | One turn end to end in the daemon: the §5a state machine, the chords, the named error reasons, `TurnEngine` (`native`/`cli`). |
+| `qa/fixtures/fake_ws_server.py` | QA fixture: replays a canned `/ws` frame sequence (+ `/health`) so the native engine is provable with no daemon, no model, no mic, no speaker. Never a fallback — nothing in the product points at it. |
 
 ## 4. Wire protocol (WS `/ws`, JSON frames)
 
@@ -195,6 +200,70 @@ Every reason a running server can actually emit today, grepped from `ProviderErr
 **HTTP-only reasons (`routes_http.py`, JSON body not `agent.error`):** `bad_request`, `not_found`, `audio_not_found`, `ledger_clear_failed`, `invalid_base64` (`/transcribe`), `empty_audio` (`/transcribe`).
 
 **Env parsing (swallowed, logged only):** `bad_vad_silence_ms`, `bad_vad_silence_ms_env`, `bad_turn_delay_env`.
+
+## 4.4 Clients — who speaks the protocol
+
+Two clients speak §4, and the hotkey daemon chooses between them with one key.
+
+| Engine | What runs a turn | Chosen by |
+|---|---|---|
+| `native` (default) | The Swift daemon itself. `AudioCapture` taps the mic, `WSClient` holds the socket, `ChunkPlayback` plays the reply, `TurnController` drives the capsule. One process. | nothing set, or `turn_engine: "native"`, `PET_TALK_TURN_ENGINE=native`, `--turn-engine native` |
+| `cli` | The daemon spawns `pet-talk-cli once` (`cli/client.py`), which spawns `sox`, plays through `afplay`, and reports its state on stdout for the daemon to parse. Unchanged; kept as the fallback. | `turn_engine: "cli"`, `PET_TALK_TURN_ENGINE=cli`, `--turn-engine cli` |
+
+Highest wins: `--turn-engine`, then `PET_TALK_TURN_ENGINE`, then config.yaml's
+`turn_engine`, then `native`. `--dump-state` reports the resolved engine under
+`turnEngine`, and the token's SOURCE (never its value) under
+`turnEngine.tokenSource`.
+
+**What the native engine sends, in order:** `user.handover` (hand-over chord
+only) → `user.start` → one `user.chunk` every 20 ms → `user.stop` carrying the
+merged buffer, or `barge`. One `turn_id` for the whole turn, adopted anew from a
+`state.listening` ack that carries `barged_turn`.
+
+**Audio on the wire.** `user.chunk.chunk` is base64 of exactly 640 bytes — 320
+samples of 16 kHz mono linear16, 20 ms — and `sample_rate` is 16000.
+`user.stop.pcm_b64` is byte-for-byte the concatenation of those chunks (the
+client's merged buffer wins, §4.1).
+
+**End of turn.** The energy VAD's constants are cli/audio.py's, number for
+number: RMS threshold 350, 2 confirm frames, 800 ms of trailing silence ends a
+turn, 4000 ms of initial silence abandons it (`barge`, no `user.stop`, nothing
+for the server to transcribe). A 20 s safety cap closes the mic whatever the VAD
+thinks.
+
+**Barge.** `barge` goes out first, then the player node is stopped and the queue
+forgotten. `ChunkPlayback` then refuses every further chunk for that turn by
+name — the socket keeps delivering the killed turn's in-flight `agent.chunk`
+frames for a few milliseconds, and they are counted as discarded, not spoken.
+The socket stays open for the server's half (`state.listening` with
+`barged_turn`, `agent.done path=interrupted`).
+
+**Glyph beat.** `agent.sentence.word_times` (§5.2) schedules one
+`ArchieGlyphView.beat()` per word start. A sentence with no timings gets one
+beat, never an invented rhythm.
+
+**Fail closed, with a name.** Every non-completion names itself in the log and
+puts a plain-English line on the capsule:
+
+| Reason | Capsule line | When |
+|---|---|---|
+| `health_probe_failed` | can't reach the studio | `GET /health` did not answer 200 inside 300 ms. The mic is never opened. |
+| `ws_unauthorized` | studio token missing | The handshake was refused (401/403) or closed 4401. The mic is never opened. |
+| `ws_transport_failed` | studio connection lost | The socket failed after five backoff reconnects (120/250/500/1000/2000 ms). |
+| `mic_permission_denied` | microphone access needed | `AVCaptureDevice.requestAccess(for: .audio)` said no. |
+| `mic_engine_start_failed`, `mic_no_input_format`, `mic_converter_unavailable` | microphone unavailable | AVAudioEngine could not deliver frames. |
+| `chunk_not_riff`, `chunk_no_fmt`, `chunk_no_data`, `chunk_unsupported_format`, `chunk_bad_base64`, `chunk_over_cap` | (logged, playback continues) | A chunk that cannot be played is refused by name, never played as noise. |
+| any `agent.error` reason (§4.3) | mapped in `TurnController.capsuleText(for:)` | The server named it. |
+
+The user surface never carries the engineering word — the reason goes to the log,
+the plain line goes to the capsule.
+
+**Proof.** `pet-talk-hotkey --self-test --turn-engine native` runs the classes
+with no hardware; adding `--fake-server <ws-url>` runs one whole turn against
+`qa/fixtures/fake_ws_server.py` over a real socket. Both print one
+`NATIVE-METRICS {json}` line. `qa/test_hotkey.py` asserts on the fixture's own
+record of what arrived on the wire. The one real-microphone check lives behind
+`PET_TALK_REAL_MIC=1`, records 1 s, and plays nothing.
 
 ## 5. Provider contract
 
@@ -731,4 +800,4 @@ PET_TALK_SILENT=1 PET_TALK_REAL_ENGINE=1 STT_PROVIDER=faster-whisper \
 
 ## 11. A note on `cli/hotkey/*.swift`
 
-These five files (`main.swift`, `hud_window.swift`, `earcons.swift`, `paste_injector.swift`, `config.swift`) may be under concurrent edit by another lane in this worktree. This spec describes their existence and role (native macOS Carbon hotkey listener, notch HUD, earcon engine, paste injector, config loader) per the module map in §3, but does not assert their current internal behavior in detail — verify against the live files before trusting a specific claim about them.
+These files (`main.swift`, `hud_window.swift`, `earcons.swift`, `paste_injector.swift`, `config.swift`, `ArchieGlyph.swift`, and the native turn engine's `AudioCapture.swift`, `WSClient.swift`, `ChunkPlayback.swift`, `TurnController.swift`) may be under concurrent edit by another lane in this worktree. This spec describes their existence and role (native macOS Carbon hotkey listener, notch HUD, earcon engine, paste injector, config loader) per the module map in §3, but does not assert their current internal behavior in detail — verify against the live files before trusting a specific claim about them.

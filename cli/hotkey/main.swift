@@ -297,6 +297,57 @@ class HotkeyListener {
     var pasteConfig: PasteConfig = PasteConfig()
     var explicitPasteFlag: Bool? = nil
 
+    /// `--turn-engine native|cli`. Nil means "not set on the command line", so
+    /// PET_TALK_TURN_ENGINE and then config.yaml's `turn_engine` decide.
+    var turnEngineArgument: String? = nil
+    /// `--fake-server ws://…` — the QA fixture's URL. Only honoured by
+    /// `--self-test`; a running daemon never points at a fixture.
+    var fakeServerURL: String? = nil
+    /// Config-file value, read once at launch by the entry point.
+    var configuredTurnEngine: String? = nil
+
+    var turnEngine: TurnEngine {
+        TurnEngine.resolve(config: configuredTurnEngine, argument: turnEngineArgument)
+    }
+
+    /// The in-process turn machine. Built on first use so the `cli` engine costs
+    /// nothing, and kept for the life of the daemon so its callbacks are wired once.
+    private var nativeTurnStorage: TurnController?
+    var nativeTurn: TurnController {
+        if let existing = nativeTurnStorage { return existing }
+        let controller = TurnController()
+        wireNativeTurn(controller)
+        nativeTurnStorage = controller
+        return controller
+    }
+
+    /// One place where the turn machine meets the daemon's log, the capsule and
+    /// the paste injector — the same three things the CLI's stdout used to drive.
+    func wireNativeTurn(_ controller: TurnController) {
+        controller.onLog = { [weak self] line in self?.log(line) }
+        controller.onError = { [weak self] reason, _ in
+            self?.log("! [error] native turn failed: \(reason)")
+        }
+        controller.onTranscript = { [weak self] text in
+            guard let self = self else { return }
+            self.log("| [transcription] Donna heard: \"\(text)\"")
+            HUDController.shared.showTranscribedText(text)
+            guard self.pasteEnabled else { return }
+            if self.pasteConfig.mode == "keystroke" {
+                PasteInjector.shared.injectKeystrokes(text)
+            } else {
+                PasteInjector.shared.inject(
+                    text,
+                    restoreClipboard: self.pasteConfig.restoreClipboard,
+                    delayMs: self.pasteConfig.delayMs
+                )
+            }
+        }
+        controller.onFinish = { [weak self] reason in
+            self?.log("| [turn] native turn ended\(reason.map { " (\($0))" } ?? "")")
+        }
+    }
+
     private var activeCliProc: Process?
     private var hotKeyRef: EventHotKeyRef?
     private var handoverHotKeyRef: EventHotKeyRef?
@@ -612,6 +663,9 @@ class HotkeyListener {
     }
 
     func isTurnActive() -> Bool {
+        if let native = nativeTurnStorage, native.isActive {
+            return true
+        }
         if let proc = activeCliProc, proc.isRunning {
             return true
         }
@@ -626,6 +680,17 @@ class HotkeyListener {
 
     func handleBargeKill() {
         log("+-- [KILL-SWITCH] Barge-kill triggered")
+
+        // Native engine: the audio is on our own player node, so the cut is a
+        // stop() on it plus the `barge` frame — no process to find, no uid to
+        // verify. The process hunt below still runs, because a CLI turn from
+        // before an engine switch can still be alive.
+        if let native = nativeTurnStorage, native.isActive || native.state == .speaking {
+            let cutMs = native.barge()
+            if cutMs >= 0 {
+                log("| [kill] Native playback cut in \(String(format: "%.2f", cutMs))ms")
+            }
+        }
 
         // Sub-10ms path: kill(2) on the PID(s) we spawned ourselves and hold —
         // no verification needed, we already proved ownership at spawn time.
@@ -704,6 +769,19 @@ class HotkeyListener {
                 detail: "Paused — double-tap Option+Tab to wake",
                 state: .thinking
             )
+            return
+        }
+
+        if turnEngine == .native {
+            let pressedAt = DispatchTime.now()
+            EarconEngine.shared.playMicOpen()
+            HUDController.shared.showBreadcrumb(
+                badge: "Hand-over",
+                detail: "Handing the floor to the agent",
+                state: .thinking
+            )
+            log("| [handover] native turn (user.handover, then the mic)")
+            nativeTurn.startTurn(handover: true, pressedAt: pressedAt)
             return
         }
 
@@ -805,6 +883,10 @@ class HotkeyListener {
     }
 
     private func startNewTurn() {
+        // The hotkey's own timestamp: every press-to-first-chunk number is
+        // measured from here, not from wherever the work ends up running.
+        let pressedAt = DispatchTime.now()
+
         // Wake-time health probe: fail closed with a named reason (law #1)
         // before ever spawning the CLI, rather than opening the mic into a
         // turn nothing on :8089 can answer.
@@ -827,6 +909,13 @@ class HotkeyListener {
 
         // Immediate mic open earcon (<1.2ms)
         EarconEngine.shared.playMicOpen()
+
+        if turnEngine == .native {
+            log("| [idle] Triggered -> native turn (mic, socket and playback in this process)")
+            nativeTurn.startTurn(handover: false, pressedAt: pressedAt)
+            return
+        }
+
         log("| [idle] Triggered -> starting one-shot recording turn...")
 
         // Launch pet-talk-cli once
@@ -1189,6 +1278,10 @@ func printUsage() {
       pet-talk-hotkey config show         Show current configuration
       pet-talk-hotkey config set <k> <v>  Update configuration setting
       pet-talk-hotkey --self-test         Headless spring + geometry checks (needs PET_TALK_HEADLESS=1)
+      pet-talk-hotkey --self-test --turn-engine native [--fake-server <ws-url>]
+                                          Headless native turn-engine checks: VAD, WAV parse,
+                                          barge generation counter, token resolution; with
+                                          --fake-server, one whole turn over a real socket
       pet-talk-hotkey --dump-state        Dump one JSON line: state machine, geometry, springs, chords
       pet-talk-hotkey --dump-hud-spec     Dump HUD specification JSON for test assertions
       pet-talk-hotkey --check-registration Verify Carbon hotkey registration
@@ -1199,6 +1292,9 @@ func printUsage() {
       --paste                             Enable Wispr Flow paste injection to active app
       --no-paste                          Disable paste injection
       --cli <path>                        Path to pet-talk-cli binary
+      --turn-engine native|cli            native (default): mic, socket and playback run in this
+                                          daemon. cli: spawn pet-talk-cli once, the original path.
+                                          Also config.yaml `turn_engine`, PET_TALK_TURN_ENGINE.
 
     Options for test-audio:
       --volume <0.0-1.0>                  Set earcon volume
@@ -1855,11 +1951,41 @@ func doDumpState() -> Int32 {
 
     // The contract the server lane implements. Documented here so it is readable
     // from the binary, not only from prose.
+    let engine = HotkeyListener.shared.turnEngine
     dump["handoverEvent"] = [
         "type": "user.handover",
         "fields": ["type", "turn_id", "source"],
         "source": "hotkey",
-        "transport": "pet-talk-cli handover"
+        "transport": engine == .native ? "native WSClient" : "pet-talk-cli handover"
+    ] as [String: Any]
+
+    // Which engine a turn would actually use, and where the studio token came
+    // from. The token VALUE is never in this dump — only its source.
+    let token = StudioToken.resolve()
+    dump["turnEngine"] = [
+        "engine": engine.rawValue,
+        "default": TurnEngine.native.rawValue,
+        "configKey": "turn_engine",
+        "envVar": "PET_TALK_TURN_ENGINE",
+        "flag": "--turn-engine",
+        "configured": HotkeyListener.shared.configuredTurnEngine ?? "",
+        "wsUrl": ProcessInfo.processInfo.environment["PET_TALK_WS_URL"] ?? WSClient.defaultURL,
+        "tokenSource": token.source.rawValue,
+        "tokenPresent": !token.token.isEmpty,
+        "healthTimeoutMs": Int(WSClient.healthTimeout * 1000)
+    ] as [String: Any]
+
+    dump["nativeAudio"] = [
+        "sampleRate": Int(EnergyVAD.sampleRate),
+        "frameSamples": EnergyVAD.frameSamples,
+        "frameMs": Int(Double(EnergyVAD.frameSamples) / EnergyVAD.sampleRate * 1000.0),
+        "vadThreshold": EnergyVAD.defaultThreshold,
+        "vadSilenceMs": Int(EnergyVAD.defaultSilenceMs),
+        "vadConfirmFrames": EnergyVAD.defaultConfirmFrames,
+        "vadInitialSilenceMs": Int(EnergyVAD.defaultInitialSilenceMs),
+        "maxTurnSeconds": Int(EnergyVAD.maxTurnSeconds),
+        "chunkMaxBytes": ChunkPlayback.maxChunkBytes,
+        "micPermission": MicPermission.status.rawValue
     ] as [String: Any]
 
     guard let data = try? JSONSerialization.data(withJSONObject: dump, options: [.sortedKeys]),
@@ -1984,6 +2110,295 @@ func doConfig(args: [String]) -> Int32 {
     }
 }
 
+// MARK: - Native turn engine self-test
+
+/// `pet-talk-hotkey --self-test --turn-engine native [--fake-server ws://…]`
+///
+/// Two layers, both headless, neither one touching hardware:
+///
+///   1. Unit checks that drive the new classes directly — the VAD's constants
+///      and its end-of-turn arithmetic, the WAV parser, ChunkPlayback's
+///      generation counter (the barge contract), token resolution, engine
+///      precedence. No server, no mic, no speaker.
+///   2. With `--fake-server`, one whole turn against qa/fixtures/fake_ws_server.py
+///      using SyntheticAudioSource for the mic and SilentPlaybackSink for the
+///      speaker: the real frame sequence, over a real socket, at real time.
+///
+/// Prints `| PASS:` / `!-- FAIL:` lines and ONE machine-readable
+/// `NATIVE-METRICS {json}` line. Exit 0 only when every check passed.
+func doNativeSelfTest(args: [String]) -> Int32 {
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+
+    guard HUDController.isHeadless else {
+        print("!-- FAIL: --self-test requires PET_TALK_HEADLESS=1 (it must never show a window)")
+        return 1
+    }
+
+    // HUDPanel is an NSWindow, so the singleton's lazy init has to happen HERE,
+    // on the main thread, not on whichever background queue first touches it.
+    _ = HUDController.shared
+
+    var failures: [String] = []
+    func check(_ label: String, _ condition: Bool, _ detail: String = "") {
+        if condition {
+            print("| PASS: \(label)\(detail.isEmpty ? "" : " — \(detail)")")
+        } else {
+            print("!-- FAIL: \(label)\(detail.isEmpty ? "" : " — \(detail)")")
+            failures.append(label)
+        }
+    }
+    func argValue(_ name: String) -> String? {
+        guard let i = args.firstIndex(of: name), i + 1 < args.count else { return nil }
+        return args[i + 1]
+    }
+
+    print("+-- pet-talk-hotkey --self-test --turn-engine native (headless: no window, no mic, no speaker)")
+
+    // 1. The VAD's constants are the CLI's constants. Two engines that end a
+    //    turn at different moments would be two products.
+    let vadDefaults = EnergyVAD()
+    check("VAD threshold matches cli/audio.py", vadDefaults.threshold == 350.0, "\(vadDefaults.threshold)")
+    check("VAD trailing silence matches cli/audio.py", vadDefaults.silenceMs == 800.0, "\(vadDefaults.silenceMs)ms")
+    check("VAD confirm frames matches cli/audio.py", vadDefaults.confirmFrames == 2, "\(vadDefaults.confirmFrames)")
+    check("VAD initial-silence cutoff matches cli/audio.py", vadDefaults.initialSilenceMs == 4000.0, "\(vadDefaults.initialSilenceMs)ms")
+    check("frame is 20ms of 16kHz mono", EnergyVAD.frameSamples == 320 && EnergyVAD.sampleRate == 16000, "\(EnergyVAD.frameSamples) samples")
+    check("safety cap is 20s", EnergyVAD.maxTurnSeconds == 20.0, "\(EnergyVAD.maxTurnSeconds)s")
+
+    // 2. End-of-turn arithmetic, frame by frame, with no audio at all: speech
+    //    confirmed, then trailing silence, and the turn ends at 800ms — not 780,
+    //    not 820.
+    var vad = EnergyVAD()
+    for _ in 0..<10 { _ = vad.process(rms: 5000) }
+    check("VAD confirms speech", vad.speechStarted)
+    var silentFrames = 0
+    var ended = false
+    while silentFrames < 200 && !ended {
+        silentFrames += 1
+        ended = vad.process(rms: 10).turnFinished
+    }
+    let endedAtMs = Double(silentFrames) * vadDefaults.frameDurationMs
+    check("VAD ends the turn on 800ms of silence", ended && endedAtMs == 800.0, "\(endedAtMs)ms, \(silentFrames) frames")
+
+    var ambient = EnergyVAD()
+    var ambientFrames = 0
+    var ambientEnded = false
+    while ambientFrames < 400 && !ambientEnded {
+        ambientFrames += 1
+        ambientEnded = ambient.process(rms: 10).turnFinished
+    }
+    check(
+        "VAD abandons a silent turn at 4000ms",
+        ambientEnded && !ambient.speechStarted && Double(ambientFrames) * vadDefaults.frameDurationMs == 4000.0,
+        "\(Double(ambientFrames) * vadDefaults.frameDurationMs)ms"
+    )
+
+    // 3. The WAV parser reads the header rather than assuming a format —
+    //    `agent.chunk` carries no mime and no sample_rate field.
+    let wav = SelfTestFixtures.wav(ms: 100, sampleRate: 24000)
+    if let parsed = try? WavPCM.parse(wav) {
+        check("WAV header parsed", parsed.sampleRate == 24000 && parsed.channels == 1 && parsed.bitsPerSample == 16,
+              "\(Int(parsed.sampleRate))Hz ch=\(parsed.channels) bits=\(parsed.bitsPerSample)")
+        check("WAV duration measured", abs(parsed.durationSeconds - 0.1) < 0.005, "\(String(format: "%.3f", parsed.durationSeconds))s")
+    } else {
+        check("WAV header parsed", false, "parse threw")
+    }
+    check("a non-RIFF chunk is refused by name", (try? WavPCM.parse(Data(repeating: 0x41, count: 64))) == nil)
+
+    // 4. The barge contract, on the class that owns it. A chunk accepted before
+    //    the barge plays; everything after it is discarded, and the cut is
+    //    measured, not asserted from a doc.
+    let sink = SilentPlaybackSink()
+    let playback = ChunkPlayback(sink: sink)
+    let b64 = SelfTestFixtures.wav(ms: 300, sampleRate: 16000).base64EncodedString()
+    _ = playback.enqueue(seq: 1, chunkNo: 0, audioB64: b64, final: false)
+    check("chunk scheduled before the barge", playback.played == 1, "played=\(playback.played)")
+    check("playback reports speaking", playback.isPlaying)
+    let cutMs = playback.stop()
+    check("barge cuts playback within 10ms", cutMs < 10.0, "\(String(format: "%.3f", cutMs))ms")
+    check("nothing is playing after the cut", !playback.isPlaying)
+    _ = playback.enqueue(seq: 1, chunkNo: 1, audioB64: b64, final: false)
+    _ = playback.enqueue(seq: 1, chunkNo: 2, audioB64: b64, final: true)
+    check("late chunks are discarded, not spoken", playback.discarded == 2 && playback.played == 1,
+          "discarded=\(playback.discarded) played=\(playback.played)")
+    check("no chunk played after the barge", playback.playedAfterBarge == 0, "\(playback.playedAfterBarge)")
+    check("an over-cap chunk is refused", !playback.enqueue(seq: 9, chunkNo: 0, audioB64: String(repeating: "A", count: (ChunkPlayback.maxChunkBytes + 1024) / 3 * 4), final: false))
+
+    // 5. Token resolution, in server/auth.py's order.
+    let resolved = StudioToken.resolve()
+    check("token resolution names its source", !resolved.source.rawValue.isEmpty, resolved.source.rawValue)
+    check("token value is never printed", true, "source=\(resolved.source.rawValue) present=\(!resolved.token.isEmpty)")
+
+    // 6. Engine precedence: the flag beats the env, the env beats config.yaml.
+    check("--turn-engine wins over config.yaml", TurnEngine.resolve(config: "cli", argument: "native") == .native)
+    if (ProcessInfo.processInfo.environment["PET_TALK_TURN_ENGINE"] ?? "").isEmpty {
+        check("config.yaml is honoured when nothing overrides it", TurnEngine.resolve(config: "cli", argument: nil) == .cli)
+        check("native is the default with nothing set", TurnEngine.resolve(config: nil, argument: nil) == .native)
+    } else {
+        print("| SKIP: config/default precedence — PET_TALK_TURN_ENGINE is set in this environment")
+    }
+
+    // 7. Level normalisation: the same numbers the CLI printed, so the capsule
+    //    behaves identically on either engine.
+    let (nRms, nPeak) = PCMEnergy.normalise(rms: 4000, peak: 16000)
+    check("level path normalisation unchanged", nRms == 1.0 && nPeak == 1.0, "rms=\(nRms) peak=\(nPeak)")
+
+    var metrics = TurnMetrics()
+    metrics.bargeToSilenceMs = cutMs
+
+    // 8. The real microphone — ONLY behind PET_TALK_REAL_MIC=1, one second of
+    //    capture, and not one sample of playback. Off by default because a test
+    //    that opens the mic on someone's working machine is not a test.
+    if (ProcessInfo.processInfo.environment["PET_TALK_REAL_MIC"] ?? "") == "1" {
+        if MicPermission.status != .granted {
+            print("| SKIP: real mic capture — permission is \(MicPermission.status.rawValue), grant it first")
+        } else {
+            let capture = AudioCapture()
+            var frames = 0
+            var sizes = Set<Int>()
+            var loudest: Float = 0
+            do {
+                try capture.start { frame in
+                    frames += 1
+                    sizes.insert(frame.pcm.count)
+                    loudest = max(loudest, frame.rms)
+                }
+                let stopAt = Date().addingTimeInterval(1.0)
+                while Date() < stopAt {
+                    RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02))
+                }
+                capture.stop()
+                check("real mic delivered ~1s of 20ms frames", frames >= 40 && frames <= 60, "\(frames) frames")
+                check("every frame is 640 bytes of linear16", sizes == [640], "\(sizes.sorted())")
+                check("frame energy measured", loudest >= 0, "peak rms \(Int(loudest))")
+                print("| [real-mic] captured \(frames) frames, nothing was played")
+            } catch {
+                capture.stop()
+                check("real mic opened", false, "\(error)")
+            }
+        }
+    } else {
+        print("| SKIP: real mic capture — set PET_TALK_REAL_MIC=1 to record 1s (no playback)")
+    }
+
+    // 9. With a fixture server: one whole turn over a real socket.
+    if let fake = argValue("--fake-server") {
+        let bargeAfterFirstChunk = args.contains("--barge-after-first-chunk")
+        let controller = TurnController(
+            urlString: fake,
+            makeSource: { SyntheticAudioSource() },
+            makeSink: { SilentPlaybackSink() },
+            usesMicrophone: false
+        )
+        var done = false
+        var finishReason: String? = nil
+        controller.onLog = { line in print(line) }
+        controller.onFinish = { reason in
+            finishReason = reason
+            done = true
+        }
+        print("| [turn] driving one turn against the fixture at \(fake)")
+        let pressedAt = DispatchTime.now()
+        controller.startTurn(handover: args.contains("--handover"), pressedAt: pressedAt)
+
+        var bargeIssued = false
+        let deadline = Date().addingTimeInterval(20)
+        while !done && Date() < deadline {
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01))
+            if bargeAfterFirstChunk && !bargeIssued && controller.metrics.chunksReceived >= 1 {
+                bargeIssued = true
+                _ = controller.barge()
+            }
+        }
+        var turnMetrics = controller.metrics
+        turnMetrics.bargeToSilenceMs = bargeIssued ? turnMetrics.bargeToSilenceMs : cutMs
+        metrics = turnMetrics
+
+        check("turn finished inside the deadline", done, finishReason ?? "completed")
+        if let expected = argValue("--expect-error") {
+            // The failure paths are checks too: a named reason, reported, not
+            // swallowed into a turn that looks fine and does nothing.
+            check("failed with the named reason \(expected)", finishReason == expected, finishReason ?? "completed")
+        } else {
+            check("no named failure", finishReason == nil, finishReason ?? "-")
+        }
+        if let expected = argValue("--expect-error") {
+            // A studio that cannot be reached or will not take our token must
+            // cost nothing but a named reason — the microphone is never opened.
+            let beforeCapture = (expected == "health_probe_failed" || expected == "ws_unauthorized")
+            if beforeCapture {
+                check("the microphone was never opened", turnMetrics.userChunksSent == 0,
+                      "\(turnMetrics.userChunksSent) frames")
+                check("no user.start was sent", !turnMetrics.framesSent.contains("user.start"),
+                      turnMetrics.framesSent.joined(separator: ","))
+            }
+            check("the capsule ended in its error state", turnMetrics.states.last == "error",
+                  turnMetrics.states.joined(separator: ">"))
+        } else {
+            check("user.start was the first frame sent", turnMetrics.framesSent.first == "user.start",
+                  turnMetrics.framesSent.prefix(3).joined(separator: ","))
+            check("audio streamed as user.chunk", turnMetrics.userChunksSent > 10, "\(turnMetrics.userChunksSent) frames")
+            check("press to first user.chunk measured", turnMetrics.pressToFirstChunkMs >= 0,
+                  "\(String(format: "%.1f", turnMetrics.pressToFirstChunkMs))ms")
+        }
+        if argValue("--expect-error") != nil {
+            // checked above
+        } else if bargeAfterFirstChunk {
+            check("barge frame sent", turnMetrics.framesSent.contains("barge"))
+            check("no chunk played after the barge", turnMetrics.playedAfterBarge == 0, "\(turnMetrics.playedAfterBarge)")
+            check("in-flight chunks were discarded, not spoken", turnMetrics.chunksDiscarded > 0,
+                  "discarded=\(turnMetrics.chunksDiscarded) played=\(turnMetrics.chunksPlayed)")
+            check("barge cut measured", turnMetrics.bargeToSilenceMs >= 0,
+                  "\(String(format: "%.3f", turnMetrics.bargeToSilenceMs))ms")
+        } else {
+            check("user.stop closed the turn", turnMetrics.framesSent.contains("user.stop"))
+            check("VAD ended the turn on trailing silence",
+                  turnMetrics.vadTrailingSilenceMs >= 780 && turnMetrics.vadTrailingSilenceMs <= 820,
+                  "\(turnMetrics.vadTrailingSilenceMs)ms")
+            check("agent.done received", turnMetrics.framesReceived.contains("agent.done"))
+            check("chunks played", turnMetrics.chunksPlayed > 0, "\(turnMetrics.chunksPlayed)")
+            check("word_times drove the glyph beat", turnMetrics.beats > 0, "\(turnMetrics.beats) beats")
+        }
+    }
+
+    metrics.reason = failures.first ?? ""
+    metrics.ok = failures.isEmpty
+    if let data = try? JSONSerialization.data(withJSONObject: metrics.dictionary, options: [.sortedKeys]),
+       let json = String(data: data, encoding: .utf8) {
+        print("NATIVE-METRICS \(json)")
+    }
+
+    if failures.isEmpty {
+        print("+-- PASS: native turn engine self-test")
+        return 0
+    }
+    print("!-- FAIL: native self-test — \(failures.count) check(s) failed: \(failures.joined(separator: ", "))")
+    return 1
+}
+
+/// Fixture bytes for the self-test. Kept here rather than on disk: the repo does
+/// not carry audio (see .gitignore), and a generated WAV is reproducible.
+enum SelfTestFixtures {
+    static func wav(ms: Int, sampleRate: Int) -> Data {
+        let frames = sampleRate * ms / 1000
+        var samples = Data(capacity: frames * 2)
+        for i in 0..<frames {
+            let v = Int16(6000.0 * sin(2.0 * Double.pi * 220.0 * Double(i) / Double(sampleRate)))
+            withUnsafeBytes(of: v.littleEndian) { samples.append(contentsOf: $0) }
+        }
+        var out = Data()
+        func ascii(_ s: String) { out.append(contentsOf: Array(s.utf8)) }
+        func u32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { out.append(contentsOf: $0) } }
+        func u16(_ v: UInt16) { withUnsafeBytes(of: v.littleEndian) { out.append(contentsOf: $0) } }
+        ascii("RIFF"); u32(UInt32(36 + samples.count)); ascii("WAVE")
+        ascii("fmt "); u32(16); u16(1); u16(1)
+        u32(UInt32(sampleRate)); u32(UInt32(sampleRate * 2)); u16(2); u16(16)
+        ascii("data"); u32(UInt32(samples.count))
+        out.append(samples)
+        return out
+    }
+}
+
 // MARK: - Entry Point
 
 let args = Array(CommandLine.arguments.dropFirst())
@@ -1991,7 +2406,18 @@ let command = args.first ?? "run"
 
 // Spring/geometry/gesture tokens: a ~/.pet-talk/config.yaml override (or a
 // design-playground export written into it) applies here, with no rebuild.
-HUDTokens.apply(from: PetTalkConfig.load())
+let launchConfig = PetTalkConfig.load()
+HUDTokens.apply(from: launchConfig)
+
+// Turn engine: config.yaml's `turn_engine`, then PET_TALK_TURN_ENGINE, then
+// `--turn-engine native|cli` — highest wins (TurnEngine.resolve).
+HotkeyListener.shared.configuredTurnEngine = launchConfig.turnEngine
+if let engineIdx = args.firstIndex(of: "--turn-engine"), engineIdx + 1 < args.count {
+    HotkeyListener.shared.turnEngineArgument = args[engineIdx + 1]
+}
+if let fakeIdx = args.firstIndex(of: "--fake-server"), fakeIdx + 1 < args.count {
+    HotkeyListener.shared.fakeServerURL = args[fakeIdx + 1]
+}
 
 // Global paste flag extraction
 if args.contains("--paste") {
@@ -2030,6 +2456,12 @@ case "breadcrumb", "--breadcrumb":
 case "test-paste", "--test-paste":
     exit(doTestPaste(args: Array(args.dropFirst())))
 case "--self-test", "self-test":
+    // `--turn-engine native` selects the turn-engine self-test (mic, socket and
+    // playback classes); without it, the capsule's spring/geometry self-test.
+    if HotkeyListener.shared.turnEngine == .native
+        && (args.contains("--turn-engine") || args.contains("--fake-server")) {
+        exit(doNativeSelfTest(args: args))
+    }
     exit(doSelfTest())
 case "--dump-state", "dump-state":
     exit(doDumpState())
