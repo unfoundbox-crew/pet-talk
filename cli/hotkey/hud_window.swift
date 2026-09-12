@@ -838,6 +838,18 @@ open class HUDPanel: NSPanel {
 
 // MARK: - HUDController Singleton
 
+/// Single-state lifecycle for the HUD panel. Replaces the old boolean `isVisible`
+/// plus ad-hoc animation bookkeeping so show()/dismiss() can never race each other:
+/// each transition bumps `generation`, and any completion handler scheduled by a
+/// prior transition checks its captured generation before mutating state — a
+/// stale dismiss cleanup from before a newer show() is a no-op.
+public enum HUDLifecycle {
+    case hidden
+    case presenting
+    case visible
+    case dismissing
+}
+
 public class HUDController {
     public static let shared = HUDController()
 
@@ -846,8 +858,14 @@ public class HUDController {
     public private(set) var currentWidth: CGFloat = HUDCapsuleView.capsuleWidth
     public private(set) var currentHeight: CGFloat = HUDCapsuleView.notchListeningHeight
     public private(set) var transcribedText: String?
-    public private(set) var isVisible: Bool = false
+    public private(set) var lifecycle: HUDLifecycle = .hidden
+    public var isVisible: Bool { lifecycle == .presenting || lifecycle == .visible || lifecycle == .dismissing }
     public private(set) var isHoverPeekActive: Bool = false
+
+    /// Bumped on every show()/dismiss() call. A completion handler captures the
+    /// generation at schedule time and only applies its cleanup if it is still
+    /// current — this is what makes a stale dismiss never clobber a newer show.
+    private var generation: Int = 0
 
     // Sensory & Execution Callbacks
     public var onBargeKill: (() -> Void)?
@@ -1028,8 +1046,17 @@ public class HUDController {
     }
 
     /// Present the Dynamic Island with Apple-grade "Drip" spring entrance animation.
+    ///
+    /// Idempotent: if the HUD is already visible (or mid-dismiss), this cancels any
+    /// in-flight dismiss animation, snaps alphaValue back to 1 immediately, and
+    /// bumps `generation` so that dismiss's own completion handler (scheduled
+    /// before this call) sees a stale generation and never fires its cleanup —
+    /// no stale hide can land on top of this newer show.
     public func show(state: HUDState = .listening) {
         ensureMainThread {
+            self.generation += 1
+            let myGen = self.generation
+
             if self.isHoverPeekActive {
                 self.hideHoverPeek()
             }
@@ -1048,20 +1075,25 @@ public class HUDController {
 
             let finalFrame = self.computeFrame(width: targetW, height: targetH)
 
-            if !self.isVisible {
-                self.isVisible = true
+            let wasHidden = (self.lifecycle == .hidden)
+
+            if wasHidden {
+                self.lifecycle = .presenting
 
                 if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
                     self.panel.setFrame(finalFrame, display: false)
                     self.panel.alphaValue = 0.0
                     self.panel.orderFrontRegardless()
 
-                    NSAnimationContext.runAnimationGroup { context in
+                    NSAnimationContext.runAnimationGroup({ context in
                         context.duration = HUDMotionTokens.reduceMotionDuration
                         context.timingFunction = CAMediaTimingFunction(name: .easeOut)
                         self.panel.animator().alphaValue = 1.0
                         self.panel.capsuleView.layoutSubviews(forWidth: targetW, height: targetH)
-                    }
+                    }, completionHandler: {
+                        guard myGen == self.generation else { return }
+                        self.lifecycle = .visible
+                    })
                 } else {
                     let startH = notchInfo.hasNotch ? notchInfo.notchHeight : targetH
                     let startFrame = self.computeFrame(width: targetW, height: startH)
@@ -1070,16 +1102,25 @@ public class HUDController {
                     self.panel.alphaValue = 0.0
                     self.panel.orderFrontRegardless()
 
-                    NSAnimationContext.runAnimationGroup { context in
+                    NSAnimationContext.runAnimationGroup({ context in
                         context.duration = HUDMotionTokens.dripDuration
                         context.timingFunction = CAMediaTimingFunction(controlPoints: 0.25, 0.1, 0.25, 1.0)
                         self.panel.animator().setFrame(finalFrame, display: true)
                         self.panel.animator().alphaValue = 1.0
                         self.panel.capsuleView.layoutSubviews(forWidth: targetW, height: targetH)
-                    }
+                    }, completionHandler: {
+                        guard myGen == self.generation else { return }
+                        self.lifecycle = .visible
+                    })
                 }
                 self.panel.invalidateShadow()
             } else {
+                // Already presenting/visible/dismissing: idempotent re-show. Cancel any
+                // in-flight dismiss fade by snapping alpha back to 1 directly (not via
+                // .animator(), which would just queue behind the running animation).
+                self.lifecycle = .visible
+                self.panel.alphaValue = 1.0
+                self.panel.orderFrontRegardless()
                 self.panel.setFrame(finalFrame, display: true)
                 self.panel.capsuleView.layoutSubviews(forWidth: targetW, height: targetH)
                 self.panel.invalidateShadow()
@@ -1177,6 +1218,11 @@ public class HUDController {
     }
 
     /// Dismiss the HUD with a snappy suction retraction back into the physical notch.
+    ///
+    /// Captures the current `generation` before scheduling any animation. If a
+    /// newer show() runs before this dismiss's animation completes, show() bumps
+    /// `generation` — so this dismiss's `cleanup` sees a stale generation and
+    /// becomes a no-op instead of hiding the panel out from under the newer show.
     public func dismiss(immediate: Bool = false, completion: (() -> Void)? = nil) {
         ensureMainThread {
             guard self.isVisible else {
@@ -1184,9 +1230,19 @@ public class HUDController {
                 return
             }
 
+            self.generation += 1
+            let myGen = self.generation
+            self.lifecycle = .dismissing
+
             let cleanup: () -> Void = {
+                guard myGen == self.generation else {
+                    // Superseded by a newer show()/dismiss() — do not touch state
+                    // or hide a panel that a later call already took ownership of.
+                    completion?()
+                    return
+                }
                 self.panel.orderOut(nil)
-                self.isVisible = false
+                self.lifecycle = .hidden
                 self.currentState = nil
                 self.transcribedText = nil
                 let notchInfo = NotchManager.shared.currentNotch()

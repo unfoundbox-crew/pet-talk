@@ -48,15 +48,22 @@ public struct PetTalkConfig {
     public var version: String = "1.0"
     public var audio: AudioConfig = AudioConfig()
     public var paste: PasteConfig = PasteConfig()
+    /// Optional explicit path to the pet-talk-cli executable. Second in the
+    /// resolution order (after env PET_TALK_CLI_PATH, before the sibling/repo-root
+    /// walk) — see HotkeyListener.resolveCliPath(). Never a hardcoded default here;
+    /// an absent/invalid value just falls through to the next resolution step.
+    public var cliPath: String? = nil
 
     public init(
         version: String = "1.0",
         audio: AudioConfig = AudioConfig(),
-        paste: PasteConfig = PasteConfig()
+        paste: PasteConfig = PasteConfig(),
+        cliPath: String? = nil
     ) {
         self.version = version
         self.audio = audio
         self.paste = paste
+        self.cliPath = cliPath
     }
 
     public static var defaultConfigPath: String {
@@ -132,6 +139,9 @@ public struct PetTalkConfig {
                 paste.delayMs = max(5, i)
                 return true
             }
+        case "cli_path":
+            cliPath = cleanVal.isEmpty ? nil : cleanVal
+            return true
         default:
             if key.lowercased().starts(with: "audio.custom_sounds.") {
                 let soundKey = String(key.dropFirst("audio.custom_sounds.".count))
@@ -146,6 +156,9 @@ public struct PetTalkConfig {
         var lines: [String] = []
         lines.append("# Pet-Talk Sensory & Daemon Configuration")
         lines.append("version: \"\(version)\"")
+        if let cliPath = cliPath, !cliPath.isEmpty {
+            lines.append("cli_path: \"\(cliPath)\"")
+        }
         lines.append("")
         lines.append("# Auditory Feedback (Earcons)")
         lines.append("audio:")
@@ -211,6 +224,8 @@ public struct PetTalkConfig {
                     currentSubSection = nil
                     if key == "version" {
                         config.version = val
+                    } else if key == "cli_path" {
+                        config.cliPath = val.isEmpty ? nil : val
                     }
                 }
             } else if leadingSpaces >= 2 && leadingSpaces < 4 {
