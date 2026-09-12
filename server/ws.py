@@ -35,6 +35,10 @@ MAX_PCM_BYTES = 32 * 1024 * 1024
 #: night cannot grow the set without end; the newest ids are the ones that
 #: matter, because only a turn that has not started yet can still be racing.
 MAX_BARGED_IDS = 64
+#: How long ``preempt_reused`` waits for a barged incumbent to finish dying
+#: before starting its replacement. Bounded so a task that refuses to die
+#: cannot hold the WS reader loop.
+REUSED_TURN_REAP_S = 2.0
 
 
 @dataclass
@@ -161,6 +165,37 @@ class Session:
         """Barge everything except ``turn_id`` — the deterministic stop path."""
         return await self.barge(None, exclude=turn_id)
 
+    async def preempt_reused(self, turn_id: str) -> int:
+        """A second frame carrying a LIVE turn_id kills the incumbent first.
+
+        ``supersede`` deliberately excludes the incoming id, so a client that
+        reuses one (a retry, a stuck id, two clicks) used to land in the worst
+        state of all: ``start_turn`` overwrote ``turn_tasks[id]`` and orphaned
+        a running task nothing could cancel any more, and ``queue_for`` handed
+        back the incumbent's queue, whose ``reopen()`` cleared a buffer the
+        first turn's producer was still filling — the client saw
+        ``llm_no_sentences`` for a stream that had produced plenty.
+
+        The incumbent is barged down the same path a client barge takes, under
+        the name ``turn_id_reused``, and awaited so its ``finally`` has run
+        before the replacement registers. Its barge mark is then cleared: it
+        names the same id as the turn about to start, and would otherwise kill
+        its own replacement before it spoke.
+        """
+        task = self.turn_tasks.get(turn_id)
+        if task is None:
+            return 0
+        log.info("turn_id_reused turn_id=%s reason=turn_id_reused", turn_id)
+        dropped = await self.barge(turn_id)
+        if not task.done():
+            # Bounded: handle_turn_task's CancelledError branch only sends one
+            # frame. A task that will not die must not hold the reader loop.
+            await asyncio.wait({task}, timeout=REUSED_TURN_REAP_S)
+        self.turn_queues.pop(turn_id, None)
+        self.turn_tasks.pop(turn_id, None)
+        self.barged.discard(turn_id)
+        return dropped
+
     async def supersede(self, turn_id: str) -> int:
         """A new user turn supersedes any turn still speaking.
 
@@ -259,8 +294,10 @@ async def _on_user_stop(session: Session, msg: dict[str, Any]) -> None:
     persona = session.turn_persona.get(turn_id) or _persona_for_frame(msg)
     session.turn_persona[turn_id] = persona
     await session.supersede(turn_id)
+    await session.preempt_reused(turn_id)
     # Create the turn's queue BEFORE the task exists, so a barge landing in
-    # the same tick has something to flush.
+    # the same tick has something to flush. After ``preempt_reused`` this is
+    # always a fresh queue, never the dead twin's.
     queue = session.queue_for(turn_id)
     # Fire and forget: STT runs inside the task, so the reader loop stays free
     # for a mid-turn barge.
@@ -291,6 +328,7 @@ async def _on_user_text(session: Session, msg: dict[str, Any]) -> None:
     persona = _persona_for_frame(msg)
     session.turn_persona[turn_id] = persona
     await session.supersede(turn_id)
+    await session.preempt_reused(turn_id)
     await safe_send_json(session.ws, frame("transcript.user", turn_id, text=text))
     queue = session.queue_for(turn_id)
     session.start_turn(

@@ -481,6 +481,117 @@ class TestBargeBeforeTheTurnRegisters(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("t-race-2", barged, "barged id was not cleared after the turn")
 
 
+class TestReusedTurnIdBargesTheIncumbent(unittest.IsolatedAsyncioTestCase):
+    """A second frame carrying a LIVE turn_id must kill the first turn.
+
+    Three bugs met here. ``Session.start_turn`` overwrote ``turn_tasks[id]``,
+    orphaning a running task nothing could cancel any more. ``supersede``
+    excludes the incoming id, so it never barged the twin. And ``queue_for``
+    handed the SAME queue back, whose ``reopen()`` cleared the first turn's
+    buffer mid-stream — the client saw ``llm_no_sentences`` for a stream that
+    had produced plenty.
+    """
+
+    async def _session(self, providers):
+        from server import ws as ws_module
+
+        session = ws_module.Session(ws=fake_ws())
+        old_snapshot = ws_module.runtime.snapshot_under_lock
+
+        async def _snapshot():
+            return providers
+
+        ws_module.runtime.snapshot_under_lock = _snapshot
+        self.addCleanup(setattr, ws_module.runtime, "snapshot_under_lock", old_snapshot)
+        return session, ws_module
+
+    async def _wait_for(self, predicate, timeout_s: float = 5.0) -> bool:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            await asyncio.sleep(0.01)
+        return False
+
+    async def test_two_turns_with_one_id_each_get_exactly_one_done(self):
+        providers = ProviderSet(
+            stt=StubSTT(),
+            llm=FastLLM(
+                [
+                    "First sentence of the answer.",
+                    "Second sentence of the answer.",
+                    "Third sentence of the answer.",
+                ]
+            ),
+            tts=SlowTTS(delay_s=0.15),
+        )
+        session, ws_module = await self._session(providers)
+        turn_id = "t-reused"
+
+        await ws_module._on_user_text(
+            session, {"type": "user.text", "turn_id": turn_id, "text": "research the weather"}
+        )
+        self.assertTrue(
+            await self._wait_for(lambda: turn_id in session.turn_tasks),
+            "first turn never registered",
+        )
+        # Let the first turn get properly under way before the twin lands.
+        await asyncio.sleep(0.05)
+
+        await ws_module._on_user_text(
+            session, {"type": "user.text", "turn_id": turn_id, "text": "research it again"}
+        )
+
+        def dones():
+            return [f for f in sent_frames(session.ws) if f.get("type") == "agent.done"]
+
+        self.assertTrue(
+            await self._wait_for(lambda: len(dones()) >= 2),
+            f"expected one agent.done per turn, got {dones()}",
+        )
+        await asyncio.sleep(0.1)  # nothing more may arrive
+        frames = sent_frames(session.ws)
+        done = [f for f in frames if f.get("type") == "agent.done"]
+        self.assertEqual(len(done), 2, f"one agent.done per turn, got {done}")
+        paths = [f.get("path") for f in done]
+        self.assertIn("interrupted", paths, f"the barged incumbent is not named: {paths}")
+
+        errors = [f for f in frames if f.get("type") == "agent.error"]
+        self.assertNotIn(
+            "llm_no_sentences",
+            [e.get("reason") for e in errors],
+            f"a reused turn_id emptied a live stream's queue: {errors}",
+        )
+        await session.shutdown()
+
+    async def test_the_replacement_turn_gets_a_fresh_queue(self):
+        providers = ProviderSet(
+            stt=StubSTT(),
+            llm=FastLLM(["Only sentence of the answer."]),
+            tts=SlowTTS(delay_s=0.05),
+        )
+        session, ws_module = await self._session(providers)
+        turn_id = "t-reused-queue"
+        await ws_module._on_user_text(
+            session, {"type": "user.text", "turn_id": turn_id, "text": "research the weather"}
+        )
+        self.assertTrue(await self._wait_for(lambda: turn_id in session.turn_queues))
+        first = session.turn_queues[turn_id]
+        await asyncio.sleep(0.02)
+        await ws_module._on_user_text(
+            session, {"type": "user.text", "turn_id": turn_id, "text": "again please"}
+        )
+        second = session.turn_queues.get(turn_id)
+        self.assertIsNotNone(second, "the replacement turn has no queue")
+        self.assertIsNot(second, first, "the replacement turn reused the dead queue")
+        self.assertNotIn(
+            turn_id,
+            session.barged,
+            "the incumbent's barge mark would kill its own replacement",
+        )
+        await session.shutdown()
+
+
 class TestBoundedPerTurnState(unittest.IsolatedAsyncioTestCase):
     """Nothing keyed on client input may grow without a ceiling."""
 
