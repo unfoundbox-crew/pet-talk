@@ -61,41 +61,49 @@ LLM_REQUIRED_KEY: dict[str, str] = {
     "gpt": "OPENAI_API_KEY",
 }
 
-# Per-provider endpoint/model defaults chosen when the provider changes and
-# the caller did not pin them. Env wins over the literal.
-LLM_BASE_URL_DEFAULTS: dict[str, tuple[str, str]] = {
-    "haiku": ("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1"),
-    "claude-haiku": ("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1"),
-    "claude": ("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1"),
-    "opencode": ("OPENCODE_BASE_URL", "https://api.opencode.ai/v1"),
-    "zen": ("OPENCODE_BASE_URL", "https://api.opencode.ai/v1"),
-    "opencode-zen": ("OPENCODE_BASE_URL", "https://api.opencode.ai/v1"),
-    "gemini": ("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai"),
-    "google": ("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai"),
-    "flash": ("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai"),
-    "groq": ("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
-    "openai": ("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-    "gpt": ("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-    "litellm": ("LLM_BASE_URL", "http://127.0.0.1:8000/v1"),
-    "fleet": ("LLM_BASE_URL", "http://127.0.0.1:8000/v1"),
-    "local": ("LLM_BASE_URL", "http://127.0.0.1:8000/v1"),
+#: Where a self-hosted LiteLLM proxy lives when nothing says otherwise.
+#: Localhost, never a tailnet address — a hardcoded 100.x default sent every
+#: fresh checkout at one particular machine.
+LITELLM_DEFAULT_BASE_URL = "http://127.0.0.1:8000/v1"
+GEMINI_DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
+LITELLM_BASE_URL_VARS = ("LITELLM_BASE_URL", "LLM_BASE_URL")
+
+# Per-provider endpoint/model defaults chosen when the provider changes and the
+# caller did not pin them. Each value is (env var chain, literal): the first
+# var that is set wins, and the literal is the last resort.
+LLM_BASE_URL_DEFAULTS: dict[str, tuple[tuple[str, ...], str]] = {
+    "haiku": (("ANTHROPIC_BASE_URL",), "https://api.anthropic.com/v1"),
+    "claude-haiku": (("ANTHROPIC_BASE_URL",), "https://api.anthropic.com/v1"),
+    "claude": (("ANTHROPIC_BASE_URL",), "https://api.anthropic.com/v1"),
+    "opencode": (("OPENCODE_BASE_URL",), "https://api.opencode.ai/v1"),
+    "zen": (("OPENCODE_BASE_URL",), "https://api.opencode.ai/v1"),
+    "opencode-zen": (("OPENCODE_BASE_URL",), "https://api.opencode.ai/v1"),
+    "gemini": (("GEMINI_BASE_URL",), GEMINI_DEFAULT_BASE_URL),
+    "google": (("GEMINI_BASE_URL",), GEMINI_DEFAULT_BASE_URL),
+    "flash": (("GEMINI_BASE_URL",), GEMINI_DEFAULT_BASE_URL),
+    "groq": (("GROQ_BASE_URL",), "https://api.groq.com/openai/v1"),
+    "openai": (("OPENAI_BASE_URL",), "https://api.openai.com/v1"),
+    "gpt": (("OPENAI_BASE_URL",), "https://api.openai.com/v1"),
+    "litellm": (LITELLM_BASE_URL_VARS, LITELLM_DEFAULT_BASE_URL),
+    "fleet": (LITELLM_BASE_URL_VARS, LITELLM_DEFAULT_BASE_URL),
+    "local": (LITELLM_BASE_URL_VARS, LITELLM_DEFAULT_BASE_URL),
 }
-LLM_MODEL_DEFAULTS: dict[str, tuple[str, str]] = {
-    "haiku": ("HAIKU_MODEL", "claude-3-5-haiku-20241022"),
-    "claude-haiku": ("HAIKU_MODEL", "claude-3-5-haiku-20241022"),
-    "claude": ("HAIKU_MODEL", "claude-3-5-haiku-20241022"),
-    "opencode": ("OPENCODE_MODEL", "flash-3.8"),
-    "zen": ("OPENCODE_MODEL", "flash-3.8"),
-    "opencode-zen": ("OPENCODE_MODEL", "flash-3.8"),
-    "gemini": ("GEMINI_MODEL", "gemini-2.5-flash"),
-    "google": ("GEMINI_MODEL", "gemini-2.5-flash"),
-    "flash": ("GEMINI_MODEL", "gemini-2.5-flash"),
-    "groq": ("GROQ_MODEL", "groq/compound-mini"),
-    "openai": ("OPENAI_MODEL", "gpt-5-nano"),
-    "gpt": ("OPENAI_MODEL", "gpt-5-nano"),
-    "litellm": ("LLM_MODEL", "claude-sonnet-4-6"),
-    "fleet": ("LLM_MODEL", "claude-sonnet-4-6"),
-    "local": ("LLM_MODEL", "claude-sonnet-4-6"),
+LLM_MODEL_DEFAULTS: dict[str, tuple[tuple[str, ...], str]] = {
+    "haiku": (("HAIKU_MODEL",), "claude-3-5-haiku-20241022"),
+    "claude-haiku": (("HAIKU_MODEL",), "claude-3-5-haiku-20241022"),
+    "claude": (("HAIKU_MODEL",), "claude-3-5-haiku-20241022"),
+    "opencode": (("OPENCODE_MODEL",), "flash-3.8"),
+    "zen": (("OPENCODE_MODEL",), "flash-3.8"),
+    "opencode-zen": (("OPENCODE_MODEL",), "flash-3.8"),
+    "gemini": (("GEMINI_MODEL",), "gemini-2.5-flash"),
+    "google": (("GEMINI_MODEL",), "gemini-2.5-flash"),
+    "flash": (("GEMINI_MODEL",), "gemini-2.5-flash"),
+    "groq": (("GROQ_MODEL",), "groq/compound-mini"),
+    "openai": (("OPENAI_MODEL",), "gpt-5-nano"),
+    "gpt": (("OPENAI_MODEL",), "gpt-5-nano"),
+    "litellm": (("LITELLM_MODEL", "LLM_MODEL"), "claude-sonnet-4-6"),
+    "fleet": (("LITELLM_MODEL", "LLM_MODEL"), "claude-sonnet-4-6"),
+    "local": (("LITELLM_MODEL", "LLM_MODEL"), "claude-sonnet-4-6"),
 }
 # Settings field holding the key for each LLM provider family.
 LLM_KEY_FIELD: dict[str, str] = {
@@ -114,8 +122,39 @@ LLM_KEY_FIELD: dict[str, str] = {
 }
 
 
-def _env_default(var: str, literal: str) -> str:
+def _env_default(var: str, literal: str = "") -> str:
     return os.environ.get(var) or literal
+
+
+def _env_chain(variables: tuple[str, ...], literal: str = "") -> str:
+    """First env var in the chain that is set, else the literal."""
+    for var in variables:
+        value = os.environ.get(var)
+        if value:
+            return value
+    return literal
+
+
+DEFAULT_LLM_BASE = (LITELLM_BASE_URL_VARS, LITELLM_DEFAULT_BASE_URL)
+DEFAULT_LLM_MODEL = (("LITELLM_MODEL", "LLM_MODEL"), "claude-sonnet-4-6")
+
+
+def _resolve_chain(variables: tuple[str, ...], literal: str, generic: str) -> str:
+    """Resolve a provider's env chain, honouring the generic override.
+
+    The chain is tried in order first, so a provider-specific var
+    (``LITELLM_BASE_URL``) beats the generic one (``LLM_BASE_URL``) when both
+    are set. The generic var still applies to providers whose chain does not
+    already list it, where it reads as an explicit operator override.
+    """
+    resolved = _env_chain(variables)
+    if resolved:
+        return resolved
+    if generic not in variables:
+        generic_value = os.environ.get(generic)
+        if generic_value:
+            return generic_value
+    return literal
 
 
 def is_secret_field(name: str) -> bool:
@@ -157,12 +196,8 @@ class RuntimeSettings:
         llm_default = "groq" if groq else ("haiku" if anthropic else "litellm")
         tts_default = "smallest" if os.environ.get("SMALLEST_API_KEY") else "kokoro"
         llm_provider = os.environ.get("LLM_PROVIDER", llm_default).lower()
-        base_var, base_literal = LLM_BASE_URL_DEFAULTS.get(
-            llm_provider, ("LLM_BASE_URL", "http://127.0.0.1:8000/v1")
-        )
-        model_var, model_literal = LLM_MODEL_DEFAULTS.get(
-            llm_provider, ("LLM_MODEL", "claude-sonnet-4-6")
-        )
+        base_vars, base_literal = LLM_BASE_URL_DEFAULTS.get(llm_provider, DEFAULT_LLM_BASE)
+        model_vars, model_literal = LLM_MODEL_DEFAULTS.get(llm_provider, DEFAULT_LLM_MODEL)
         settings = cls(
             stt_provider=os.environ.get("STT_PROVIDER", stt_default).lower(),
             llm_provider=llm_provider,
@@ -183,8 +218,8 @@ class RuntimeSettings:
             anthropic_api_key=anthropic,
             sensevoice_base_url=_env_default("SENSEVOICE_BASE_URL", "http://127.0.0.1:8086"),
             kokoro_base_url=_env_default("KOKORO_BASE_URL", "http://127.0.0.1:8088"),
-            llm_base_url=_env_default("LLM_BASE_URL", "") or _env_default(base_var, base_literal),
-            llm_model=_env_default("LLM_MODEL", "") or _env_default(model_var, model_literal),
+            llm_base_url=_resolve_chain(base_vars, base_literal, "LLM_BASE_URL"),
+            llm_model=_resolve_chain(model_vars, model_literal, "LLM_MODEL"),
             vad_silence_ms=600,
         )
         try:
@@ -295,13 +330,13 @@ class SettingsStore:
         if provider_changed:
             which = merged.llm_provider
             if "llm_base_url" not in updates:
-                var, literal = LLM_BASE_URL_DEFAULTS.get(which, ("LLM_BASE_URL", ""))
-                resolved = _env_default(var, literal)
+                variables, literal = LLM_BASE_URL_DEFAULTS.get(which, DEFAULT_LLM_BASE)
+                resolved = _env_chain(variables, literal)
                 if resolved:
                     merged.llm_base_url = resolved
             if "llm_model" not in updates:
-                var, literal = LLM_MODEL_DEFAULTS.get(which, ("LLM_MODEL", ""))
-                resolved = _env_default(var, literal)
+                variables, literal = LLM_MODEL_DEFAULTS.get(which, DEFAULT_LLM_MODEL)
+                resolved = _env_chain(variables, literal)
                 if resolved:
                     merged.llm_model = resolved
             if "llm_api_key" not in updates:
