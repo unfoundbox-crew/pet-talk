@@ -12,7 +12,7 @@ horizon: 2026-Q4
 - [ ] Measure real-engine latency (real STT/LLM/TTS, not stub) — why it matters: every number in `docs/SPEC.md` §9.1 is stub-only, so we don't know actual stall/barge/turn timing — done when: `qa/latency.py` runs against `STT_PROVIDER=deepgram LLM_PROVIDER=<real> TTS_PROVIDER=kokoro` and the numbers land in SPEC.md replacing "NOT MEASURED".
 - [ ] Ship cockpit token UX — why it matters: a first-run web user has no confirmed path to find and paste the generated `.qa-scratch/studio.token` value — done when: `web/src/components/SettingsModal.tsx` has a visible "connect" flow that surfaces the token source, verified by opening the cockpit fresh with no `localStorage` entry.
 - [ ] Prove the per-turn queue buffers ≥4-5 sentences under sustained real TTS — why it matters: gate 3 in `docs/SPEC.md` §9.2 is only partially exercised by `StubLLM`'s hardcoded 3 sentences — done when: a `qa/test_turn_lifecycle.py` fixture streams an unbounded answer against real or slow-TTS timing and asserts no gap past the 4th sentence.
-- [ ] Land or confirm `pet-talk-hotkey ax` — why it matters: `server/grounding.py` shells out to it for `PET_TALK_AX=1` screen grounding but `main.swift`'s command switch (as of `97cdd69`) has no `"ax"` case — done when: `pet-talk-hotkey ax` returns the `{"ok","app","window","selection","path"}` JSON line `grounding.py` expects, or the SPEC is corrected to say it doesn't exist yet.
+- [ ] Prove `PET_TALK_AX=1` grounding live — why it matters: `server/grounding.py` shells out to `pet-talk-hotkey ax`, which now exists in `main.swift` but has only been typechecked, and it needs the Accessibility permission — done when: one turn prompt carries a "Screen:" line on this Mac and qa holds a dated manual receipt.
 - [ ] Add PDF OCR test coverage — why it matters: `eyes.py`'s PDF path (`pdf_max_pages=5`) has zero fixture coverage — done when: `qa/test_eyes.py` includes a real PDF fixture exercising `task_for()` forcing `transcribe`.
 
 ## Next (this month)
@@ -27,7 +27,7 @@ horizon: 2026-Q4
 - [ ] On-device small LLM (Apple MLX) — why it matters: removes network egress and per-token cost for the common case — done when: a quantized 3B-class model runs locally at >65 tok/s within 2.5GB unified memory and passes `qa/test_providers.py` as a provider.
 - [ ] Long-term episodic memory beyond the session-scoped ledger — why it matters: past decisions aren't grounded across days today — done when: a local store (SQLite or similar) indexes past turns and `grounding.py` can pull from it.
 - [ ] Multi-agent delegation from a turn (Donna dispatches a background subagent) — why it matters: long tasks currently block the voice loop — done when: a turn can spawn a background task and deliver a one-sentence spoken summary on completion without blocking new turns.
-- [ ] AX-based selected-text / terminal-buffer grounding beyond the current app/window/selection snapshot — why it matters: `pet-talk-hotkey ax` (once it exists, see Now) only returns a coarse snapshot — done when: grounding can pull a terminal pane's visible buffer or an editor's selection into the prompt automatically.
+- [ ] AX-based selected-text / terminal-buffer grounding beyond the current app/window/selection snapshot — why it matters: `pet-talk-hotkey ax` only returns a coarse snapshot — done when: grounding can pull a terminal pane's visible buffer or an editor's selection into the prompt automatically.
 
 ## Not doing (and why)
 
