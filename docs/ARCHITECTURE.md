@@ -104,7 +104,7 @@ TTSProvider.synth(text: str, voice: str, speed: float) -> tuple[bytes, list[dict
 
 `pet-talk-cli [interactive|once|tui]` (`cli/client.py`), flags: `--hotkey`/`-1`, `--url`, `--persona`, `--vad`, `--silence`, `--threshold`, `--quiet`/`-q`.
 
-- 2026-09-12: `PET_TALK_AX=1` grounding is wired end to end in code (`server/grounding.py` calls `pet-talk-hotkey ax`, implemented in `cli/hotkey/main.swift`), but the binary has only been typechecked, not run on this machine, and it needs the Accessibility permission. Unverified live.
+- 2026-09-12: `PET_TALK_AX=1` grounding is wired end to end in code (`server/grounding.py` calls `pet-talk-hotkey ax`, implemented in `cli/hotkey/main.swift`), built locally 2026-09-12 (`make build-hotkey`, 8 s); without the Accessibility grant `ax` returns `ax_permission_denied` as designed. The grounding line in a real turn is still unverified.
 
 ### Env vars (grepped from `os.environ.get`/`os.getenv` across `server/`)
 
