@@ -399,22 +399,33 @@ class TestBargeSilencesTheEarlyStall(unittest.TestCase):
 
     def test_a_barge_mid_synth_sends_no_stall_frames(self) -> None:
         async def go():
+            from server import stall as stall_mod
+
             barged = {"flag": False}
-            pset = ProviderSet(stt=SegmentSTT(), llm=RouterLLM(), tts=StubTTS(delay_s=0.25))
+
+            class BargingTTS(StubTTS):
+                """Flips the barge flag from INSIDE the synth.
+
+                A sleep-then-flip race read as a pass whenever the stall audio
+                happened to be warm in the cache from an earlier test, which is
+                how this assertion first lied. The flag flips where the barge
+                really lands: during the synth call itself.
+                """
+
+                def synth(self, text, voice="af_heart", speed=1.0, cancel=None):
+                    barged["flag"] = True
+                    return super().synth(text, voice, speed, cancel)
+
+            stall_mod._STALL_AUDIO_CACHE.clear()  # a warm cache skips synth
+            pset = ProviderSet(stt=SegmentSTT(), llm=RouterLLM(), tts=BargingTTS())
             runtime.install(pset)
             w = fake_ws()
 
-            async def barge_soon():
-                await asyncio.sleep(0.05)  # inside the synth, before the sends
-                barged["flag"] = True
-
-            flipper = asyncio.create_task(barge_soon())
             sent = await stt_stream.emit_early_stall(
                 w, "t-barge-stall", "did the provider tests pass", TEST_PERSONA,
                 pset, is_barged=lambda: barged["flag"],
             )
-            await flipper
-
+            self.assertTrue(barged["flag"], "fixture failed: the synth never ran")
             self.assertFalse(sent, "emit_early_stall claimed a stall it must not send")
             self.assertEqual(
                 [t for t in types_of(w) if t in ("agent.stall", "agent.sentence")],
