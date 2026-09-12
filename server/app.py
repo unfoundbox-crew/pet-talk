@@ -22,10 +22,12 @@ from __future__ import annotations
 
 import os
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from . import routes_http, runtime, ws as ws_module
+from .auth import StudioAuthError, studio_token
 from .audio_store import (
     AUDIO_STORE,
     MAX_AUDIO_STORE_ENTRIES,
@@ -61,9 +63,10 @@ from .speech import TurnResult, run_speech, speak_sentence
 from .turn import handle_turn, handle_turn_task
 from .voices import load_voices, parse_voices_minimal
 
+DEFAULT_CORS_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
 CORS_ORIGINS = [
     o.strip()
-    for o in os.environ.get("PET_TALK_CORS_ORIGINS", "http://localhost:5173").split(",")
+    for o in os.environ.get("PET_TALK_CORS_ORIGINS", DEFAULT_CORS_ORIGINS).split(",")
     if o.strip()
 ]
 
@@ -71,10 +74,24 @@ app = FastAPI(title="pet-talk duplex v0.2")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,  # vite dev; same-origin needs no CORS
-    allow_credentials=True,
+    # No cookies or Authorization ride these requests — the studio token does,
+    # in an explicit header. allow_credentials=True would let a browsing page
+    # replay the user's session against a mutating route.
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(StudioAuthError)
+async def _studio_auth_error(_request: Request, exc: StudioAuthError) -> JSONResponse:
+    """Fail closed with our own body shape, not FastAPI's ``{"detail": ...}``."""
+    return JSONResponse({"ok": False, "reason": exc.reason}, status_code=401)
+
+
+# Resolve (and, first run, generate + log the path of) the studio token at
+# import time, so the path is in the log before the first client connects.
+studio_token()
 app.include_router(routes_http.router)
 app.include_router(ws_module.router)
 
@@ -154,6 +171,7 @@ __all__ = [
     "speak_sentence",
     "stall_cache_key",
     "store_audio",
+    "studio_token",
     "stt",
     "tts",
     "ws_endpoint",

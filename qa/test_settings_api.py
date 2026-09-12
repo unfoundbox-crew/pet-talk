@@ -21,8 +21,12 @@ class TestSettingsApi(unittest.TestCase):
     def setUp(self):
         from fastapi.testclient import TestClient
         from server.app import app
+        from server.auth import STUDIO_TOKEN_HEADER, studio_token
 
-        self.client = TestClient(app)
+        # Mutating routes require the studio token (see server/auth.py and
+        # qa/test_security.py). A local client reads it from
+        # .qa-scratch/studio.token; in-process we ask for it directly.
+        self.client = TestClient(app, headers={STUDIO_TOKEN_HEADER: studio_token()})
 
     def test_get_settings(self):
         r = self.client.get("/settings")

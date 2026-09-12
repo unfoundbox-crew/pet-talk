@@ -6,6 +6,10 @@ Two rules worth naming here:
   like a secret comes back as ``"***"`` with a companion ``secrets_set`` map;
   ``POST`` treats an incoming ``"***"`` as "leave it alone", so a UI that
   round-trips a masked read cannot wipe a live key.
+* Every mutating route sits behind ``X-Studio-Token`` (see
+  :mod:`server.auth`) and ``POST /settings`` additionally checks every
+  ``*_base_url`` against the egress allowlist — an attacker-supplied endpoint
+  plus a stored key is credential exfiltration, not configuration.
 * ``POST /settings`` is atomic with respect to turns — the rebuild happens
   under the swap lock, and each turn snapshots providers once at its start.
 """
@@ -15,10 +19,11 @@ import asyncio
 import base64
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse, Response
 
 from .audio_store import get_audio
+from .auth import offending_base_url, require_studio_token
 from .dictation import CleanProseFormatter
 from .frames import parse_int_field
 from .logs import log, swallowed
@@ -88,7 +93,7 @@ def persona_get(name: str) -> Response:
         )
 
 
-@router.post("/personas")
+@router.post("/personas", dependencies=[Depends(require_studio_token)])
 async def persona_post(req: dict) -> Response:
     name = str(req.get("name") or "").strip().lower()
     if not name:
@@ -115,7 +120,7 @@ async def persona_post(req: dict) -> Response:
     return JSONResponse({"ok": True, "persona": _persona_payload(p)})
 
 
-@router.delete("/personas/{name}")
+@router.delete("/personas/{name}", dependencies=[Depends(require_studio_token)])
 def persona_delete(name: str) -> Response:
     try:
         if delete_persona(name):
@@ -148,11 +153,18 @@ async def settings_get() -> Response:
         return JSONResponse(_settings_payload())
 
 
-@router.post("/settings")
+@router.post("/settings", dependencies=[Depends(require_studio_token)])
 async def settings_post(req: dict) -> Response:
     if not isinstance(req, dict):
         return JSONResponse(
-            {"reason": "bad_request", "error": "body must be a JSON object"},
+            {"ok": False, "reason": "bad_request", "error": "body must be a JSON object"},
+            status_code=400,
+        )
+    bad = offending_base_url(req)
+    if bad is not None:
+        log.warning("settings_rejected reason=base_url_not_allowed field=%s", bad)
+        return JSONResponse(
+            {"ok": False, "reason": "base_url_not_allowed", "field": bad},
             status_code=400,
         )
     await runtime.swap(req)
@@ -170,7 +182,7 @@ def ledger_get(limit: int = 50) -> Response:
     return JSONResponse({"ok": True, "turns": runtime.memory.recent_turns(limit=limit)})
 
 
-@router.delete("/ledger")
+@router.delete("/ledger", dependencies=[Depends(require_studio_token)])
 def ledger_clear() -> Response:
     try:
         with open(runtime.memory.ledger_path, "w", encoding="utf-8") as f:
@@ -186,7 +198,7 @@ def ledger_clear() -> Response:
 # ------------------------------------------------------------ transcribe ---
 
 
-@router.post("/transcribe")
+@router.post("/transcribe", dependencies=[Depends(require_studio_token)])
 async def transcribe_endpoint(req: dict) -> Response:
     pcm_b64 = req.get("pcm_b64") or req.get("audio_b64") or req.get("audio")
     if not pcm_b64 or not isinstance(pcm_b64, str) or not pcm_b64.strip():

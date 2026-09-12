@@ -317,8 +317,9 @@ class TestSettingsRedaction(unittest.TestCase):
     def setUp(self):
         from fastapi.testclient import TestClient
         from server.app import app
+        from server.auth import STUDIO_TOKEN_HEADER, studio_token
 
-        self.client = TestClient(app)
+        self.client = TestClient(app, headers={STUDIO_TOKEN_HEADER: studio_token()})
 
     def tearDown(self):
         self.client.post("/settings", json={"deepgram_api_key": ""})
@@ -359,8 +360,9 @@ class TestSocketSurvivesBadFrames(unittest.TestCase):
     def setUp(self):
         from fastapi.testclient import TestClient
         from server.app import app
+        from server.auth import STUDIO_TOKEN_HEADER, studio_token
 
-        self.client = TestClient(app)
+        self.client = TestClient(app, headers={STUDIO_TOKEN_HEADER: studio_token()})
 
     def test_bad_frame_does_not_drop_the_socket(self):
         with self.client.websocket_connect("/ws") as ws:

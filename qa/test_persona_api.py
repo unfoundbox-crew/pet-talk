@@ -88,8 +88,14 @@ class TestFastApiEndpoints(unittest.TestCase):
     def setUp(self):
         from fastapi.testclient import TestClient
         from server.app import app
+        from server.auth import STUDIO_TOKEN_HEADER, studio_token
 
-        self.client = TestClient(app)
+        self.client = TestClient(app, headers={STUDIO_TOKEN_HEADER: studio_token()})
+        self.anon = TestClient(app)
+
+    def test_persona_write_routes_need_the_studio_token(self):
+        self.assertEqual(self.anon.post("/personas", json={"name": "x"}).status_code, 401)
+        self.assertEqual(self.anon.delete("/personas/x").status_code, 401)
 
     def test_get_personas_endpoint(self):
         r = self.client.get("/personas")

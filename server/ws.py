@@ -16,6 +16,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from .auth import ws_token_ok
 from .frames import frame, new_turn_id, parse_int_field, safe_send_json, send_error
 from .logs import log, swallowed
 from .persona import Persona
@@ -251,6 +252,14 @@ HANDLERS = {
 
 @router.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
+    # Handshake auth before accept: an unauthenticated socket can trigger a
+    # turn, which dials the configured LLM base_url with the stored key.
+    # Header ``X-Studio-Token``, or ``?token=`` for browsers (the WebSocket
+    # API cannot set request headers). Close code 4401 = unauthorized.
+    if not ws_token_ok(ws):
+        log.warning("ws_rejected reason=unauthorized")
+        await ws.close(code=4401, reason="unauthorized")
+        return
     await ws.accept()
     session = Session(ws=ws)
     try:

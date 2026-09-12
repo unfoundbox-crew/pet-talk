@@ -55,6 +55,7 @@ SUITES=(
   "humanizer backchannel contract|qa/test_humanizer_gates.py|unit|"
   "provider ABCs & factories|qa/test_providers.py|unit|"
   "turn lifecycle|qa/test_turn_lifecycle.py|unit|OPTIONAL"
+  "studio token + egress allowlist (exfiltration refused)|qa/test_security.py|unit|OPTIONAL"
   "zero-vision eyes lane (attach, OCR, named errors)|qa/test_eyes.py|unit|"
   "terminal CLI client|qa/test_cli_client.py|unit|"
   "native macOS global hotkey listener|qa/test_hotkey.py|unit|SILENT"

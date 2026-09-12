@@ -39,6 +39,35 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 with open(os.path.join(ROOT, "qa", "budgets.json")) as _f:
     BUDGETS = {k: v for k, v in json.load(_f).items() if not k.startswith("_")}
 
+def _studio_token() -> str:
+    """The live server's studio token, if this machine can see it.
+
+    Order matches server/auth.py: env STUDIO_TOKEN, env STUDIO_TOKEN_FILE,
+    then the generated <repo>/.qa-scratch/studio.token. Empty when none is
+    readable — the handshake then fails and the suite says so, rather than
+    pretending the loop is fine.
+    """
+    tok = (os.environ.get("STUDIO_TOKEN") or "").strip()
+    if tok:
+        return tok
+    for path in (
+        os.environ.get("STUDIO_TOKEN_FILE") or "",
+        os.path.join(ROOT, ".qa-scratch", "studio.token"),
+    ):
+        if path and os.path.exists(path):
+            try:
+                with open(path) as f:
+                    tok = f.read().strip()
+            except OSError:
+                tok = ""
+            if tok:
+                return tok
+    return ""
+
+
+STUDIO_TOKEN = _studio_token()
+AUTH_HEADERS = {"X-Studio-Token": STUDIO_TOKEN} if STUDIO_TOKEN else {}
+
 PORT = os.environ.get("LIVE_WS_PORT", "8089")
 WS_URL = os.environ.get("LIVE_WS_URL", f"ws://127.0.0.1:{PORT}/ws")
 HTTP_BASE = os.environ.get("LIVE_HTTP_BASE", f"http://127.0.0.1:{PORT}")
@@ -91,8 +120,20 @@ class TestLiveWsTurn(unittest.TestCase):
 
     async def _connect(self):
         try:
-            ws = await ws_connect(WS_URL, max_size=4 * 1024 * 1024)
+            ws = await ws_connect(
+                WS_URL,
+                max_size=4 * 1024 * 1024,
+                additional_headers=AUTH_HEADERS,
+            )
         except Exception as e:
+            if "401" in str(e) or "4401" in str(e) or "unauthorized" in str(e).lower():
+                self.fail(
+                    "WS handshake refused as unauthorized at %s (%s). The server "
+                    "requires header X-Studio-Token; this run %s. Point "
+                    "STUDIO_TOKEN or STUDIO_TOKEN_FILE at the running server's "
+                    "token (it logs the path once at startup)."
+                    % (WS_URL, e, "sent one" if STUDIO_TOKEN else "had none to send")
+                )
             self.skipTest("SKIP: no WS server at %s (%s) — boot "
                           "`uvicorn server.app:app --port 8099` to prove it" % (WS_URL, e))
         first = await _recv(ws, 5.0)
