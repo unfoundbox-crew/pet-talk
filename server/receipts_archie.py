@@ -126,6 +126,30 @@ def _real_runner(args: list[str], cwd: str) -> str:
     return proc.stdout
 
 
+#: A path hint is a relative path or pattern, never an option and never an
+#: escape upwards. `archie repo blame <hint>` is argv, so a hint of
+#: ``--exec=...`` would be read as a flag by any CLI that grows one, and
+#: ``../../..`` walks out of the repo the caller named. Both are refused by
+#: name rather than quoted and hoped for; ``--`` below is the second lock.
+BAD_HINT = "receipt_bad_path_hint"
+
+
+def safe_positional(value: str, *, what: str = "path") -> str:
+    """Check one positional argument. Raises ``receipt_bad_path_hint``.
+
+    Refuses an empty value, anything starting with ``-`` (an option, not a
+    path) and anything containing ``..`` (a walk out of the named repo).
+    """
+    text = str(value or "").strip()
+    if not text:
+        raise ProviderError(BAD_HINT, f"empty {what}")
+    if text.startswith("-"):
+        raise ProviderError(BAD_HINT, f"{what} looks like an option: {text!r}")
+    if ".." in text:
+        raise ProviderError(BAD_HINT, f"{what} escapes the repo: {text!r}")
+    return text
+
+
 def run_json(args: list[str], repo: Optional[str] = None) -> Any:
     """Run one `archie … --json` call and decode it. Fails closed."""
     cwd = repo or default_repo()
@@ -244,9 +268,16 @@ def suspect_commits(repo: Optional[str] = None) -> dict:
 
 
 def repo_blame(path: str, repo: Optional[str] = None) -> list[dict]:
-    """`archie repo blame <path> --json` — who authored this file."""
+    """`archie repo blame --json -- <path>` — who authored this file.
+
+    The path is checked and passed after ``--``, so a hint that looks like an
+    option can never be parsed as one. It arrives from a spoken sentence
+    (:func:`server.receipts.path_hint`), which is user input by any honest
+    reading.
+    """
     target = repo or default_repo()
-    out = run_json(["repo", "blame", path, "--json"], target)
+    safe = safe_positional(path, what="path hint")
+    out = run_json(["repo", "blame", "--json", "--", safe], target)
     if isinstance(out, dict):  # tolerate a wrapped shape without guessing fields
         out = out.get("rows") or out.get("blame") or []
     if not isinstance(out, list):

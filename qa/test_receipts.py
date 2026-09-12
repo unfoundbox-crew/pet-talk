@@ -315,6 +315,64 @@ class TestAttach(ReceiptsTestCase):
 # ---------------------------------------------------------------------------
 
 
+class TestArgvInjection(ReceiptsTestCase):
+    """A spoken sentence becomes argv. It may not become a flag or a path walk.
+
+    `repo blame <hint>` built argv with no `--`, and `path_hint` happily
+    matched `--exec=id.py` and `../../../etc/passwd.py` — a dictated or
+    attacker-supplied sentence reaching a subprocess's option parser.
+    """
+
+    def test_a_hint_that_looks_like_an_option_is_refused(self):
+        self.assertEqual(receipts.path_hint("who broke --json.py"), "")
+        self.assertEqual(receipts.path_hint("who broke -rf.py"), "")
+        # `--exec=id.py` leaves only `id.py` in the match — a safe hint, and
+        # the `--` separator covers what the regex cannot see.
+        self.assertEqual(receipts.path_hint("who broke --exec=id.py"), "id.py")
+
+    def test_a_hint_that_walks_out_of_the_repo_is_refused(self):
+        self.assertEqual(receipts.path_hint("who broke ../../../etc/passwd.py"), "")
+        self.assertEqual(receipts.path_hint("who broke ../secrets.json"), "")
+
+    def test_an_ordinary_hint_still_resolves(self):
+        self.assertEqual(receipts.path_hint("who broke server/speech.py"), "server/speech.py")
+        self.assertEqual(receipts.path_hint("who broke the speak queue"), "who_broke_speak")
+
+    def test_safe_positional_names_each_refusal(self):
+        for bad in ("--json", "-x", "a/../b", "", "   "):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ProviderError) as caught:
+                    receipts_archie.safe_positional(bad)
+                self.assertEqual(caught.exception.reason, receipts_archie.BAD_HINT)
+
+    def test_repo_blame_puts_the_path_after_a_double_dash(self):
+        seen: list[list[str]] = []
+
+        def runner(args: list[str], cwd: str) -> str:
+            seen.append(list(args))
+            return json.dumps(BLAME_FIXTURE)
+
+        receipts_archie.set_runner(runner)
+        receipts_archie.repo_blame("server/speech.py", REPO)
+        self.assertTrue(seen, "repo blame never ran")
+        args = seen[0]
+        self.assertIn("--", args, f"no argv separator: {args}")
+        self.assertEqual(
+            args[args.index("--") + 1:],
+            ["server/speech.py"],
+            f"the path is not the only thing after --: {args}",
+        )
+        self.assertLess(args.index("--"), len(args) - 1)
+
+    def test_repo_blame_refuses_an_option_shaped_path_without_running(self):
+        ran = []
+        receipts_archie.set_runner(lambda args, cwd: ran.append(args) or "[]")
+        with self.assertRaises(ProviderError) as caught:
+            receipts_archie.repo_blame("--version", REPO)
+        self.assertEqual(caught.exception.reason, receipts_archie.BAD_HINT)
+        self.assertEqual(ran, [], "archie was run with an option-shaped path")
+
+
 class TestFreshnessLaw(ReceiptsTestCase):
     def test_a_scan_older_than_head_is_not_fresh(self):
         self.arrange(SCAN_STALE)

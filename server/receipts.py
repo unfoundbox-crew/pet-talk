@@ -49,8 +49,11 @@ RECEIPT_FRAME = "agent.receipt"
 MISSING = "receipt_missing"
 STALE_INDEX = "receipt_stale_index"
 UNAVAILABLE = "receipts_unavailable"
+#: A hint that would have become argv but is an option or a path walk. Raised
+#: by :func:`server.receipts_archie.safe_positional`; refused, never quoted.
+BAD_HINT = archie.BAD_HINT
 
-REASONS = frozenset({MISSING, STALE_INDEX, UNAVAILABLE})
+REASONS = frozenset({MISSING, STALE_INDEX, UNAVAILABLE, BAD_HINT})
 
 WORD_CEILING = 45
 
@@ -169,6 +172,7 @@ def stale_index_line(behind_s: int) -> str:
 REFUSAL_LINES = {
     MISSING: "My index has nothing that proves this, so I am not going to claim it.",
     UNAVAILABLE: "My session index is not answering, so I cannot prove that right now.",
+    BAD_HINT: "I could not read that as a file name, so I am not going to claim it.",
 }
 
 
@@ -269,12 +273,23 @@ def path_hint(text: str) -> str:
     A literal filename wins. Otherwise the remaining nouns become an
     underscore pattern — "the speak queue" -> "speak_queue" — which is how
     `repo blame` matches, by path pattern.
+
+    The hint becomes argv. A spoken (or dictated, or attacker-supplied)
+    sentence could name ``--exec=id.py`` or ``../../../etc/passwd.py``, both of
+    which the filename regex happily matches; a leading ``-`` and any ``..``
+    are refused here and the claim falls through to ``receipt_missing``
+    instead. ``receipts_archie.safe_positional`` and the ``--`` separator are
+    the other two locks.
     """
     if not isinstance(text, str) or not text.strip():
         return ""
     literal = _PATH_HINT.search(text)
     if literal:
-        return literal.group(0)
+        candidate = literal.group(0)
+        if candidate.startswith("-") or ".." in candidate:
+            log.info("receipt_bad_path_hint hint=%r", candidate)
+            return ""
+        return candidate
     words = [w for w in re.findall(r"[a-zA-Z0-9_]+", text.lower()) if w not in _STOPWORDS]
     return "_".join(words[:3])
 
