@@ -598,6 +598,17 @@ public class HUDCapsuleView: NSView {
     public let personaBadge = NSTextField()
     public let labelField = NSTextField()
     public let goldDotLayer = CALayer()
+    /// Archie's small form (PLAN-2026-09-12 §C, lane 5a's ArchieGlyphView), wired
+    /// once per capsule at the leading edge. C4 ("Quiet") — dense chrome, must not
+    /// out-shout the data (agentworth/docs/DESIGN.md, "Archie"). Never the full
+    /// hound, never a second instance.
+    public let archieGlyph = ArchieGlyphView(state: .idle, colourway: .c4)
+    /// Small-form size — always well under the 40px torch cutoff.
+    public static let archieGlyphSize: CGFloat = 16.0
+    public static let archieGlyphLeadingPadding: CGFloat = 8.0
+    /// Below this capsule height the glyph is hidden — there is no room to draw
+    /// it without crowding the waveform/label.
+    public static let archieGlyphMinHeight: CGFloat = 24.0
     private var trackingArea: NSTrackingArea?
 
     private var currentWidth: CGFloat = HUDCapsuleView.capsuleWidth
@@ -654,6 +665,12 @@ public class HUDCapsuleView: NSView {
         ).cgColor
         borderShapeLayer.lineWidth = 1.0
         rootLayer.addSublayer(borderShapeLayer)
+
+        // 3a. Archie glyph — leading edge, ahead of the indicator/label. Arrives
+        // bare (no accessory), state-driven; see updateArchieGlyph(for:badge:).
+        archieGlyph.frame = NSRect(x: Self.archieGlyphLeadingPadding, y: 0,
+                                     width: Self.archieGlyphSize, height: Self.archieGlyphSize)
+        addSubview(archieGlyph)
 
         // 4. Indicator View (Left aligned or shelf centered)
         indicatorView.frame = NSRect(x: 18, y: 22, width: 20, height: 20)
@@ -867,37 +884,55 @@ public class HUDCapsuleView: NSView {
         let isExpanded = width > (Self.capsuleWidth + 40.0)
         let notchInfo = NotchManager.shared.currentNotch()
 
+        // Archie's small form, leading edge. Hidden below the height threshold,
+        // and in the no-notch fallback pill when it's too narrow to fit without
+        // crowding the label (agentworth "once per screen": exactly one instance,
+        // never the full hound).
+        let glyphSize = Self.archieGlyphSize
+        let glyphPadding = Self.archieGlyphLeadingPadding
+        let minPillWidthForGlyph: CGFloat = glyphSize + glyphPadding * 2.0 + 40.0
+        let glyphFitsPill = notchInfo.hasNotch || width >= minPillWidthForGlyph
+        let glyphVisible = height >= Self.archieGlyphMinHeight && glyphFitsPill
+        archieGlyph.isHidden = !glyphVisible
+        if glyphVisible {
+            let glyphY = (height - glyphSize) / 2.0
+            archieGlyph.frame = NSRect(x: glyphPadding, y: glyphY, width: glyphSize, height: glyphSize)
+        }
+        // Reserve the glyph's own footprint from everything that lays out to its
+        // right, only while it is actually shown.
+        let glyphOffset: CGFloat = glyphVisible ? (glyphPadding + glyphSize + 6.0) : 0.0
+
         if isExpanded {
             if notchInfo.hasNotch {
                 // Expanded wings layout (flanking notch core + downward shelf)
                 personaBadge.isHidden = false
                 // Persona badge in the open left ear wing flanking the hardware notch
-                personaBadge.frame = NSRect(x: 20, y: 10, width: 64, height: 18)
+                personaBadge.frame = NSRect(x: 20 + glyphOffset, y: 10, width: 64, height: 18)
                 // Status indicator on shelf below physical notch
-                indicatorView.frame = NSRect(x: 20, y: 41, width: 16, height: 16)
+                indicatorView.frame = NSRect(x: 20 + glyphOffset, y: 41, width: 16, height: 16)
                 // Multi-line word-wrapping label spanning width below notch
                 let textTop: CGFloat = 38.0
                 let textH = max(20.0, height - textTop - 10.0)
-                labelField.frame = NSRect(x: 44, y: textTop, width: width - 64, height: textH)
+                labelField.frame = NSRect(x: 44 + glyphOffset, y: textTop, width: width - 64 - glyphOffset, height: textH)
             } else {
                 // External monitor floating layout
                 personaBadge.isHidden = false
-                indicatorView.frame = NSRect(x: 16, y: 14, width: 16, height: 16)
-                personaBadge.frame = NSRect(x: 38, y: 13, width: 50, height: 18)
+                indicatorView.frame = NSRect(x: 16 + glyphOffset, y: 14, width: 16, height: 16)
+                personaBadge.frame = NSRect(x: 38 + glyphOffset, y: 13, width: 50, height: 18)
                 let textTop: CGFloat = 12.0
                 let textH = max(20.0, height - textTop - 10.0)
-                labelField.frame = NSRect(x: 94, y: textTop, width: width - 110, height: textH)
+                labelField.frame = NSRect(x: 94 + glyphOffset, y: textTop, width: width - 110 - glyphOffset, height: textH)
             }
         } else {
             // Compact shelf layout right beneath camera lens
             personaBadge.isHidden = true
             if notchInfo.hasNotch {
-                indicatorView.frame = NSRect(x: 18, y: 38, width: 14, height: 14)
-                labelField.frame = NSRect(x: 38, y: 36, width: width - 48, height: 16)
+                indicatorView.frame = NSRect(x: 18 + glyphOffset, y: 38, width: 14, height: 14)
+                labelField.frame = NSRect(x: 38 + glyphOffset, y: 36, width: width - 48 - glyphOffset, height: 16)
             } else {
                 let centerY = (height - 18.0) / 2.0
-                indicatorView.frame = NSRect(x: 18, y: centerY, width: 18, height: 18)
-                labelField.frame = NSRect(x: 44, y: (height - 20.0) / 2.0, width: width - 56, height: 20)
+                indicatorView.frame = NSRect(x: 18 + glyphOffset, y: centerY, width: 18, height: 18)
+                labelField.frame = NSRect(x: 44 + glyphOffset, y: (height - 20.0) / 2.0, width: width - 56 - glyphOffset, height: 20)
             }
         }
 
@@ -909,6 +944,23 @@ public class HUDCapsuleView: NSView {
         indicatorView.configure(for: state)
         labelField.stringValue = state.labelText
         labelField.textColor = NSColor(srgbRed: 0xf3 / 255.0, green: 0xf4 / 255.0, blue: 0xf6 / 255.0, alpha: 1.0)
+        archieGlyph.state = Self.archieGlyphState(for: state)
+    }
+
+    /// HUD state -> Archie glyph state. `.thinking` maps to `.idle` (the light
+    /// stays steady rather than pulsing gold — Archie is not the thinking
+    /// spinner). A `badge` of "PAUSED" (sleep mode) always wins and maps to
+    /// `.error`, the glyph's only "lamp off" pose — the same appearance an actual
+    /// error uses, because both read the same way on Archie: off.
+    public static func archieGlyphState(for hudState: HUDState, badge: String? = nil) -> ArchieGlyphState {
+        if let badge = badge, badge.uppercased() == "PAUSED" {
+            return .error
+        }
+        switch hudState {
+        case .listening: return .listening
+        case .thinking: return .idle
+        case .speaking: return .speaking
+        }
     }
 
     @discardableResult
@@ -975,6 +1027,7 @@ public class HUDCapsuleView: NSView {
         labelField.textColor = NSColor(srgbRed: 0xf3 / 255.0, green: 0xf4 / 255.0, blue: 0xf6 / 255.0, alpha: 1.0)
         goldDotLayer.opacity = 0.0
         indicatorView.isHidden = false
+        archieGlyph.state = .idle
     }
 
     public func updateAudioLevel(rms: Float, peak: Float) {
@@ -1250,6 +1303,11 @@ public class HUDController {
                 return
             }
 
+            // error -> off, restored once the shake ends.
+            let previousGlyphState = self.panel.capsuleView.archieGlyph.state
+            self.panel.capsuleView.archieGlyph.state = .error
+            let restoreGlyph: () -> Void = { [weak self] in self?.panel.capsuleView.archieGlyph.state = previousGlyphState }
+
             if let audio = self.onErrorAudio {
                 audio()
             } else if !EarconEngine.isSilentModeEnv && !HUDController.isHeadless {
@@ -1257,6 +1315,7 @@ public class HUDController {
             }
 
             guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+                restoreGlyph()
                 completion?()
                 return
             }
@@ -1280,6 +1339,7 @@ public class HUDController {
             self.panel.capsuleView.layer?.add(shake, forKey: "errorShake")
 
             DispatchQueue.main.asyncAfter(deadline: .now() + HUDMotionTokens.errorShakeDuration) {
+                restoreGlyph()
                 completion?()
             }
         }
@@ -1415,6 +1475,13 @@ public class HUDController {
             let color = accentColor ?? state.accentColor
             let targetH = self.panel.capsuleView.setBreadcrumb(badge: badge, detail: detail, accentColor: color)
             let targetW = HUDCapsuleView.expandedWidth
+
+            self.panel.capsuleView.archieGlyph.state = HUDCapsuleView.archieGlyphState(for: state, badge: badge)
+            // Sentence-arrival hook: main.swift emits one "Speaking" breadcrumb per spoken sentence
+            // (word-level timing is not delivered to the HUD today) — one beat per sentence, not per word.
+            if state == .speaking {
+                self.panel.capsuleView.archieGlyph.beat()
+            }
 
             self.resizeIsland(toWidth: targetW, height: targetH, animated: true)
 
@@ -1594,8 +1661,26 @@ public class HUDController {
     public func getStateDump() -> [String: Any] {
         let notchInfo = NotchManager.shared.currentNotch()
         let measured = HUDCapsuleView.measuredNotchWidth()
+        let glyph = panel.capsuleView.archieGlyph
+        let glyphStateName: String
+        switch glyph.state {
+        case .idle: glyphStateName = "idle"
+        case .listening: glyphStateName = "listening"
+        case .speaking: glyphStateName = "speaking"
+        case .error: glyphStateName = "error"
+        }
+        let glyphColourwayName: String
+        switch glyph.colourway {
+        case .c3: glyphColourwayName = "c3"
+        case .c4: glyphColourwayName = "c4"
+        }
 
         return [
+            "glyph": [
+                "state": glyphStateName,
+                "colourway": glyphColourwayName,
+                "visible": !glyph.isHidden
+            ] as [String: Any],
             "state": [
                 "lifecycle": lifecycleName,
                 "hudState": currentState?.rawValue ?? "none",
