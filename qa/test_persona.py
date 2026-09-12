@@ -15,7 +15,11 @@ import os
 import re
 import unittest
 
+import sys
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 PERSONAS_DIR = os.path.join(ROOT, "personas")
 VOICES_CANDIDATES = [os.path.join(ROOT, "voices.yaml"),
                      os.path.join(ROOT, "personas", "voices.yaml")]
@@ -149,6 +153,58 @@ class TestI18n(unittest.TestCase):
                          "en-only: %s | hi-only: %s"
                          % (sorted(en_keys - hi_keys), sorted(hi_keys - en_keys)))
         print("    i18n parity: %d keys in en + hi" % len(en_keys))
+
+
+
+class TestNounRulePrompt(unittest.TestCase):
+    """The Noun Rule lives in the PROMPT, not only in a post-hoc word cap.
+
+    `server/speech.py` still refuses an over-long sentence after the fact, but
+    a refusal costs a turn. The rule the model is told is what keeps most
+    lines short: target 20 words, hard ceiling 45, and every line names its
+    subject — a file, a table or a test. These assertions read the prompt that
+    `build_system_prompt` actually returns, never a copy of the text.
+    """
+
+    def setUp(self):
+        try:
+            from server.persona_runtime import VOICE_RULES, Persona, build_system_prompt
+        except Exception as exc:  # pragma: no cover - import failure is the finding
+            self.skipTest("SKIP: server.persona_runtime not importable (%s)" % exc)
+        self.VOICE_RULES = VOICE_RULES
+        self.prompt = build_system_prompt(
+            Persona(name="donna", voice="af_heart", speed=1.0, stalls=["one sec"],
+                    tone="Razor-competent chief of staff."),
+            grounding="",
+        )
+
+    def test_prompt_states_the_20_word_target(self):
+        self.assertIn("20 words", self.prompt,
+                      "the spoken-line target (20 words) is not in the prompt")
+
+    def test_prompt_states_the_45_word_ceiling(self):
+        self.assertIn("45 words", self.prompt,
+                      "the hard ceiling (45 words) is not in the prompt")
+        # A ceiling that is not named as a ceiling reads as a second target.
+        low = self.prompt.lower()
+        self.assertTrue(
+            "never exceed 45 words" in low or "hard ceiling" in low,
+            "45 words appears but is not stated as a hard ceiling",
+        )
+
+    def test_prompt_states_the_subject_requirement(self):
+        low = self.prompt.lower()
+        self.assertIn("name the", low,
+                      "the prompt never tells the model to name its subject")
+        for noun in ("file", "table", "test"):
+            self.assertIn(noun, low,
+                          "the subject requirement omits '%s'" % noun)
+
+    def test_rule_text_is_the_single_source(self):
+        """The prompt carries the rules verbatim from VOICE_RULES."""
+        self.assertIn(self.VOICE_RULES, self.prompt)
+        for needle in ("20 words", "45 words"):
+            self.assertIn(needle, self.VOICE_RULES)
 
 
 if __name__ == "__main__":

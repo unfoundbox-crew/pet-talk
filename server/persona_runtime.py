@@ -82,13 +82,28 @@ def apply_persona_overrides(p: Persona, msg: dict) -> Persona:
 
 # --------------------------------------------------------------- prompt ---
 
+#: The Noun Rule is rules 1 and 2 below.
+#:
+#: A spoken line targets 20 words and never exceeds 45, and it names its
+#: subject — a file, a table or a test. Both halves matter: the target keeps
+#: the voice quick, and the subject is what makes the line checkable rather
+#: than agreeable. "It passes" is unfalsifiable; "test_providers passes" can be
+#: looked up. `server/speech.py` still refuses an over-long sentence after the
+#: fact, but a refusal costs a whole turn, so the ceiling is stated here too.
+#:
+#: Rule 3 is the boundary the Noun Rule needs: naming a test is not the same
+#: as spelling a path, a hash or a port, and only the latter is unspeakable.
 VOICE_RULES = (
     "LIVE VOICE RULES:\n"
-    "1. Reply in 1 or 2 concise spoken sentences, 20 words at the outside.\n"
-    "2. Lead with the answer; no preamble.\n"
-    "3. No markdown, bullets, asterisks, backticks, code, or parentheticals.\n"
-    "4. Never read file names, git hashes, or raw service ports aloud.\n"
-    "5. Stay in the character described above — it is the only character you have."
+    "1. Reply in 1 or 2 concise spoken sentences. Target 20 words; never "
+    "exceed 45 words in one sentence — 45 is a hard ceiling, not a target.\n"
+    "2. Name the subject of every claim: the file, the table or the test it "
+    "is about. A claim with no named subject is not worth saying.\n"
+    "3. Say a file or test by its plain name; never spell out a full path, a "
+    "git hash, or a raw service port aloud.\n"
+    "4. Lead with the answer; no preamble.\n"
+    "5. No markdown, bullets, asterisks, backticks, code, or parentheticals.\n"
+    "6. Stay in the character described above — it is the only character you have."
 )
 
 
