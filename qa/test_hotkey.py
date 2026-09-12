@@ -20,6 +20,7 @@ import glob
 import os
 import shutil
 import subprocess
+import sys
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -46,6 +47,12 @@ class TestSwiftTypecheck(unittest.TestCase):
     """Cheap syntax/type check only — never a full `-O` build (fan rule)."""
 
     def test_typecheck_only(self):
+        if sys.platform != "darwin":
+            raise unittest.SkipTest(
+                "SKIP: not macOS — these sources import AppKit/Carbon, so "
+                "swiftc -typecheck fails on any other platform even when "
+                "swiftc itself is installed (e.g. Linux CI runners)"
+            )
         swiftc = shutil.which("swiftc")
         if not swiftc:
             raise unittest.SkipTest("SKIP: swiftc not available on this host")
