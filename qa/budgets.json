@@ -1,5 +1,5 @@
 {
-  "_comment": "Single source of truth for latency budgets (TECH-SPEC.md sec 8.4). qa/latency.py and qa/live_ws_turn.py both load this file — never hardcode a copy elsewhere.",
+  "_comment": "Single source of truth for latency budgets (TECH-SPEC.md sec 8.4). qa/latency.py and qa/live_ws_turn.py both load this file \u2014 never hardcode a copy elsewhere.",
   "stall_ms": 400,
   "barge_ms": 100,
   "turn_p50_ms": 800,
@@ -8,15 +8,79 @@
   "llm_ms": 800,
   "tts_ms": 200,
   "measured": {
-    "date": "2026-09-12",
-    "providers": "STT+chat-LLM=Groq (whisper-large-v3-turbo / openai/gpt-oss-20b), TTS=Kokoro (local SpacePilot daemon)",
-    "machine": "M-series MacBook",
-    "method": "direct provider calls (GroqSTT.transcribe / OpenAICompatibleLLM.stream / KokoroSpacePilotTTS.synth), N=5, median of 5 (component-level only — see docs/SPEC.md 9.1 for why the live WS turn could not be measured this pass)",
-    "stt_ms": {"p50": 298.5, "p95": 316.4, "budget": 150, "result": "FAIL"},
-    "llm_first_sentence_ms": {"p50": 536.0, "p95": 700.4, "budget": 800, "result": "PASS"},
-    "tts_ms": {"p50": 1285.9, "p95": 1632.7, "budget": 200, "result": "FAIL"},
-    "stall_ms": "NOT MEASURED — see docs/SPEC.md 9.1",
-    "barge_ms": "NOT MEASURED (live) — see docs/SPEC.md 9.1",
-    "turn_p50_ms": "NOT MEASURED (live) — see docs/SPEC.md 9.1"
+    "date": "2026-09-12b",
+    "providers": "STT=faster-whisper tiny.en (local, tuned) / LLM=LiteLLM proxy gpt-oss-120b-groq / TTS=kokoro-local (in-process Kokoro-82M via mlx-audio)",
+    "machine": "M-series MacBook Pro, server under ~/miniconda3/envs/local-ml-py311",
+    "method": "Turn-level: live WS through the real FastAPI loop, `APP_PORT=8089 python3 qa/latency.py` x3 (N=5 turns each), median of the three runs, real speech from qa/fixtures/weather_turn.wav (1.44s, 16kHz mono). Component-level: direct provider calls (FasterWhisperSTT.transcribe / OpenAICompatibleLLM.stream / KokoroLocalTTS.synth), N=5, p50/p95. TTS sentence is 12 words; STT clip is the same fixture.",
+    "stt_ms": {
+      "p50": 143.4,
+      "p95": 148.4,
+      "budget": 150,
+      "result": "PASS"
+    },
+    "llm_first_content_ms": {
+      "p50": 512.4,
+      "p95": 805.4,
+      "budget": 800,
+      "result": "PASS at p50; p95 clips the budget \u2014 see docs/SPEC.md 9.1"
+    },
+    "tts_ms": {
+      "p50": 236.6,
+      "p95": 262.3,
+      "budget": 200,
+      "result": "FAIL"
+    },
+    "stall_ms": {
+      "p50": 245.5,
+      "p95": 291.1,
+      "budget": 400,
+      "result": "PASS"
+    },
+    "first_sentence_ms": {
+      "p50": 245.5,
+      "p95": 291.2,
+      "budget": 800,
+      "result": "PASS"
+    },
+    "barge_ms": {
+      "p50": 0.9,
+      "p95": 1.5,
+      "budget": 100,
+      "result": "PASS"
+    },
+    "turn_worst_ms": {
+      "warm": 291.2,
+      "cold_first_turn": 1455.3,
+      "budget": 1200,
+      "result": "PASS warm / FAIL on the first turn of a fresh process"
+    },
+    "history": {
+      "date": "2026-09-12",
+      "providers": "STT+chat-LLM=Groq (whisper-large-v3-turbo / openai/gpt-oss-20b), TTS=Kokoro (local SpacePilot daemon)",
+      "machine": "M-series MacBook",
+      "method": "direct provider calls (GroqSTT.transcribe / OpenAICompatibleLLM.stream / KokoroSpacePilotTTS.synth), N=5, median of 5 (component-level only \u2014 see docs/SPEC.md 9.1 for why the live WS turn could not be measured this pass)",
+      "stt_ms": {
+        "p50": 298.5,
+        "p95": 316.4,
+        "budget": 150,
+        "result": "FAIL"
+      },
+      "llm_first_sentence_ms": {
+        "p50": 536.0,
+        "p95": 700.4,
+        "budget": 800,
+        "result": "PASS"
+      },
+      "tts_ms": {
+        "p50": 1285.9,
+        "p95": 1632.7,
+        "budget": 200,
+        "result": "FAIL"
+      },
+      "stall_ms": "NOT MEASURED \u2014 see docs/SPEC.md 9.1",
+      "barge_ms": "NOT MEASURED (live) \u2014 see docs/SPEC.md 9.1",
+      "turn_p50_ms": "NOT MEASURED (live) \u2014 see docs/SPEC.md 9.1",
+      "_note": "SUPERSEDED by the 2026-09-12b row. Kept as history: this is what the stack measured before the reasoning-token fix (llm), the in-process Kokoro tyre (tts), the tuned local Whisper (stt) and the real-audio fixture (which is why every turn-level metric here reads NOT MEASURED)."
+    }
   }
 }

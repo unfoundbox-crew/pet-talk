@@ -215,57 +215,151 @@ Source of truth: `qa/budgets.json`.
 | `llm_ms` | 800 |
 | `tts_ms` | 200 |
 
-### 9.1 MEASURED (2026-09-12, stub providers only — not a real-engine measurement)
+### 9.1 MEASURED (2026-09-12, real providers, real speech, live WS loop)
 
-`qa/latency.py` against a running server with `STT_PROVIDER=stub LLM_PROVIDER=stub TTS_PROVIDER=stub`:
+**A real end-to-end turn is measured for the first time.** Yesterday's pass
+recorded component numbers and NOT MEASURED for everything turn-level. Two
+things blocked it, and both were bugs in our own tree rather than facts about
+the providers:
 
-| Metric | p50 (ms) | p95 (ms) |
+1. **`qa/latency.py` sent 320 samples of silence.** Fine against stub STT,
+   which answers regardless; against a real tyre it transcribes to nothing and
+   the turn ends in `empty_transcript`, so every turn-level number it printed
+   was the error path. Fixed: both live-turn scripts now send real speech from
+   `qa/fixtures/weather_turn.wav` through one resolver (`qa/fixture_audio.py`),
+   with the RIFF header stripped and the true `sample_rate` sent.
+2. **"`LLM_PROVIDER=groq`'s default model cannot stream text" was the wrong
+   diagnosis.** `groq/compound-mini` *can* emit `content`; it was never given
+   room to. A reasoning model spends its token ceiling on `reasoning` deltas
+   first, and at the ordinary 120-token ceiling it finishes with
+   `finish_reason: "length"` having spoken nothing — reproduced on
+   `openai/gpt-oss-20b` and `qwen/qwen3.6-27b` too. Fixed in
+   `_build_payload` (ceiling floored at 400 for the reasoning family,
+   `reasoning_effort: "low"` for gpt-oss), and `_sentence_stream` now raises
+   `llm_no_content` instead of returning an empty generator, so a provider
+   that cannot speak can never again look healthy.
+
+Chosen defaults, all three swapped on measurement:
+
+| tyre | default | why |
 |---|---|---|
-| `stall_ms` | 18.1 | 20.2 |
-| `first_sentence_ms` | 18.1 | 20.3 |
-| `barge_ms` | 0.5 | — |
+| STT | `faster-whisper` (`tiny.en`, tuned) | the only tyre inside 150ms from this machine |
+| LLM | `litellm` @ `gpt-oss-120b-groq` | the house proxy route, and inside 800ms |
+| TTS | `kokoro-local` (in-process Kokoro-82M) | 5x the daemon, and the closest to 200ms |
 
-Hermetic slow-TTS barge test (`qa/test_turn_lifecycle.py`): barge kill at **0.8ms**, `dropped=4`, queue high-water **3**.
+**Turn-level** — live WS through the real FastAPI loop, `APP_PORT=8089 python3
+qa/latency.py` run three times at N=5 turns, median of the three runs:
 
-**Real-engine numbers, component-level (real providers: Kokoro TTS local, Groq STT+LLM, 2026-09-12, M-series MacBook):**
+| Metric | p50 (ms) | p95 (ms) | Budget (ms) | Result |
+|---|---|---|---|---|
+| `stall_ms` | 245.5 | 291.1 | 400 | **PASS** |
+| `first_sentence_ms` | 245.5 | 291.2 | 800 (`turn_p50_ms`) | **PASS** |
+| `barge_ms` | 0.9 | 1.5 | 100 | **PASS** |
 
-Attempting the live-WS measurement (`qa/latency.py`, `qa/live_ws_turn.py`) against a real-provider server (`STT_PROVIDER=groq TTS_PROVIDER=kokoro LLM_PROVIDER=groq`) surfaced two real bugs before it surfaced a real number:
-
-1. **Fixed this pass.** `GroqSTT.transcribe()` (and every other `urllib.request`-based provider call) sent no `User-Agent` header. Cloudflare's WAF in front of `api.groq.com/openai/v1/audio/transcriptions` blocks Python's default `Python-urllib/3.x` UA with a 403 ("error code: 1010") — identical request succeeds with any ordinary UA. Fixed by adding `DEFAULT_USER_AGENT` (`server/providers/_shared.py`) to every `urllib.request.Request` in `providers/stt.py` and `providers/tts.py`.
-2. **Not fixed, recorded here.** `LLM_PROVIDER=groq`'s default model (`groq/compound-mini`) is an agentic/tool-using model whose SSE deltas carry `reasoning` and tool-execution events, not plain `content` — for an ordinary question it streamed zero `content` deltas over multiple runs. `OpenAICompatibleLLM.stream()` only reads `delta.content`, so the real worker path emits zero sentences with this provider's own default model. This is a provider-default bug, not a `qa/` bug — `LLM_PROVIDER=groq` as configured today cannot speak.
-
-Because of (2), the **live WS turn could not be driven end-to-end this pass** — `qa/live_ws_turn.py`'s `test_full_turn_worker_path` still fails (`agent.stall` never arrives) once STT succeeds, because the worker LLM call empties out. `qa/latency.py`'s three N=5 runs against the real-provider server all show `stall_ms`/`first_sentence_ms` NOT-MEASURED for the same reason (the turn errors out of the worker path before a stall or sentence frame). `barge_ms` from those runs (~0.3-0.5ms) is not a real barge measurement either — it's the ack latency of barging an already-errored turn, not a mid-speech interrupt.
-
-To still get real numbers instead of nothing, the three provider legs were measured directly (bypassing the WS/turn layer, `N=5`, median of 5): `GroqSTT.transcribe()` on the real `weather_turn_fixture.wav` ("What is the weather today?"), `OpenAICompatibleLLM.stream()` against Groq's `openai/gpt-oss-20b` (an ordinary chat model, substituted only for this measurement — not a config change — because `groq/compound-mini` cannot stream text per finding 2), and `KokoroSpacePilotTTS.synth()` on the first returned sentence:
+**Component-level** — direct provider calls, N=5, same fixture for STT, a
+12-word sentence for TTS:
 
 | Component | p50 (ms) | p95 (ms) | Budget (ms) | Result |
 |---|---|---|---|---|
-| `stt_ms` (Groq, real audio) | 298.5 | 316.4 | 150 | **FAIL** |
-| `llm_first_sentence_ms` (Groq chat model, real stream) | 536.0 | 700.4 | 800 (`llm_ms`) | PASS |
-| `tts_ms` (Kokoro, real synth) | 1285.9 | 1632.7 | 200 | **FAIL** |
-| `stall_ms` | NOT MEASURED (see above) | — | 400 | — |
-| `barge_ms` (live) | NOT MEASURED (see above) | — | 100 | — |
-| `turn_p50_ms` / `turn_worst_ms` | NOT MEASURED (see above) | — | 800 / 1200 | — |
+| `stt_ms` (faster-whisper tiny.en, local) | 143.4 | 148.4 | 150 | **PASS** |
+| `llm_ms` first content delta (proxy → gpt-oss-120b) | 512.4 | 805.4 | 800 | **PASS** at p50 |
+| `tts_ms` (kokoro-local, 12-word sentence) | 236.6 | 262.3 | 200 | **FAIL** |
+| `turn_worst_ms` (warm) | — | 291.2 | 1200 | **PASS** |
+| `turn_worst_ms` (first turn of a fresh process) | — | 1455.3 | 1200 | **FAIL** |
 
-Recorded in `qa/budgets.json` under the `measured` key (excluded from the numeric budget dict both loaders read, same treatment as `_comment`).
+Recorded in `qa/budgets.json` under `measured`, with the previous pass kept
+beneath it as `measured.history`. No budget was softened; the three that do not
+hold are diagnosed below and stay at their written values.
 
-**Diagnosis for the two real FAILs:** `stt_ms` at ~300ms (2x budget) is Groq's real network round trip for a 1-2s clip over HTTPS from this machine — the 150ms budget was written against no real measurement and is optimistic for a synchronous request/response round trip to a cloud endpoint; it was never going to hold without either a faster network path or a revised budget. `tts_ms` at ~1.3s (6.4x budget) is the dominant cost in the whole turn — the Kokoro SpacePilot daemon's job-based flow (`POST /api/generate/voice` → poll `GET /api/jobs/{id}` → download) pays at least one `POLL_INTERVAL_S=0.5` poll tick plus queueing/synthesis time on every call; it is the largest component by a wide margin and the one to attack first if turn-level latency work resumes. Neither budget was softened — both stay at their written values in `qa/budgets.json`.
+**What every candidate measured.** The defaults above are the survivors, not
+the only things tried:
 
-Stub-provider numbers below remain useful for proving the harness (queue, frame plumbing, cancellation) is honest — not for real-engine latency:
+| STT (same 1.44s clip) | p50 (ms) | | TTS (12-word sentence) | p50 (ms) |
+|---|---|---|---|---|
+| faster-whisper `tiny.en` tuned | **143.4** | | **kokoro-local** (in-process) | **236.6** |
+| faster-whisper `tiny.en` before tuning | 193.1 | | kokoro daemon, adaptive poll | 1379.3 |
+| groq `whisper-large-v3-turbo` | 306.1 | | kokoro daemon, flat 0.5s poll | 1553.7 |
+| groq `whisper-large-v3` | 331.1 | | deepgram `aura-2-thalia-en` | 1939.4 |
+| faster-whisper `base.en` | 332.6 | | deepgram `aura-asteria-en` | 1640.0 |
+| deepgram `nova-3` | 1432.3 | | | |
+| deepgram `nova-2` | 1436.3 | | | |
+| `mlx-whisper` | not installed | | | |
 
-### 9.1 MEASURED (2026-09-12, stub providers only — not a real-engine measurement)
-
-`qa/latency.py` against a running server with `STT_PROVIDER=stub LLM_PROVIDER=stub TTS_PROVIDER=stub`:
-
-| Metric | p50 (ms) | p95 (ms) |
+| LLM (first content delta) | p50 (ms) | note |
 |---|---|---|
-| `stall_ms` | 18.1 | 20.2 |
-| `first_sentence_ms` | 18.1 | 20.3 |
-| `barge_ms` | 0.5 | — |
+| groq `openai/gpt-oss-20b` | 499.0 | fastest overall; the new `groq` default |
+| **litellm `gpt-oss-120b-groq`** | **512.4** | the new default — house proxy route |
+| groq `openai/gpt-oss-120b` | 554.0 | |
+| litellm `claude-sonnet-4-6` | 1180.3 | over budget |
+| litellm `gemini-3.7-flash` | — | HTTP 429, the proxy's Gemini key is out of quota |
+| litellm `claude-sonnet-5` / `claude-fable-5` | — | HTTP 500, Bedrock: model not enabled |
+| litellm `gpt-oss-120b-cerebras` | — | HTTP 402, payment required |
+| groq `qwen/qwen3.6-27b`, `nim-gpt-oss-20b` | — | reasoning deltas only, at any ceiling |
 
-Hermetic slow-TTS barge test (`qa/test_turn_lifecycle.py`): barge kill at **0.8ms**, `dropped=4`, queue high-water **3**.
+`gemini-3.7-flash` was the intended default and is rejected on evidence, not
+taste.
 
-These numbers exercise the queue, the frame plumbing, and the cancellation path — not a real STT/LLM/TTS backend's actual latency. Treat every ms above as "the harness works," not "the product is fast." Do not quote these as user-facing latency.
+**The three FAILs, diagnosed. None of the budgets moved.**
+
+* **`tts_ms` 236.6ms against 200ms.** Down from 1285.9ms, and the remaining gap
+  is structural rather than a tuning miss. Kokoro's real-time factor here is
+  ~0.06, so a 12-word sentence (4.05s of audio) costs ~240ms to synthesise in
+  full, and the `agent.sentence`/`audio_url` contract is one finished WAV per
+  sentence. Every sentence past about nine words is therefore over budget by
+  construction. Meeting 200ms on the 20-word ceiling (`MAX_SENTENCE_WORDS`)
+  needs chunked synthesis that streams audio as it is produced — a change to
+  the wire contract, not to a provider. Worth noting what the budget is *for*:
+  the first thing a person hears is the persona's stall phrase, which is 5
+  words (119ms p50) and is served from the RAM stall cache at zero synth cost
+  on every turn after the first. That is why `first_sentence_ms` passes at
+  245ms while `tts_ms` fails.
+* **`turn_worst_ms` 1455.3ms on the first turn of a fresh process.** That is
+  one cold stall-cache miss: the first turn synthesises its stall phrase, every
+  later turn reads it from RAM. Warm worst is 291.2ms. A pre-warm of the
+  persona's stall phrases at startup would remove it; `kokoro-local` already
+  warms the model this way, the stall cache does not yet.
+* **`llm_ms` p95 805.4ms against 800ms.** p50 is 512.4ms. The tail is the
+  proxy hop plus Groq queueing; going direct to Groq (`LLM_PROVIDER=groq`,
+  499ms p50 / 513.7ms p95) clears it with room, at the cost of leaving the
+  house route. Recorded rather than resolved — the proxy stays the default.
+
+**`qa/live_ws_turn.py`, five runs of the same single-shot stall gate:** 183.4,
+199.2, 213.7, 319.5, 401.3ms. Four inside the 400ms budget, one 1.3ms over. The
+gate is N=1, so it will flake at roughly that rate until it takes a median of a
+few turns like `qa/latency.py` does. `barge_ms` was 0.9-1.3ms on every run,
+`dropped` reported as a number, and the `audio_url` of the first worker
+sentence returned 200 `audio/wav`.
+
+**`qa/test_real_engine_e2e.py` (PET_TALK_REAL_ENGINE=1): 3/3 pass.** Receipts:
+`kokoro-local` synthesised 278,444 bytes of valid RIFF; `/transcribe` read that
+audio back as *"Good morning. Donna Paulson here. Executive Secretary Mode is
+fully operational."* (the real text says "Paulsen" — greedy `tiny.en` is the
+weakest setting in the family, which is the accuracy cost of the 143ms named
+plainly); and a live `/ws` turn drove the Donna persona through the proxy to
+148,844 bytes of playable audio.
+
+**How the server was started for this measurement** (the interpreter matters —
+`kokoro-local` needs `mlx-audio` and `misaki[en]`, which live in
+`~/miniconda3/envs/local-ml-py311`, not in the base env):
+
+```bash
+LITELLM_BASE_URL=http://127.0.0.1:8000/v1 PET_TALK_SILENT=1 \
+  doppler run --project unfoundbox --config dev_personal -- \
+  ~/miniconda3/envs/local-ml-py311/bin/python -m uvicorn server.app:app \
+    --host 127.0.0.1 --port 8089
+```
+
+No provider address is baked into the tree: `LITELLM_BASE_URL` names the proxy
+and the loopback literal in `providers/_shared.py` is only a last-resort
+fallback.
+
+**Stub-provider numbers, for the harness not the product.** `qa/latency.py`
+with `STT_PROVIDER=stub LLM_PROVIDER=stub TTS_PROVIDER=stub`: `stall_ms` 18.1ms
+p50, `first_sentence_ms` 18.1ms, `barge_ms` 0.5ms. Hermetic slow-TTS barge test
+(`qa/test_turn_lifecycle.py`): barge kill at 0.8ms, `dropped=4`, queue
+high-water 3. These exercise the queue, the frame plumbing and the cancellation
+path — not any backend's real latency. Treat them as "the harness is honest,"
+never as user-facing latency.
 
 ### 9.2 Acceptance gates and their proof
 
@@ -285,8 +379,13 @@ These numbers exercise the queue, the frame plumbing, and the cancellation path 
 - **`EYES_DESCRIBE_ENGINE` now fails fast by name when unset (fixed this pass, 2026-09-12).** Previously an unset pin meant `describe` fell through to `zrv`'s own default engine (`apple-vision`, which refuses `--task describe` with its own unrelated error) instead of a clean `eyes_disabled`. `EyesProvider.resolve()` now raises `eyes_disabled` with detail `describe_engine_unset:EYES_DESCRIBE_ENGINE` before touching any engine when `task == "describe"` and `describe_engine_pin` is unset — tested hermetically in `qa/test_eyes.py::TestDescribeEngineGate` (unset fails closed naming the var; set routes through; transcribe is unaffected; an explicit `task: describe` on a PDF still hits the gate since a frame's explicit task wins over the PDF default per `task_for`'s own precedence).
 - **Kokoro word timings are estimated, not measured.** `KokoroSpacePilotTTS` does not appear to report real per-word timestamps from the daemon; `word_times` for Kokoro-synthesized audio comes from `estimate_word_times()` (uniform-per-word or char-length-weighted), always carrying `estimated: true`. Any UI that highlights the currently-spoken word against Kokoro audio is highlighting a guess, not a measurement.
 - **`cli/hotkey/build.sh` does not exist yet** in this checkout, though `Makefile`'s `build-hotkey` target and this repo's build comments both reference it as owned by another lane. `make build-hotkey` will fail until that script lands.
-- **`LLM_PROVIDER=groq`'s default model cannot stream text.** `groq/compound-mini` is agentic/tool-using; its SSE deltas carry `reasoning`/tool-exec events, not `content`, for an ordinary question (verified 2026-09-12, multiple runs, zero `content` deltas). `OpenAICompatibleLLM.stream()` only reads `delta.content`, so a real turn through this provider streams zero sentences and the worker path never reaches `agent.stall`/`agent.sentence`. Needs either a different default model for the groq provider or delta handling that understands `reasoning`/tool-call events — not fixed this pass, see §9.1.
-- **Real-engine turn-level latency (`stall_ms`, live `barge_ms`, `turn_p50_ms`/`turn_worst_ms`) is still not measurable end-to-end**, blocked by the gap above (the worker LLM call empties out before a stall/sentence frame is ever sent). Component-level real numbers (STT, LLM-first-sentence, TTS) are in §9.1; `stt_ms` and `tts_ms` both FAIL their budgets in that measurement, `tts_ms` by 6x — Kokoro's job-poll-download flow is the biggest lever if turn-level work resumes.
+- **Fixed 2026-09-12b: the LLM could not stream text, and turn latency was unmeasurable.** Both are closed — see §9.1. The diagnosis in the previous pass ("`groq/compound-mini` cannot stream text") was wrong: reasoning models were never given enough token ceiling to reach `content`. `stall_ms`, `first_sentence_ms` and `barge_ms` are now measured live and all three PASS.
+- **`tts_ms` FAILs at 236.6ms against 200ms, and cannot pass without a wire-contract change.** Kokoro's RTF here is ~0.06 and `agent.sentence` carries one finished WAV, so any sentence past ~9 words is over budget by construction. Chunked/streaming synthesis is the fix; see §9.1 for the full diagnosis. Down from 1285.9ms this pass.
+- **The stall cache is cold on the first turn of a fresh process**, which costs one full synth (~1.2s) and is the only reason `turn_worst_ms` breaches. `KokoroLocalTTS` warms its model at startup; nothing warms the persona's stall phrases. A startup pre-synth of each active persona's stall set would close it.
+- **`qa/live_ws_turn.py`'s stall gate is N=1 and flakes at about 1 run in 5** (measured: 183.4/199.2/213.7/319.5/401.3ms against a 400ms budget). It should take a median of a few turns the way `qa/latency.py` does; until then a single red run is not proof of a regression.
+- **`kokoro-local` needs an interpreter that has `mlx-audio` and `misaki[en]`.** On this machine that is `~/miniconda3/envs/local-ml-py311`, not the base env — a server booted with the base `python3` gets a named `tts_mlx_audio_not_installed` from the first synth, not a silent fallback. Apple Silicon only.
+- **The default STT is the least accurate setting in its family.** `tiny.en` with `beam_size=1` is what buys 143ms; it heard "Donna Paulsen" as "Donna Paulson" in the real-engine receipt. `WHISPER_MODEL=base.en` trades 190ms more for better words, without a code change.
+- **`mlx-whisper` is not installed**, so `STT_PROVIDER=mlx` is untested here; it also reloads the model on every call, which would need the same load-once treatment `KokoroLocalTTS` got before it could be measured fairly. `whisperkit-cli` is not on PATH either.
 
 ## 11. A note on `cli/hotkey/*.swift`
 
