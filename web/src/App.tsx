@@ -22,6 +22,7 @@ import { ActiveProviders, RuntimeSettings, SettingsModal } from "./components/Se
 import { PromptComposer } from "./components/PromptComposer";
 import { EyesAttachDock, EyesBlock, EyesEntry, ScreenGroundingLine } from "./components/EyesAttach";
 import { ReceiptChip, ReceiptFrame, asReceiptFrame } from "./components/ReceiptChip";
+import { ChunkPlayer } from "./audio/ChunkPlayer";
 
 type Strings = typeof en;
 const STRINGS: Record<"en" | "hi", Strings> = { en, hi };
@@ -173,6 +174,19 @@ export default function App() {
   const queueRef = useRef<QueuedSentence[]>([]);
   const playingRef = useRef(false);
   const prefetchRef = useRef<HTMLAudioElement | null>(null);
+  // Chunked TTS playback (SPEC 4.2.1). Lazily created — no AudioContext is
+  // made until the first agent.chunk actually arrives. This is a separate
+  // context from the mic capture one: the mic context is 16kHz and torn down
+  // every talk session, wrong lifetime and wrong rate for TTS playback.
+  const chunkPlayerRef = useRef<ChunkPlayer | null>(null);
+  const getChunkPlayer = useCallback((): ChunkPlayer => {
+    if (!chunkPlayerRef.current) {
+      chunkPlayerRef.current = new ChunkPlayer({
+        onError: (reason, detail) => console.warn(`[pet-talk] chunk player: ${reason} ${detail}`),
+      });
+    }
+    return chunkPlayerRef.current;
+  }, []);
   const micRef = useRef<{
     stream: MediaStream;
     ctx: AudioContext;
@@ -338,6 +352,7 @@ export default function App() {
       el.removeAttribute("src");
       el.load();
     }
+    chunkPlayerRef.current?.stop();
   }, []);
 
   const handleBarge = useCallback(() => {
@@ -521,6 +536,9 @@ export default function App() {
           break;
         case "state.listening":
           setState("listening");
+          // Entering listening (fresh turn or post-barge) stops any chunked
+          // playback still in flight — the same law as killPlayback below.
+          chunkPlayerRef.current?.stop();
           break;
         case "state.thinking":
           setState("thinking");
@@ -562,7 +580,11 @@ export default function App() {
             ttsMs: 180,
             provenance: "flown",
           }));
-          if (!mutedRef.current) {
+          // Chunked sentences already played via agent.chunk (ChunkPlayer) as
+          // they arrived — enqueuing audio_url here too would play the whole
+          // sentence a second time. The transcript line above still lands
+          // either way; only the playback enqueue is skipped.
+          if (!mutedRef.current && !frame.chunked) {
             queueRef.current.push({
               index: frame.index ?? frame.seq ?? 0,
               text: frame.text,
@@ -572,6 +594,19 @@ export default function App() {
             setQueueLength(queueRef.current.length);
             pumpQueue();
           }
+          break;
+        case "agent.chunk":
+          if (!mutedRef.current) {
+            void getChunkPlayer().enqueue({
+              seq: frame.seq,
+              chunk_no: frame.chunk_no,
+              audio_b64: frame.audio_b64,
+              final: frame.final,
+            });
+          }
+          break;
+        case "handover.received":
+          pushLine("agent", `Handover received from ${frame.source}.`);
           break;
         case "agent.done":
           setMetrics((m) => ({
@@ -624,7 +659,7 @@ export default function App() {
       offAuth();
       socket.close();
     };
-  }, [pushLine, pumpQueue, patchEyes, attachReceipt]);
+  }, [pushLine, pumpQueue, patchEyes, attachReceipt, getChunkPlayer]);
 
   // --- Fetch Voices, Personas, and Memory Ledger on load ---
   useEffect(() => {

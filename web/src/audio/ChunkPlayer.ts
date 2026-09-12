@@ -37,6 +37,11 @@ export interface ChunkPlayerOptions {
   onError?: (reason: string, detail: string) => void;
 }
 
+/** Client-side mirror of the server's chunk cap (SPEC 4.2.1). A chunk whose
+ * decoded payload exceeds this is dropped rather than played — the server
+ * refuses over-cap chunks on its side; this is the client half of that. */
+export const MAX_CHUNK_BYTES = 512 * 1024;
+
 /** base64 -> ArrayBuffer, without blowing the call stack on a long chunk. */
 function base64ToArrayBuffer(b64: string): ArrayBuffer {
   const bin = atob(b64);
@@ -119,9 +124,21 @@ export class ChunkPlayer {
       await ctx.resume().catch(() => undefined);
     }
 
+    const raw = base64ToArrayBuffer(frame.audio_b64);
+    if (raw.byteLength > MAX_CHUNK_BYTES) {
+      console.warn(
+        `[pet-talk] tts_chunk_too_large: seq=${frame.seq} chunk_no=${frame.chunk_no} bytes=${raw.byteLength} cap=${MAX_CHUNK_BYTES}`,
+      );
+      this.onError?.(
+        "tts_chunk_too_large",
+        `seq=${frame.seq} chunk_no=${frame.chunk_no} bytes=${raw.byteLength}`,
+      );
+      return;
+    }
+
     let buffer: AudioBuffer;
     try {
-      buffer = await ctx.decodeAudioData(base64ToArrayBuffer(frame.audio_b64));
+      buffer = await ctx.decodeAudioData(raw);
     } catch (e) {
       this.onError?.(
         "chunk_decode_failed",

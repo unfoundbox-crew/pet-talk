@@ -158,13 +158,20 @@ export type ServerFrame =
       url?: string;
       final: boolean;
     }
-  | { type: "agent.done"; turn_id: string; path?: string; sentences?: number }
+  | { type: "agent.done"; turn_id: string; path?: string; sentences?: number; dropped?: number }
   | { type: "agent.error"; turn_id: string; reason: string; detail?: string; ref?: string }
   | { type: "state.idle"; turn_id: string }
   | { type: "state.listening"; turn_id: string }
   | { type: "state.thinking"; turn_id: string; screen?: ScreenGrounding }
   | { type: "state.speaking"; turn_id: string }
   | { type: "transcript.user"; turn_id: string; text: string }
+  | {
+      // Acks a `user.handover` (Option+Shift+Tab); followed by state.listening
+      // (SPEC 4.2). `source` names who/what handed the turn over.
+      type: "handover.received";
+      turn_id: string;
+      source: string;
+    }
   | {
       type: "eyes.received";
       turn_id: string;
