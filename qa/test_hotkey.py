@@ -176,6 +176,63 @@ class TestDumpStateChords(unittest.TestCase):
         self.assertEqual(ev.get("transport"), "pet-talk-cli handover")
 
 
+class TestAXForceCastsAreConditional(unittest.TestCase):
+    """FINDING 9: `ax` must never crash the daemon when the AX API hands back
+    something that isn't an AXUIElement — `focusedRef as! AXUIElement` and
+    `windowRef as! AXUIElement` must be conditional (`as?`) casts that emit
+    `{"ok":false,"reason":"ax_unavailable"}` on failure instead of trapping.
+
+    A real subprocess run of `ax` is the primary check: on a box without AX
+    trust granted to this process (true in CI and in this worktree — verified:
+    it returns ax_permission_denied before ever reaching the casts), it proves
+    the function still runs to completion and prints valid JSON with no crash.
+    Forcing the AX API to hand back a non-AXUIElement type requires driving a
+    real front app with AX trust granted, which isn't available headless —
+    so the cast sites themselves are also checked directly in source, which the
+    finding allows when a runtime trigger for that exact branch is impossible."""
+
+    @classmethod
+    def setUpClass(cls):
+        _skip_if_no_bin()
+        with open(os.path.join(ROOT, "cli", "hotkey", "main.swift"), "r", encoding="utf-8") as f:
+            cls.src = f.read()
+
+    def test_ax_subcommand_runs_to_completion_and_emits_valid_json(self):
+        res = subprocess.run([BIN_PATH, "ax"], capture_output=True, text=True,
+                              timeout=15, env=HEADLESS_ENV)
+        self.assertEqual(res.returncode, 0, f"`ax` must exit 0 even on failure "
+                          f"(fails closed with a named reason):\n{res.stderr}\n{res.stdout}")
+        import json
+        lines = [ln for ln in res.stdout.splitlines() if ln.strip()]
+        self.assertEqual(len(lines), 1, "`ax` must print exactly one JSON line")
+        payload = json.loads(lines[0])
+        self.assertIn("ok", payload)
+        if payload["ok"] is False:
+            self.assertIn("reason", payload, "a failed `ax` call must name its reason")
+
+    def test_no_bare_force_cast_of_focused_or_window_ref(self):
+        self.assertNotIn("focusedRef as! AXUIElement", self.src,
+                          "focusedRef must not be force-cast")
+        self.assertNotIn("windowRef as! AXUIElement", self.src,
+                          "windowRef must not be force-cast")
+
+    def test_focused_element_cast_is_conditional_and_fails_closed(self):
+        idx = self.src.find("kAXFocusedUIElementAttribute")
+        block = self.src[idx:idx + 400]
+        self.assertIn("asAXUIElement(focusedRef)", block,
+                      "the focused-element cast must go through the CFTypeID-checked helper")
+        self.assertIn('\\"reason\\":\\"ax_unavailable\\"', block,
+                      "a failed focused-element cast must emit the ax_unavailable reason")
+
+    def test_focused_window_cast_is_conditional_and_fails_closed(self):
+        idx = self.src.find("kAXFocusedWindowAttribute")
+        block = self.src[idx:idx + 400]
+        self.assertIn("asAXUIElement(windowRef)", block,
+                      "the focused-window cast must go through the CFTypeID-checked helper")
+        self.assertIn('\\"reason\\":\\"ax_unavailable\\"', block,
+                      "a failed focused-window cast must emit the ax_unavailable reason")
+
+
 class TestRegistrationVerifiesBothChords(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

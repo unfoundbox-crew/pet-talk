@@ -1252,7 +1252,7 @@ public class HUDController {
 
             if let audio = self.onErrorAudio {
                 audio()
-            } else {
+            } else if !EarconEngine.isSilentModeEnv && !HUDController.isHeadless {
                 NSSound(named: "Basso")?.play()
             }
 

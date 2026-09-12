@@ -1365,19 +1365,34 @@ func doAX(args: [String]) -> Int32 {
         return result == .success ? value : nil
     }
 
+    /// `as? AXUIElement` always "succeeds" (CFTypeRef toll-free bridging), so the
+    /// only real conditional cast is a CFTypeID check — this is what replaces the
+    /// force cast that used to crash the daemon when the AX API handed back some
+    /// other CF type.
+    func asAXUIElement(_ ref: CFTypeRef?) -> AXUIElement? {
+        guard let ref = ref, CFGetTypeID(ref) == AXUIElementGetTypeID() else { return nil }
+        return (ref as! AXUIElement)
+    }
+
     var windowTitle: String?
     var selection: String?
     var path: String?
 
     if let focusedRef = copyAttr(axApp, kAXFocusedUIElementAttribute as String) {
-        let focused = focusedRef as! AXUIElement
+        guard let focused = asAXUIElement(focusedRef) else {
+            print("{\"ok\":false,\"reason\":\"ax_unavailable\"}")
+            return 0
+        }
         selection = copyAttr(focused, kAXSelectedTextAttribute as String) as? String
         path = copyAttr(focused, kAXDocumentAttribute as String) as? String
         windowTitle = copyAttr(focused, kAXTitleAttribute as String) as? String
     }
 
     if windowTitle == nil, let windowRef = copyAttr(axApp, kAXFocusedWindowAttribute as String) {
-        let window = windowRef as! AXUIElement
+        guard let window = asAXUIElement(windowRef) else {
+            print("{\"ok\":false,\"reason\":\"ax_unavailable\"}")
+            return 0
+        }
         windowTitle = copyAttr(window, kAXTitleAttribute as String) as? String
         if path == nil {
             path = copyAttr(window, kAXDocumentAttribute as String) as? String
