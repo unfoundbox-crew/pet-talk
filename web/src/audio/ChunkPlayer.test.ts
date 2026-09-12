@@ -139,4 +139,47 @@ describe("ChunkPlayer", () => {
     expect(player.playing).toBe(false);
     expect(ctx.sources.every((s) => s.stopped)).toBe(true);
   });
+
+  describe("generation guards a decode racing stop() (Finding 10, Problem B)", () => {
+    it("never schedules a chunk whose decode resolves after stop()", async () => {
+      let resolveDecode: (v: { duration: number }) => void = () => undefined;
+      let decodeStarted = false;
+      class DeferredAudioContext extends FakeAudioContext {
+        decodeAudioData(buf: ArrayBuffer): Promise<{ duration: number }> {
+          const text = new TextDecoder().decode(new Uint8Array(buf));
+          this.decodedOrder.push(text);
+          decodeStarted = true;
+          return new Promise((resolve) => {
+            resolveDecode = resolve;
+          });
+        }
+      }
+      const deferredCtx = new DeferredAudioContext();
+      const p = new ChunkPlayer({ context: deferredCtx as unknown as AudioContext });
+
+      const enqueued = p.enqueue(chunkFrame("late-chunk", 0, true));
+      // Let the enqueue -> schedule chain actually reach decodeAudioData
+      // (it runs on a later microtask, not synchronously with enqueue())
+      // before stop() lands — otherwise stop() would race a schedule() call
+      // that has not started yet, which isn't the race this test is for.
+      while (!decodeStarted) {
+        await Promise.resolve();
+      }
+      p.stop();
+      resolveDecode({ duration: 0.01 });
+      await enqueued;
+
+      expect(deferredCtx.sources.some((s) => s.started)).toBe(false);
+      expect(p.playing).toBe(false);
+    });
+
+    it("still plays a chunk enqueued after stop() — the next generation", async () => {
+      await player.enqueue(chunkFrame("chunk-0", 0, false));
+      player.stop();
+      await player.enqueue(chunkFrame("chunk-1", 0, true));
+
+      expect(ctx.sources.some((s) => s.started)).toBe(true);
+      expect(player.playing).toBe(true);
+    });
+  });
 });

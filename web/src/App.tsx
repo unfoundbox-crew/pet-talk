@@ -34,6 +34,7 @@ import {
   float32ToBase64Pcm16,
   newAttachRef,
   newTurnId,
+  sendBargeFrame,
   socket,
   studioTokenHeader,
 } from "./ws";
@@ -373,23 +374,37 @@ export default function App() {
   /**
    * Skip a sentence. The head moves; the buffer does not shrink.
    *
-   * The wire protocol has no `resume_from` on `barge` (see ws.ts ClientFrame),
-   * so a skip is entirely local: stop what is sounding — including chunked
-   * audio, which the chunk player can only stop wholesale — and play the
-   * sentence the head landed on from its whole-sentence `audio_url`. The
-   * server keeps streaming; nothing is cancelled and nothing is lost.
+   * Locally: stop what is sounding — including chunked audio, which the
+   * chunk player can only stop wholesale — and play the sentence the head
+   * landed on from its whole-sentence `audio_url`.
+   *
+   * On the wire: also tell the server to stop synthesizing what was just
+   * skipped past (Finding 10, Problem A) — otherwise it keeps burning TTS
+   * budget on sentences nobody will hear. The barge protocol has no
+   * `resume_from` support today (verified by reading server/ws.py's
+   * `_on_barge`, which reads only `turn_id`, and server/speak_queue.py,
+   * whose `SpeakQueue.resume_from` exists but is not wired to the barge
+   * path — server/ws.py and server/speak_queue.py are read-only from this
+   * lane), so this sends a plain `barge` and mints a fresh turn id exactly
+   * as `handleBarge` does. Unlike `handleBarge`, the local buffer is left
+   * alone: skipping never drops a sentence (readAhead.ts).
    */
   const skip = useCallback(
     (direction: 1 | -1) => {
-      setBuffer((prev) => {
-        const next = direction === 1 ? skipForward(prev) : skipBack(prev);
-        if (next === prev) return prev;
+      const prev = bufferRef.current;
+      const next = direction === 1 ? skipForward(prev) : skipBack(prev);
+      if (next === prev) return; // nothing moved — no sentence to skip past
+      setBuffer(() => {
         chunkPlayerRef.current?.stop();
         playHead(next);
         return next;
       });
+      const turnId = turnRef.current;
+      sendBargeFrame(socket, turnId);
+      logFrame("out", "barge", { type: "barge", turn_id: turnId, reason: "skip" });
+      turnRef.current = newTurnId();
     },
-    [playHead],
+    [playHead, logFrame],
   );
 
   const handleBarge = useCallback(() => {

@@ -22,6 +22,8 @@ interface Scheduled {
   source: AudioBufferSourceNode;
   startAt: number;
   endAt: number;
+  /** The player's generation this chunk was scheduled under (see `stop()`). */
+  generation: number;
 }
 
 export interface ChunkPlayerOptions {
@@ -62,7 +64,18 @@ export class ChunkPlayer {
   private live: Scheduled[] = [];
   /** Serializes decode+schedule so two chunks cannot both claim the cursor. */
   private tail: Promise<void> = Promise.resolve();
-  private stopped = false;
+  /**
+   * Bumped by every `stop()`. Each enqueue captures the generation it was
+   * enqueued under; if `stop()` has bumped it again by the time an `await`
+   * inside `schedule()` resolves, that chunk is stale and is discarded
+   * instead of being scheduled. This replaces a `stopped` boolean that used
+   * to flip back to `false` synchronously at the end of `stop()` — since
+   * `stop()` never awaits anything, that flip happened before a
+   * still-in-flight `decodeAudioData()` could ever see it, so a chunk whose
+   * decode resolved after `stop()` was scheduled and audibly spoke anyway
+   * (Finding 10, Problem B).
+   */
+  private generation = 0;
   private gain: GainNode | null = null;
 
   constructor(opts: ChunkPlayerOptions = {}) {
@@ -103,26 +116,34 @@ export class ChunkPlayer {
     audio_b64: string;
     final: boolean;
   }): Promise<void> {
-    const run = this.tail.then(() => this.schedule(frame));
+    // Captured now, not read fresh inside `schedule()` — this is exactly the
+    // generation `stop()` must bump PAST for this chunk to still count as
+    // current by the time any `await` below resolves.
+    const generation = this.generation;
+    const run = this.tail.then(() => this.schedule(frame, generation));
     // Swallow here so one bad chunk cannot poison every later chunk's chain;
     // `schedule` has already reported the named reason.
     this.tail = run.catch(() => undefined);
     return run;
   }
 
-  private async schedule(frame: {
-    seq: number;
-    chunk_no: number;
-    audio_b64: string;
-    final: boolean;
-  }): Promise<void> {
-    if (this.stopped) return;
+  private async schedule(
+    frame: {
+      seq: number;
+      chunk_no: number;
+      audio_b64: string;
+      final: boolean;
+    },
+    generation: number,
+  ): Promise<void> {
+    if (generation !== this.generation) return;
     const ctx = this.context();
     if (ctx.state === "suspended") {
       // Autoplay policy: a context made before a user gesture starts suspended
       // and every scheduled source would play into the void.
       await ctx.resume().catch(() => undefined);
     }
+    if (generation !== this.generation) return;
 
     if (!frame.audio_b64) {
       // The server's end-of-stream marker for a backend that never flagged its
@@ -153,7 +174,10 @@ export class ChunkPlayer {
       );
       return;
     }
-    if (this.stopped) return;
+    // The race this whole mechanism exists for: stop() landed while this
+    // decode was in flight. Discard rather than schedule — the caller has
+    // already moved on (a barge, a skip).
+    if (generation !== this.generation) return;
 
     if (!this.gain) {
       this.gain = ctx.createGain();
@@ -175,11 +199,12 @@ export class ChunkPlayer {
       source,
       startAt,
       endAt,
+      generation,
     };
     this.live.push(entry);
     source.onended = () => {
       this.live = this.live.filter((s) => s !== entry);
-      if (this.live.length === 0 && !this.stopped) this.onDrained?.();
+      if (this.live.length === 0 && entry.generation === this.generation) this.onDrained?.();
     };
     source.start(startAt);
   }
@@ -189,7 +214,10 @@ export class ChunkPlayer {
    * playing, and safe to call twice. The player is reusable afterwards.
    */
   stop(): void {
-    this.stopped = true;
+    // Bump first: anything still in flight (a pending decode, a pending
+    // ctx.resume()) checks this against the generation it captured at
+    // enqueue and discards itself rather than scheduling late.
+    this.generation += 1;
     for (const s of this.live) {
       try {
         s.source.onended = null;
@@ -201,7 +229,6 @@ export class ChunkPlayer {
     this.live = [];
     this.cursor = 0;
     this.tail = Promise.resolve();
-    this.stopped = false;
   }
 
   /** Release the AudioContext, if this player made it. */
