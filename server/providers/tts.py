@@ -29,7 +29,67 @@ from ._shared import (
     logger,
     pcm_duration_ms,
     redacted_repr,
+    shift_word_times,
 )
+
+#: Words per synthesis chunk. Kokoro's real-time factor on this machine is
+#: ~0.06, so a chunk of N words costs roughly N * 20ms to synthesize. Six
+#: words is the largest window that still leaves headroom under the 200ms
+#: ``tts_ms`` budget for the FIRST chunk, which is the only one a listener
+#: waits on. Override with ``PET_TALK_TTS_CHUNK_WORDS``.
+DEFAULT_CHUNK_MAX_WORDS = 6
+
+#: Clause boundaries, strongest first. A chunk break at a comma or a
+#: conjunction is one a listener does not hear as a seam; a break mid-phrase
+#: is. The word-count ceiling is the fallback when a clause has no boundary.
+_CLAUSE_PUNCT = (",", ";", ":", "—", "–")
+_CLAUSE_WORDS = frozenset(
+    {"and", "but", "so", "because", "or", "then", "while", "which", "though", "if"}
+)
+
+
+def chunk_max_words() -> int:
+    raw = os.environ.get("PET_TALK_TTS_CHUNK_WORDS", str(DEFAULT_CHUNK_MAX_WORDS))
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        logger.warning("swallowed reason=bad_chunk_words_env value=%r", raw)
+        return DEFAULT_CHUNK_MAX_WORDS
+
+
+def chunk_clauses(text: str, max_words: Optional[int] = None) -> list:
+    """Split one sentence into speakable chunks, losing no word.
+
+    Breaks after clause punctuation or a coordinating conjunction, and
+    otherwise every ``max_words`` words. ``" ".join(chunk_clauses(t)).split()
+    == t.split()`` holds by construction — the splitter only ever inserts
+    boundaries between whitespace-separated tokens, so a chunked sentence and
+    a whole one speak the same words in the same order.
+    """
+    cap = max_words if max_words is not None else chunk_max_words()
+    words = text.split()
+    if not words:
+        return []
+    chunks: list = []
+    current: list = []
+    for i, word in enumerate(words):
+        current.append(word)
+        last = i == len(words) - 1
+        if last:
+            break
+        bare = word.rstrip("\"')]}").lower()
+        ends_clause = any(bare.endswith(p) for p in _CLAUSE_PUNCT)
+        next_is_conj = words[i + 1].strip("\"'([{").lower() in _CLAUSE_WORDS
+        if len(current) >= cap or (len(current) >= 2 and (ends_clause or next_is_conj)):
+            chunks.append(" ".join(current))
+            current = []
+    if current:
+        # A one-word tail is a click, not a clause: fold it back.
+        if chunks and len(current) == 1 and len(chunks[-1].split()) < cap:
+            chunks[-1] = chunks[-1] + " " + current[0]
+        else:
+            chunks.append(" ".join(current))
+    return chunks
 
 
 def _sine_wav_bytes(
@@ -59,6 +119,23 @@ class TTSProvider(abc.ABC):
     def synth(self, text: str, voice: str = "af_heart", speed: float = 1.0) -> tuple[bytes, list]:
         """Text -> (wav_bytes, word_times). Raises ProviderError on failure."""
         raise NotImplementedError
+
+    # ``synth_chunks`` is deliberately NOT declared here. A backend that can
+    # stream defines it; ``speech.py`` probes with ``getattr`` and falls back
+    # to ``synth`` naming the reason (``tts_no_chunk_support``) when it is
+    # absent. Declaring it on the ABC would force every tyre — including the
+    # cloud ones that only ever return a finished file — to carry a fake
+    # implementation, and a fake stream is worse than an honest whole WAV.
+    #
+    #     async def synth_chunks(
+    #         self, text: str, voice: str, speed: float,
+    #         cancel: threading.Event | None = None,
+    #     ) -> AsyncIterator[tuple[bytes, list, bool]]
+    #         # yields (standalone_wav_chunk, word_times_for_that_chunk, final)
+    #
+    # Each yielded chunk is a COMPLETE RIFF file so the client can play it the
+    # instant it arrives; ``_shared.concat_wavs`` re-muxes them into the
+    # whole-sentence WAV that ``audio_url`` still serves.
 
 
 class StubTTS(TTSProvider):
@@ -95,6 +172,41 @@ class StubTTS(TTSProvider):
         wav = _sine_wav_bytes()
         word_times = estimate_word_times(text, pcm_duration_ms(wav))
         return wav, word_times
+
+
+class StubChunkedTTS(StubTTS):
+    """Chunk-capable stub: one sine WAV per clause, no model, no network.
+
+    Exists so the chunked wire path is provable hermetically — the real
+    chunking tyre is :class:`KokoroLocalTTS`. Select with
+    ``TTS_PROVIDER=stub-chunked``.
+    """
+
+    def __init__(self, per_chunk_s: float = 0.0) -> None:
+        super().__init__(delay_s=0.0)
+        self.per_chunk_s = per_chunk_s
+
+    async def synth_chunks(
+        self,
+        text: str,
+        voice: str = "af_heart",
+        speed: float = 1.0,
+        cancel: Optional["threading.Event"] = None,
+    ):
+        import asyncio
+
+        if not text or not text.strip():
+            raise ProviderError("tts_empty_text", "nothing to synthesize")
+        clauses = chunk_clauses(text)
+        for i, clause in enumerate(clauses):
+            if cancel is not None and cancel.is_set():
+                raise ProviderError("tts_cancelled", "turn barged mid-chunk")
+            if self.per_chunk_s:
+                await asyncio.sleep(self.per_chunk_s)
+            wav = _sine_wav_bytes(duration_s=0.06 * len(clause.split()))
+            # Chunk-local timings; speech.py shifts them onto the sentence
+            # timeline, so a provider never has to track its own offset.
+            yield wav, estimate_word_times(clause, pcm_duration_ms(wav)), i == len(clauses) - 1
 
 
 class KokoroSpacePilotTTS(TTSProvider):
@@ -412,6 +524,42 @@ class KokoroLocalTTS(TTSProvider):
         wav = _wav_from_float_segments(segments, self.SAMPLE_RATE)
         return wav, estimate_word_times(text, pcm_duration_ms(wav))
 
+    async def synth_chunks(
+        self,
+        text: str,
+        voice: str = "af_heart",
+        speed: float = 1.0,
+        cancel: Optional["threading.Event"] = None,
+    ):
+        """Clause-at-a-time synthesis: the first chunk is audible long before
+        the sentence is finished.
+
+        Why this works at all: ``mlx_audio``'s ``model.generate`` is already a
+        generator that yields one audio segment per split of the input text,
+        and it phonemizes per segment rather than up front — so synthesizing a
+        6-word clause costs 6 words of work, not 20. The sentence is split here
+        (``chunk_clauses``) rather than by handing mlx-audio a ``split_pattern``
+        so the boundaries are ours to tune and the same splitter drives the
+        stub tyre.
+
+        Each yielded chunk is a complete WAV at the model's own sample rate, so
+        a client can play it the moment it lands, and ``concat_wavs`` re-muxes
+        them for ``audio_url``. Word times are chunk-local and estimated —
+        mlx-audio carries no per-word timestamps (docs/SPEC.md 5.2).
+        """
+        import asyncio
+
+        if not text or not text.strip():
+            raise ProviderError("tts_empty_text", "nothing to synthesize")
+        clauses = chunk_clauses(text)
+        for i, clause in enumerate(clauses):
+            if cancel is not None and cancel.is_set():
+                raise ProviderError("tts_cancelled", "turn barged mid-chunk")
+            wav, word_times = await asyncio.to_thread(self.synth, clause, voice, speed)
+            if cancel is not None and cancel.is_set():
+                raise ProviderError("tts_cancelled", "chunk discarded: turn barged")
+            yield wav, word_times, i == len(clauses) - 1
+
 
 def _wav_from_float_segments(segments: list, sample_rate: int) -> bytes:
     """Concatenate mlx-audio's float audio segments into one 16-bit WAV.
@@ -645,20 +793,82 @@ def make_tts(
     network I/O (kokoro-local's model load happens on a background thread).
     """
     which = (provider or os.environ.get("TTS_PROVIDER", "kokoro-local")).lower()
-    logger.debug("make_tts: selecting provider=%s", which)
+    # Voice selection is config, never code (AGENTS.md law 2): an explicit
+    # argument wins, then TTS_VOICE, then the provider's own default. A
+    # persona's own `voice:` still overrides per call — this only sets what the
+    # tyre falls back to when the caller passes the generic default.
+    chosen_voice = voice or os.environ.get("TTS_VOICE", "") or ""
+    logger.debug("make_tts: selecting provider=%s voice=%s", which, chosen_voice or "<default>")
     if which in ("kokoro-local", "kokoro_local", "kokoro-mlx", "mlx"):
         return KokoroLocalTTS()
     if which in ("smallest", "smallest-ai", "smallest_ai", "waves"):
         return SmallestAITTS(
             api_key=api_key or os.environ.get("SMALLEST_API_KEY"),
-            voice_id=voice or "meher",
+            voice_id=chosen_voice or "meher",
         )
     if which == "kokoro":
         return KokoroSpacePilotTTS(base_url=base_url or os.environ.get("KOKORO_BASE_URL", "http://127.0.0.1:8088"))
     if which == "elevenlabs":
-        return ElevenLabsTTS()
+        return ElevenLabsTTS(voice_id=chosen_voice) if chosen_voice else ElevenLabsTTS()
     if which == "deepgram":
-        return DeepgramTTS()
+        return DeepgramTTS(model=chosen_voice) if chosen_voice else DeepgramTTS()
+    if which in ("stub-chunked", "stub_chunked"):
+        return StubChunkedTTS()
     if which == "stub":
         return StubTTS()
+    raise ProviderError("tts_unknown_provider", f"unknown TTS provider: {which}")
+
+
+#: Voice ids each cloud tyre is known to accept, for ``/voices`` and
+#: docs/VOICES.md. Measured lists live in docs/VOICES.md — this is the
+#: selectable set, not a latency claim. kokoro-local is enumerated from the
+#: weights on disk instead of hardcoded, because the shipped voice set is a
+#: property of the checkpoint, not of this file.
+CLOUD_VOICES: dict = {
+    "deepgram": ["aura-2-thalia-en", "aura-2-andromeda-en", "aura-asteria-en", "aura-luna-en"],
+    "smallest": ["meher", "emily", "radha"],
+    "stub": ["af_heart"],
+    "stub-chunked": ["af_heart"],
+}
+
+
+def kokoro_local_voices() -> list:
+    """Voice ids the local Kokoro checkpoint actually ships, read from the
+    HuggingFace cache. Returns [] when the weights are not on disk — an empty
+    list is honest, a remembered list is not.
+    """
+    import glob
+
+    hits: set = set()
+    hub = os.path.expanduser(os.environ.get("HF_HOME", "~/.cache/huggingface") + "/hub")
+    if not os.path.isdir(hub):
+        hub = os.path.expanduser("~/.cache/huggingface/hub")
+    for pattern in ("*Kokoro*", "*kokoro*"):
+        for repo in glob.glob(os.path.join(hub, f"models--{pattern}")):
+            for path in glob.glob(
+                os.path.join(repo, "snapshots", "*", "voices", "*"), recursive=False
+            ):
+                name = os.path.basename(path)
+                stem, ext = os.path.splitext(name)
+                if ext.lower() in (".pt", ".npz", ".safetensors", ".bin", ".json"):
+                    hits.add(stem)
+    return sorted(hits)
+
+
+def provider_voices(provider: Optional[str] = None) -> list:
+    """Selectable voice ids for one TTS provider name. Fail-closed on an
+    unknown name so ``/voices?provider=`` cannot invent a tyre.
+    """
+    which = (provider or os.environ.get("TTS_PROVIDER", "kokoro-local")).lower()
+    if which in ("kokoro-local", "kokoro_local", "kokoro-mlx", "mlx", "kokoro"):
+        return kokoro_local_voices()
+    if which in ("smallest", "smallest-ai", "smallest_ai", "waves"):
+        return list(CLOUD_VOICES["smallest"])
+    if which in CLOUD_VOICES:
+        return list(CLOUD_VOICES[which])
+    if which == "elevenlabs":
+        # ElevenLabs voice ids are account-scoped; GET /v1/voices is the only
+        # truthful source and needs a key, so this returns [] rather than a
+        # guess. docs/VOICES.md names the call.
+        return []
     raise ProviderError("tts_unknown_provider", f"unknown TTS provider: {which}")

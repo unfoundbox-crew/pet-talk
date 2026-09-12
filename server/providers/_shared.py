@@ -150,6 +150,61 @@ def estimate_word_times(text: str, duration_ms: int) -> list[dict]:
     return times
 
 
+def shift_word_times(word_times: list, offset_ms: int) -> list:
+    """Return a copy of `word_times` moved `offset_ms` later.
+
+    Chunked synthesis times each clause from zero; the sentence's timeline is
+    the clauses laid end to end, so every chunk after the first needs its
+    timings shifted by the audio already emitted. Never mutates the input —
+    a chunk's own `word_times` go out on the wire unshifted.
+    """
+    out: list = []
+    for w in word_times or []:
+        entry = dict(w)
+        entry["start_ms"] = int(entry.get("start_ms", 0)) + int(offset_ms)
+        entry["end_ms"] = int(entry.get("end_ms", 0)) + int(offset_ms)
+        out.append(entry)
+    return out
+
+
+def concat_wavs(wavs: list) -> bytes:
+    """Join several standalone WAVs into one, by PCM not by bytes.
+
+    Chunked synthesis emits each chunk as a complete RIFF file so the client
+    can play it the moment it lands. Gluing those byte strings together would
+    produce a file whose header lies about its length, so the frames are
+    re-muxed here. Fails closed (`tts_chunk_format_mismatch`) rather than
+    silently producing audio at the wrong rate when two chunks disagree on
+    channels, sample width or frame rate.
+    """
+    if not wavs:
+        raise ProviderError("tts_empty_audio", "no chunks to join")
+    params: Optional[tuple] = None
+    pcm = bytearray()
+    for wav_bytes in wavs:
+        try:
+            with wave.open(io.BytesIO(wav_bytes), "rb") as w:
+                shape = (w.getnchannels(), w.getsampwidth(), w.getframerate())
+                if params is None:
+                    params = shape
+                elif shape != params:
+                    raise ProviderError(
+                        "tts_chunk_format_mismatch", f"{shape} after {params}"
+                    )
+                pcm.extend(w.readframes(w.getnframes()))
+        except (wave.Error, EOFError, OSError) as e:
+            raise ProviderError("tts_chunk_not_wav", str(e)) from e
+    assert params is not None
+    channels, width, rate = params
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(channels)
+        w.setsampwidth(width)
+        w.setframerate(rate)
+        w.writeframes(bytes(pcm))
+    return buf.getvalue()
+
+
 def encode_multipart_formdata(
     fields: dict[str, str], files: dict[str, tuple[str, bytes, str]]
 ) -> tuple[bytes, str]:

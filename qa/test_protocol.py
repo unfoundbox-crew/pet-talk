@@ -33,6 +33,7 @@ FRAME_TYPES = frozenset({
     "barge",
     "agent.stall",
     "agent.sentence",
+    "agent.chunk",
     "agent.done",
     "state.idle",
     "state.listening",
@@ -45,6 +46,9 @@ FRAME_TYPES = frozenset({
 REQUIRED_EXTRA = {
     "agent.stall": ("phrase_id", "phrase"),
     "agent.sentence": ("audio_url", "tts_url", "url"),
+    # A chunk with no audio payload is not a degraded chunk, it is a bug: the
+    # client has nothing to play. Either the inline base64 or a fetchable url.
+    "agent.chunk": ("audio_b64", "url"),
 }
 
 

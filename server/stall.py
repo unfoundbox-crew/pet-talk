@@ -15,7 +15,7 @@ from typing import NamedTuple, Optional
 
 from .audio_store import has_audio, store_audio
 from .dictation import VoiceProseFormatter
-from .logs import swallowed
+from .logs import log, swallowed
 from .persona import Persona
 from .providers import ProviderError
 from .speak_queue import SpokenSentence
@@ -84,6 +84,60 @@ def _tts_identity(tts: object) -> str:
 
 def stall_cache_key(text: str, p: Persona, tts: object) -> str:
     return f"{p.name}:{p.voice}:{p.speed}:{_tts_identity(tts)}:{text}"
+
+
+def stall_warm_enabled() -> bool:
+    """``PET_TALK_STALL_WARM=0`` skips the startup pre-synth, loudly."""
+    return os.environ.get("PET_TALK_STALL_WARM", "1") != "0"
+
+
+async def warm_stall_cache(p: Persona, tts: object) -> int:
+    """Pre-synthesize the persona's stall phrases into the LRU. Returns the
+    count actually synthesized.
+
+    Why this exists: the first turn of a fresh process paid one full stall
+    synth, and that single cold miss was the whole of the ``turn_worst_ms``
+    breach (measured 2026-09-12b: 1455.3ms cold against 291.2ms warm, budget
+    1200ms). ``KokoroLocalTTS`` already warms its model this way; the stall
+    cache did not.
+
+    Never raises. A backend that cannot synthesize at startup — no key, no
+    daemon, no weights — logs ``stall_warm_failed`` with the provider's own
+    named reason and returns however many phrases did land. A cold cache is a
+    slow first turn; a startup that dies because TTS was not ready yet is a
+    dead product. Nothing here blocks the WS port: the caller schedules it as a
+    task, it never awaits the accept loop.
+    """
+    if not stall_warm_enabled():
+        log.info("stall_warm_disabled reason=PET_TALK_STALL_WARM=0 persona=%s", p.name)
+        return 0
+    phrases = [s for s in (p.stalls or []) if str(s).strip()]
+    if not phrases:
+        log.info("stall_warm_skipped reason=persona_no_stalls persona=%s", p.name)
+        return 0
+    warmed = 0
+    for phrase in phrases:
+        try:
+            await get_or_synth_stall(phrase, p, tts)
+            warmed += 1
+        except ProviderError as e:
+            log.info(
+                "stall_warm_failed persona=%s reason=%s detail=%s",
+                p.name,
+                e.reason,
+                e.detail,
+            )
+        except Exception as e:
+            swallowed("stall_warm_failed", e, persona=p.name)
+    log.info(
+        "stall_warm_done persona=%s warmed=%d of=%d cache_size=%d backend=%s",
+        p.name,
+        warmed,
+        len(phrases),
+        stall_cache_size(),
+        type(tts).__name__,
+    )
+    return warmed
 
 
 async def get_or_synth_stall(stall_text: str, p: Persona, tts: object) -> StallAudio:

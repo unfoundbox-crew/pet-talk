@@ -43,6 +43,7 @@ from .grounding import (
     hotkey_bin,
     repo_root,
 )
+from .logs import swallowed
 from .memory import Hippocampus
 from .persona import Persona, delete_persona, list_personas, load_persona, save_persona
 from .providers import ProviderError, make_llm, make_stt, make_tts, route_text
@@ -58,7 +59,7 @@ from .settings import (
 from .speak_queue import ResumePoint, SpeakQueue, SpokenSentence
 from .control import Control, check_deterministic_control
 from .persona_runtime import build_system_prompt, resolve_persona
-from .stall import get_or_synth_stall, stall_cache_key
+from .stall import get_or_synth_stall, stall_cache_key, warm_stall_cache
 from .speech import TurnResult, run_speech, speak_sentence
 from .turn import handle_turn, handle_turn_task
 from .voices import load_voices, parse_voices_minimal
@@ -94,6 +95,27 @@ async def _studio_auth_error(_request: Request, exc: StudioAuthError) -> JSONRes
 studio_token()
 app.include_router(routes_http.router)
 app.include_router(ws_module.router)
+
+
+@app.on_event("startup")
+async def _warm_on_startup() -> None:
+    """Pre-synthesize the default persona's stall phrases (lane 2).
+
+    Scheduled as a task and never awaited: the WS port must accept connections
+    immediately, and a slow or unavailable TTS backend must not hold the boot.
+    The cold first turn was the only thing breaching ``turn_worst_ms`` — 1455ms
+    cold against 291ms warm (measured 2026-09-12b). ``PET_TALK_STALL_WARM=0``
+    turns it off and says so in the log.
+    """
+    import asyncio as _asyncio
+
+    async def _warm() -> None:
+        try:
+            await warm_stall_cache(runtime.default_persona(), runtime.current().tts)
+        except Exception as e:  # a failed warm must never take the server down
+            swallowed("stall_warm_task_failed", e)
+
+    _asyncio.create_task(_warm(), name="stall-warm")
 
 # --------------------------------------------------- compatibility names ---
 # The live provider triple is published here because this is the documented

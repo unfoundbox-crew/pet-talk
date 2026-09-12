@@ -23,6 +23,7 @@ from ._shared import (
     REASONING_TOKEN_FLOOR,
     ProviderError,
     accepts_reasoning_effort,
+    concat_wavs,
     encode_multipart_formdata,
     estimate_word_times,
     finalize_think,
@@ -32,6 +33,7 @@ from ._shared import (
     pcm16_to_wav_bytes,
     pcm_duration_ms,
     redacted_repr,
+    shift_word_times,
     split_sentences,
     strip_closed_think_tags,
 )
@@ -65,9 +67,12 @@ from .tts import (
     KokoroLocalTTS,
     KokoroSpacePilotTTS,
     SmallestAITTS,
+    StubChunkedTTS,
     StubTTS,
     TTSProvider,
+    chunk_clauses,
     make_tts,
+    provider_voices,
 )
 from .vad import VAD, EnergyGateVAD
 
@@ -115,6 +120,11 @@ __all__ = [
     "StubTTS",
     "TTSProvider",
     "make_tts",
+    "concat_wavs",
+    "shift_word_times",
+    "chunk_clauses",
+    "provider_voices",
+    "StubChunkedTTS",
     "VAD",
     "EnergyGateVAD",
 ]
