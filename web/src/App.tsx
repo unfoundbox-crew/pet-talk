@@ -121,7 +121,9 @@ export default function App() {
   const [settings, setSettings] = useState<RuntimeSettings>({
     stt_provider: "stub",
     llm_provider: "stub",
-    llm_base_url: "http://100.99.50.84:8000/v1",
+    // No hardcoded fleet address — the real default comes from
+    // GET /settings (settings.llm_base_url) once it loads.
+    llm_base_url: "",
     llm_model: "claude-3-7-sonnet",
     tts_provider: "stub",
     kokoro_base_url: "http://127.0.0.1:8088",
@@ -132,6 +134,9 @@ export default function App() {
     llm: "StubLLM",
     tts: "StubTTS",
   });
+  // secrets_set[field] from GET/POST /settings: whether the server holds a
+  // live credential for that field. The server never returns the value.
+  const [secretsSet, setSecretsSet] = useState<Record<string, boolean>>({});
 
   // Telemetry Waterfall
   const [metrics, setMetrics] = useState<LatencyMetrics>({
@@ -617,6 +622,7 @@ export default function App() {
       .then((d) => {
         if (d && d.settings) setSettings(d.settings);
         if (d && d.active) setActiveProviders(d.active);
+        if (d && d.secrets_set) setSecretsSet(d.secrets_set);
       })
       .catch(() => {});
   }, [currentPersona]);
@@ -635,6 +641,7 @@ export default function App() {
       const data = await res.json();
       if (data.settings) setSettings(data.settings);
       if (data.active) setActiveProviders(data.active);
+      if (data.secrets_set) setSecretsSet(data.secrets_set);
     }
   };
 
@@ -1182,6 +1189,7 @@ export default function App() {
         onClose={() => setShowSettings(false)}
         settings={settings}
         activeProviders={activeProviders}
+        secretsSet={secretsSet}
         onApplySettings={handleApplySettings}
         t={t}
       />
