@@ -104,7 +104,7 @@ TTSProvider.synth(text: str, voice: str, speed: float) -> tuple[bytes, list[dict
 
 `pet-talk-cli [interactive|once|tui]` (`cli/client.py`), flags: `--hotkey`/`-1`, `--url`, `--persona`, `--vad`, `--silence`, `--threshold`, `--quiet`/`-q`.
 
-`pet-talk-hotkey` (`cli/hotkey/main.swift`, in flux): no-arg or `run` (foreground listener), `start`/`stop`/`status`, `kill`, `pause`/`resume`/`toggle`, `test-audio`, `test-hud`, `test-breadcrumbs`, `breadcrumb <b> <d>`, `test-paste [text]`, `config show`/`config set <k> <v>`, `--dump-hud-spec`, `--check-registration`/`--verify`, `--barge-benchmark`, `-h`/`--help`. **Note**: `server/grounding.py` shells out to `pet-talk-hotkey ax` for AX screen snapshots, but as read in this checkout `main.swift`'s command switch has no `"ax"` case — it falls to the `default` branch and starts the foreground listener instead of returning a JSON snapshot. Either the Swift lane has not landed `ax` yet or it moved elsewhere; verify against the live binary before relying on `PET_TALK_AX=1`.
+- 2026-09-12: `PET_TALK_AX=1` grounding is wired end to end in code (`server/grounding.py` calls `pet-talk-hotkey ax`, implemented in `cli/hotkey/main.swift`), but the binary has only been typechecked, not run on this machine, and it needs the Accessibility permission. Unverified live.
 
 ### Env vars (grepped from `os.environ.get`/`os.getenv` across `server/`)
 
