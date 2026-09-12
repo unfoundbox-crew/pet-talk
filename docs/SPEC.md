@@ -375,7 +375,80 @@ Source of truth: `qa/budgets.json`.
 | `llm_ms` | 800 |
 | `tts_ms` | 200 |
 
-### 9.1 MEASURED (2026-09-12d, quiet re-measure, load ~7)
+### 9.1 MEASURED (2026-09-12f, streaming-STT default decision, turn-level)
+
+**What this pass was for.** §9.2's `stall_sent` hook has since landed in
+`server/turn.py` (`handle_turn_task`/`handle_turn` take `stall_sent: bool =
+False`, guard is `if stall_text and not stall_sent:`). That was the one
+missing piece §9.2 named for a turn-level re-measure of the early-stall path,
+so this pass ran the real server (Kokoro + faster-whisper + the LiteLLM
+proxy) both ways, `PET_TALK_STT_STREAM=0` and `=1`, to decide the default.
+
+**Machine note.** The bounded 10-minute wait for 1-min load under 6 never
+succeeded — load swung from ~7 up to a **peak 1-min of 435** (six-plus other
+sessions building/running on this box) and was still ramping down when the
+wait timed out at 10.27. Measurements below were taken as load fell through
+the 6-14 range; every run's load is quoted next to its numbers, per
+"never soften a budget" — this is not the quiet machine either.
+
+**Turn-level, `APP_PORT=8089 python3 qa/latency.py`, N=5, x3 per mode, median
+kept by `stall_ms` p50:**
+
+| mode | run loads (1-min) | kept run load | `stall_ms` p50 | p95 | budget | result |
+|---|---|---|---|---|---|---|
+| `PET_TALK_STT_STREAM=0` | 8.80, 9.09, 8.98 (run 3 retried once after a `ws_send_disconnected` blip) | 9.09 | **223.1** | 367.0 | 400 | **PASS** |
+| `PET_TALK_STT_STREAM=1` | 12.82, 12.28, 11.69 (run 3 retried once, same reason) | 12.82 | **194.3** | 919.4 | 400 | **FAIL** (p95 only) |
+
+**The central finding: this harness cannot exercise the early-stall path at
+all, in either mode.** `qa/latency.py` and `qa/live_ws_turn.py` both hand the
+*entire* utterance to the server in one `user.stop` message — neither ever
+sends a `user.chunk` frame. `server/ws.py`'s `_stream_stop` only serves
+`user.stop` "from the turn's stream session, **if it has one**", and a stream
+session is only created by `_on_user_chunk` when a `user.chunk` frame
+arrives. With none sent, `_stream_stop` returns `False` every time and every
+turn falls through to the identical whole-utterance path — confirmed by
+`grep -c stream` on the `PET_TALK_STT_STREAM=1` server log (**0** matches)
+and by `server/turns.jsonl`: every turn in both passes reads `"path":
+"worker"`, never `"path": "stream"`. This is why the two modes' `stall_ms`
+numbers are statistically indistinguishable (223.1ms vs 194.3ms, well within
+this run-to-run noise band) — **the flag made no observable difference
+because the mechanism it gates was never invoked**, not because the early
+stall doesn't work (§9.2 already proved it does, component-level, with a
+harness that does send `user.chunk`).
+
+**`qa/live_ws_turn.py`** (also whole-utterance in one `user.stop`, same
+limitation): time-to-stall 180.2ms streaming=0, 196.5ms streaming=1, both
+PASS (budget 400) — barge ack 0.7-0.8ms both, both PASS.
+
+**`qa/test_real_engine_e2e.py` (`PET_TALK_REAL_ENGINE=1`): 3/3 pass, both
+modes.** Kokoro synthesized 278,444 bytes of valid RIFF both times;
+`/transcribe` read back *"Good morning. Donna Paulson here. Executive
+Secretary Mode is fully operational."* both times; a live `/ws` turn drove
+Donna to a playable WAV both times (280,844 bytes streaming=0, 228,044 bytes
+streaming=1 — text differed slightly turn to turn, as the LLM is not
+seeded, but both were coherent, on-topic answers).
+
+**Final-transcript comparison, same clip, streaming vs not** (N=3 each,
+`qa/fixtures/weather_turn.wav`, captured via the `transcript.user` frame):
+transcript text was **identical in all 6 turns** — `"What is the weather
+today?"` — zero word-error difference. This is expected given the finding
+above (both modes ran the identical whole-utterance decode) and is not
+evidence either way about the streaming path's accuracy cost; that question
+is still open per §9.2's finalize-seam note.
+
+**Decision (§9.2 follow-up): `PET_TALK_STT_STREAM` stays `0`.** Not because
+streaming failed a budget this pass — it was never actually driven — but
+because this pass cannot honestly claim to have proven it, and flipping a
+default on a measurement that didn't exercise the code path would be a fake
+green. The real gap is now named precisely: a turn-level harness that speaks
+`user.chunk` frames (pacing PCM the way `cli/client.py` does, the way
+`qa/test_stt_streaming.py` already does at component level) against the live
+Kokoro+faster-whisper+LiteLLM server is what's still missing before this
+default can be revisited. §9.2's component-level evidence (early-stall
+`stall_ms` 0.2-0.8ms p50 even at load 88) stands unchanged and is still the
+only real evidence the mechanism works.
+
+### 9.1-history: MEASURED (2026-09-12d, quiet re-measure, load ~7)
 
 **The 12c "quiet re-measure owed" caveat, followed up — only partially resolved.**
 `uptime` read 3.93 (1-min) before this pass started. By the time the turn-level
@@ -582,10 +655,18 @@ are printed by the test and not summarised away.
   against 362.5-541.8ms off, with fatter tails (up to 2136ms) from the in-flight
   wait. Streaming buys the STALL off the critical path; it does not make the
   ANSWER start sooner. Any claim that it does would be a fake green.
-* **`stall_ms` in 9.1 is not yet re-measured turn-level.** That needs a live
+* **`stall_ms` in 9.1 is not yet re-measured turn-level.** ~~That needs a live
   server pass with Kokoro and the proxy, on a machine at load ~7, and it needs
-  the one-line hook below. Turn-level `stall_ms` is **NOT MEASURED** for the
-  streaming path.
+  the one-line hook below.~~ **Follow-up 2026-09-12f (§9.1):** the hook landed
+  and a live-server pass ran both modes at load 9-13, but turn-level
+  `stall_ms` is **still NOT MEASURED** for the streaming path — one more gap
+  turned up: `qa/latency.py` and `qa/live_ws_turn.py` both hand the whole
+  utterance to one `user.stop` message and never send `user.chunk`, so
+  `_stream_stop` never gets a stream session to serve and every turn falls
+  through to the whole-utterance path regardless of the flag. A harness that
+  paces `user.chunk` frames against the live server (the way this file's own
+  `qa/test_stt_streaming.py` already does component-level) is what's still
+  needed.
 * **`STT_PROVIDER=whisperkit` is still NOT MEASURED.** `whisperkit-cli` is not
   on PATH and no CoreML model is on disk, so nothing has ever run on the Neural
   Engine here; the model plus CLI is far over the 200MB this lane was allowed to

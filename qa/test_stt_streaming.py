@@ -388,6 +388,59 @@ class TestSentenceSeqNeverCollides(unittest.TestCase):
                          "expected exactly two answer paths, both at first_seq=1")
 
 
+class TestBargeSilencesTheEarlyStall(unittest.TestCase):
+    """A barge during the filler's synth must swallow the filler.
+
+    ``emit_early_stall`` synthesizes off the loop, which takes real time on a
+    real tyre. A person who interrupts inside that window used to be answered
+    by the filler anyway: the sends ran unconditionally once the synth
+    returned, because nothing asked whether the turn still existed.
+    """
+
+    def test_a_barge_mid_synth_sends_no_stall_frames(self) -> None:
+        async def go():
+            barged = {"flag": False}
+            pset = ProviderSet(stt=SegmentSTT(), llm=RouterLLM(), tts=StubTTS(delay_s=0.25))
+            runtime.install(pset)
+            w = fake_ws()
+
+            async def barge_soon():
+                await asyncio.sleep(0.05)  # inside the synth, before the sends
+                barged["flag"] = True
+
+            flipper = asyncio.create_task(barge_soon())
+            sent = await stt_stream.emit_early_stall(
+                w, "t-barge-stall", "did the provider tests pass", TEST_PERSONA,
+                pset, is_barged=lambda: barged["flag"],
+            )
+            await flipper
+
+            self.assertFalse(sent, "emit_early_stall claimed a stall it must not send")
+            self.assertEqual(
+                [t for t in types_of(w) if t in ("agent.stall", "agent.sentence")],
+                [],
+                f"the filler spoke after the barge: {types_of(w)}",
+            )
+
+        asyncio.run(go())
+
+    def test_no_barge_still_sends_the_stall(self) -> None:
+        """The guard must not be a silencer: unbarged, the filler still goes."""
+
+        async def go():
+            pset = ProviderSet(stt=SegmentSTT(), llm=RouterLLM(), tts=StubTTS())
+            runtime.install(pset)
+            w = fake_ws()
+            sent = await stt_stream.emit_early_stall(
+                w, "t-ok", "did the provider tests pass", TEST_PERSONA,
+                pset, is_barged=lambda: False,
+            )
+            self.assertTrue(sent)
+            self.assertIn("agent.stall", types_of(w))
+
+        asyncio.run(go())
+
+
 # ------------------------------------------------------------------ barge ---
 
 

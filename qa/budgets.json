@@ -260,6 +260,42 @@
       "turn_level_stall_ms": "NOT MEASURED for the streaming path - needs a live server with Kokoro + the LiteLLM proxy at load ~7 AND the server/turn.py stall_sent hook. The 12d turn-level 642.2ms FAIL above is still the standing turn-level number.",
       "whisperkit": "NOT MEASURED. whisperkit-cli is not on PATH and no CoreML model is on disk; the CLI plus model is far over the 200MB this lane was allowed to download. The belief that the Neural Engine must be the fastest tyre is still a belief. Flagged supports_streaming=false regardless: it spawns a process and reloads its model per call.",
       "deepgram_streaming": "OUT OF SCOPE (2026-09-12). Deepgram has a real streaming socket that belongs behind supports_streaming instead of repeated POSTs; this lane fixed the local default first."
+    },
+    "stt_streaming_turn_level": {
+      "date": "2026-09-12f",
+      "what": "Turn-level attempt to re-measure the streaming-STT early-stall path now that the server/turn.py stall_sent hook (named in measured.stt_streaming.stall_ms.streaming_on_early_stall.note) has landed. APPENDED, does not touch measured.stall_ms (12d) or measured.stt_streaming (12e).",
+      "machine": "Bounded 10-min wait for 1-min load < 6 timed out at 10.27, after the load peaked at 435 (six-plus other sessions on this box). Runs below were taken as load fell through 6-14; see per-run loads.",
+      "method": "APP_PORT=8089 python3 qa/latency.py x3 per mode (N=5), median of the three kept by stall_ms p50, real server (kokoro-local + faster-whisper + LiteLLM proxy), PET_TALK_STT_STREAM=0 then =1.",
+      "stall_ms": {
+        "stream_0": {
+          "p50": 223.1,
+          "p95": 367.0,
+          "budget": 400,
+          "result": "PASS",
+          "run_loads": [8.80, 9.09, 8.98],
+          "kept_run_load": 9.09
+        },
+        "stream_1": {
+          "p50": 194.3,
+          "p95": 919.4,
+          "budget": 400,
+          "result": "FAIL (p95 only)",
+          "run_loads": [12.82, 12.28, 11.69],
+          "kept_run_load": 12.82
+        }
+      },
+      "finding": "stall_ms is statistically indistinguishable between modes (223.1ms vs 194.3ms) because this harness never exercises the streaming code path at all: qa/latency.py and qa/live_ws_turn.py both send the whole utterance in one user.stop message and never send a user.chunk frame, so server/ws.py's _stream_stop never has a stream session to serve and every turn falls through to the identical whole-utterance path regardless of PET_TALK_STT_STREAM. Confirmed: zero 'stream' log lines with PET_TALK_STT_STREAM=1, and every turn in server/turns.jsonl for both passes reads path=worker, never path=stream.",
+      "live_ws_turn_time_to_stall_ms": {"stream_0": 180.2, "stream_1": 196.5, "budget": 400, "result": "PASS both, same-harness caveat above applies"},
+      "real_engine_e2e": "3/3 pass both modes. Kokoro synthesized 278,444 bytes valid RIFF both times; /transcribe read back the same fixed clip identically both times.",
+      "final_transcript_comparison": {
+        "clip": "qa/fixtures/weather_turn.wav",
+        "n_per_mode": 3,
+        "transcript_stream_0": "What is the weather today?",
+        "transcript_stream_1": "What is the weather today?",
+        "word_error_count": 0,
+        "note": "Identical in all 6 captured turns, as expected given the finding above - both modes ran the identical decode. Not evidence either way about the streaming path's own accuracy, which is still open per measured.stt_streaming.final_transcript_ms."
+      },
+      "decision": "PET_TALK_STT_STREAM stays 0. Not because streaming failed a budget this pass - it was never actually driven - but because flipping the default on a measurement that didn't exercise the code path would be a fake green. What's still needed: a turn-level harness that paces user.chunk frames against the live server, the way qa/test_stt_streaming.py already does component-level."
     }
   }
 }

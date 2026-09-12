@@ -433,6 +433,7 @@ async def emit_early_stall(
     partial: str,
     persona: Persona,
     providers: Any,
+    is_barged: Optional[Callable[[], bool]] = None,
 ) -> bool:
     """``agent.stall`` (with its audio) from the partial, before the final
     transcript exists. Returns whether the stall actually went out.
@@ -445,6 +446,24 @@ async def emit_early_stall(
     client's read-ahead buffer, which keys on seq.
     """
     from .stall import get_or_synth_stall
+
+    def abandoned() -> bool:
+        """Has the person interrupted since we last looked?
+
+        Checked before EVERY send, not once at the top: the synth below takes
+        real time on a real tyre, and a barge inside that window used to be
+        answered with the filler anyway.
+        """
+        if is_barged is None or not is_barged():
+            return False
+        log.info(
+            "stt_stream_early_stall_abandoned turn_id=%s reason=barged_during_stall",
+            turn_id,
+        )
+        return True
+
+    if abandoned():
+        return False
 
     partial = (partial or "").strip()
     if not partial:
@@ -465,14 +484,18 @@ async def emit_early_stall(
         stall_audio = await get_or_synth_stall(stall_text, persona, providers.tts)
     except ProviderError as e:
         swallowed("stall_synth_failed", None, turn_id=turn_id, reason=e.reason)
+    # The synth above is where a barge lands. Nothing below it is worth sending
+    # to somebody who has already started talking again.
+    if abandoned():
+        return False
     if not await safe_send_json(
         ws, frame("agent.stall", turn_id, phrase_id="stall-0", text=stall_text)
     ):
         return False
-    if not await safe_send_json(ws, frame("state.thinking", turn_id)):
+    if abandoned() or not await safe_send_json(ws, frame("state.thinking", turn_id)):
         return True
     if stall_audio is not None:
-        if not await safe_send_json(ws, frame("state.speaking", turn_id)):
+        if abandoned() or not await safe_send_json(ws, frame("state.speaking", turn_id)):
             return True
         await safe_send_json(
             ws,
@@ -519,7 +542,8 @@ async def run_streaming_stop(
         # Before finalizing, and therefore before the transcript exists. This
         # is the ordering the whole lane is about.
         stall_sent = await emit_early_stall(
-            ws, turn_id, session.latest_partial(), persona, providers
+            ws, turn_id, session.latest_partial(), persona, providers,
+            is_barged=is_barged,
         )
 
     if is_barged is not None and is_barged():
