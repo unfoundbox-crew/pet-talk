@@ -58,6 +58,7 @@ SUITES=(
   "no-vendor-lock-in capability matrix (STT/LLM/TTS/VAD/eyes)|qa/test_capability_matrix.py|unit|"
   "chunked TTS wire path & warm stall cache|qa/test_tts_chunking.py|unit|"
   "turn lifecycle|qa/test_turn_lifecycle.py|unit|OPTIONAL"
+  "companion state bridge (orbs, WS /events, RMS level)|qa/test_companion_bridge.py|unit|"
   "studio token + egress allowlist (exfiltration refused)|qa/test_security.py|unit|OPTIONAL"
   "zero-vision eyes lane (attach, OCR, named errors)|qa/test_eyes.py|unit|"
   "hand-over chord frame (user.handover)|qa/test_handover.py|unit|"

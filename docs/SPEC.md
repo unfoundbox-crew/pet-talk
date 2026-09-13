@@ -57,6 +57,7 @@ Full-duplex voice loop: the user can interrupt any time, the agent stalls natura
 | `server/grounding.py` | Repo-head lines + AX screen snapshot, assembled into a capped system-prompt block. |
 | `server/turn.py` | One turn end to end: route → control/stall/direct → speak → `agent.done`. |
 | `server/ws.py` | The `/ws` endpoint: one reader loop, `Session` per socket, per-turn cancellable tasks, barge. |
+| `server/companion/` | Companion state bridge for the orb skin (§4.5): `audio_level.py` (bounded-cost RMS/peak of int16 PCM), `packets.py` (the `companion_state` packet + frame→state mapping), `broadcast.py` (non-blocking fan-out, per-subscriber bounded queues), `bridge.py` (the state machine), `events.py` (WS `/events`). `frames.safe_send_json` feeds it every outgoing frame. |
 | `server/routes_http.py` | HTTP routes: `/health`, `/voices`, `/personas`, `/settings`, `/ledger`, `/transcribe`, `/audio/{id}`. |
 | `server/eyes.py` | Zero-vision attach lane: OCR via local `zrv` CLI, `handle_attach`. |
 | `server/voices.py` | `personas/voices.yaml` reader. |
@@ -264,6 +265,36 @@ with no hardware; adding `--fake-server <ws-url>` runs one whole turn against
 `NATIVE-METRICS {json}` line. `qa/test_hotkey.py` asserts on the fixture's own
 record of what arrived on the wire. The one real-microphone check lives behind
 `PET_TALK_REAL_MIC=1`, records 1 s, and plays nothing.
+
+## 4.5 Companion state (WS `/events`)
+
+The 33-orb companion skin (mvec-browser) reads one packet type on WS
+`/events`, same studio token as `/ws` (header or `?token=`), read-only:
+
+```json
+{"type": "companion_state", "state": "idle" | "thinking" | "speaking",
+ "audio_level": 0.0, "orb_id": "orb-33", "timestamp": 1726270000.0,
+ "turn_id": "t1-abc123"}
+```
+
+The bridge derives it from the §4.2 frames at the one choke point every frame
+passes (`frames.safe_send_json`), so it cannot disagree with what `/ws` said:
+
+| §4.2 frame | state | `audio_level` |
+|---|---|---|
+| `state.idle`, `state.listening`, `agent.done` | `idle` | 0 |
+| `transcript.user` (final), `state.thinking` | `thinking` | 0 |
+| `state.speaking` | `speaking` | kept from the last sentence |
+| `agent.sentence`, `agent.chunk` | `speaking` | RMS of that frame's audio, 0..1 (full-scale square = 1, sine ≈ 0.71) |
+
+Partial transcripts, stalls, errors and receipts change nothing. Identical
+consecutive packets are not re-sent. A subscriber receives the current state
+on connect. `orb_id` is `PET_TALK_ORB_ID` (default `orb-33`).
+
+Cost on the TTS path: the RMS reads at most 4096 strided samples per frame
+(constant, ~2% estimate), and publishing is a queue drop — a slow subscriber's
+own queue drops its oldest packet; it never delays `/ws`. Proof:
+`qa/test_companion_bridge.py`.
 
 ## 5. Provider contract
 

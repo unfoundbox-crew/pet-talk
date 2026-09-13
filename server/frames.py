@@ -15,6 +15,7 @@ from starlette.websockets import WebSocketState
 
 from .logs import log, redact_home, swallowed
 from .providers import ProviderError
+from .companion import bridge as companion_bridge
 
 _turn_counter = itertools.count(1)
 
@@ -70,6 +71,10 @@ async def safe_send_json(ws: WebSocket, payload: dict[str, Any]) -> bool:
                 getattr(ws.client_state, "name", ws.client_state),
             )
             return False
+        # The companion bridge reads every frame here, the one choke point,
+        # so the orb state cannot drift from what the client was told. Sync,
+        # bounded, and it queues rather than sends: no wait on this path.
+        companion_bridge.observe_frame(payload)
         await ws.send_json(payload)
         return True
     except WebSocketDisconnect as e:
