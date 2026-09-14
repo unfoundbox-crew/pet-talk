@@ -27,7 +27,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from . import routes_http, runtime, ws as ws_module
+from . import companion, routes_http, runtime, ws as ws_module
 from .auth import StudioAuthError, studio_token
 from .audio_store import (
     AUDIO_STORE,
@@ -97,6 +97,7 @@ async def _studio_auth_error(_request: Request, exc: StudioAuthError) -> JSONRes
 studio_token()
 app.include_router(routes_http.router)
 app.include_router(ws_module.router)
+app.include_router(companion.router)
 
 
 #: Strong references to the startup warm tasks (see below).
